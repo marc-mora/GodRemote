@@ -121,9 +121,7 @@ pub fn inspect(path: &Path) -> Option<KeyInfo> {
                     .map(|p| p.comment().to_string())
                     .unwrap_or_default(),
                 encrypted: true,
-                public_openssh: public
-                    .and_then(|p| p.to_openssh().ok())
-                    .unwrap_or_default(),
+                public_openssh: public.and_then(|p| p.to_openssh().ok()).unwrap_or_default(),
             })
         }
     }

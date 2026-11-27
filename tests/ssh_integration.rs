@@ -324,9 +324,7 @@ fn ssh_shell_and_sftp_end_to_end() {
         .cmd
         .send(SftpCmd::Mkdir(format!("{work_remote}/nueva")))
         .unwrap();
-    wait_sftp(&client, |ev| {
-        matches!(ev, SftpEvent::Done(_)).then_some(())
-    });
+    wait_sftp(&client, |ev| matches!(ev, SftpEvent::Done(_)).then_some(()));
     client
         .cmd
         .send(SftpCmd::Rename {
@@ -334,9 +332,7 @@ fn ssh_shell_and_sftp_end_to_end() {
             to: format!("{work_remote}/renombrada"),
         })
         .unwrap();
-    wait_sftp(&client, |ev| {
-        matches!(ev, SftpEvent::Done(_)).then_some(())
-    });
+    wait_sftp(&client, |ev| matches!(ev, SftpEvent::Done(_)).then_some(()));
     assert!(work.join("renombrada").is_dir());
 
     // Descarga recursiva.
@@ -374,9 +370,7 @@ fn ssh_shell_and_sftp_end_to_end() {
             is_dir: true,
         })
         .unwrap();
-    wait_sftp(&client, |ev| {
-        matches!(ev, SftpEvent::Done(_)).then_some(())
-    });
+    wait_sftp(&client, |ev| matches!(ev, SftpEvent::Done(_)).then_some(()));
     assert!(!work.join("subido").exists());
     assert_eq!(std::fs::read_to_string(&outside).unwrap(), "intacto");
     assert!(local_dst.join("grande.bin").exists());

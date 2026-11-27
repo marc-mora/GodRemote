@@ -203,7 +203,12 @@ pub async fn connect(
         tokio::net::TcpStream::connect((host.as_str(), session.port)),
     )
     .await
-    .map_err(|_| anyhow!("Tiempo de espera agotado conectando a {host}:{}", session.port))?
+    .map_err(|_| {
+        anyhow!(
+            "Tiempo de espera agotado conectando a {host}:{}",
+            session.port
+        )
+    })?
     .with_context(|| format!("No se pudo conectar a {host}:{}", session.port))?;
     let _ = stream.set_nodelay(true);
 
@@ -224,8 +229,16 @@ pub async fn connect(
     let mut to_save = vec![];
     match session.auth {
         AuthMethod::Password => {
-            auth_password(&mut handle, session, &user, creds, prompter, status, &mut to_save)
-                .await?
+            auth_password(
+                &mut handle,
+                session,
+                &user,
+                creds,
+                prompter,
+                status,
+                &mut to_save,
+            )
+            .await?
         }
         AuthMethod::Key => {
             auth_key(&mut handle, session, &user, creds, prompter, &mut to_save).await?
@@ -259,7 +272,10 @@ async fn auth_password(
                 } else {
                     format!("Contraseña incorrecta. Contraseña para {target}")
                 };
-                match prompter.secret("Autenticación SSH", &msg, false, true).await {
+                match prompter
+                    .secret("Autenticación SSH", &msg, false, true)
+                    .await
+                {
                     Some(a) => (a.value, a.save),
                     None => bail!("Autenticación cancelada"),
                 }
@@ -545,14 +561,14 @@ async fn run_shell(
     let _ = channel.close().await;
     // Si SFTP comparte la conexión, sigue viva; si no, se cierra aquí.
     if Arc::strong_count(&handle) == 1 {
-        let _ = handle
-            .disconnect(Disconnect::ByApplication, "", "es")
-            .await;
+        let _ = handle.disconnect(Disconnect::ByApplication, "", "es").await;
     }
     match exit_status {
         Some(0) | None => Ok(()),
         Some(code) => {
-            emit(TermEvent::Status(format!("La shell terminó con código {code}")));
+            emit(TermEvent::Status(format!(
+                "La shell terminó con código {code}"
+            )));
             Ok(())
         }
     }

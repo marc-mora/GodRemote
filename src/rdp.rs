@@ -67,10 +67,20 @@ pub fn freerdp_args(session: &Session, password: Option<&str>) -> Vec<String> {
     if session.rdp.fullscreen {
         args.push("/f".into());
     } else {
-        args.push(format!("/size:{}x{}", session.rdp.width, session.rdp.height));
+        args.push(format!(
+            "/size:{}x{}",
+            session.rdp.width, session.rdp.height
+        ));
         args.push("/dynamic-resolution".into());
     }
-    args.push(if session.rdp.clipboard { "+clipboard" } else { "-clipboard" }.into());
+    args.push(
+        if session.rdp.clipboard {
+            "+clipboard"
+        } else {
+            "-clipboard"
+        }
+        .into(),
+    );
     // Confiar en el certificado la primera vez y avisar si cambia.
     args.push("/cert:tofu".into());
     args.push(format!("/t:{} - GodRemote", session.display_name()));
@@ -108,10 +118,19 @@ pub fn rdp_file(session: &Session) -> String {
     out
 }
 
-/// Lanza el cliente RDP. Devuelve el proceso hijo.
-pub fn launch(session: &Session, password: Option<&str>) -> Result<Child> {
+/// Lanza el cliente RDP. Devuelve el proceso hijo y, si existe, el fichero
+/// donde se guarda su salida (para poder explicar un fallo).
+pub fn launch(session: &Session, password: Option<&str>) -> Result<(Child, Option<PathBuf>)> {
+    let dir = crate::paths::data_dir().join("rdp");
+    std::fs::create_dir_all(&dir)?;
     if cfg!(windows) {
-        return launch_mstsc(session);
+        let file = dir.join(format!("{}.rdp", session.id));
+        std::fs::write(&file, rdp_file(session))?;
+        let child = Command::new("mstsc.exe")
+            .arg(&file)
+            .spawn()
+            .context("No se pudo ejecutar mstsc.exe")?;
+        return Ok((child, None));
     }
     let Some((program, v3)) = find_freerdp() else {
         bail!(
@@ -121,10 +140,17 @@ pub fn launch(session: &Session, password: Option<&str>) -> Result<Child> {
         );
     };
     let args = freerdp_args(session, password);
+    // Un salto de línea rompería el formato de un argumento por línea.
+    if args.iter().any(|a| a.contains(['\n', '\r'])) {
+        bail!("Los datos de la sesión contienen saltos de línea");
+    }
+    let log_path = dir.join(format!("{}.log", session.id));
+    let log = std::fs::File::create(&log_path)?;
     let mut cmd = Command::new(&program);
-    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
+    cmd.stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log));
 
-    if v3 {
+    let child = if v3 {
         // FreeRDP 3: los argumentos (incluida la contraseña) viajan por stdin
         // y no quedan visibles en la lista de procesos.
         use std::io::Write;
@@ -135,35 +161,20 @@ pub fn launch(session: &Session, password: Option<&str>) -> Result<Child> {
         if let Some(mut stdin) = child.stdin.take() {
             let mut payload = String::new();
             for a in &args {
-                // Un salto de línea rompería el formato de un argumento por línea.
-                if a.contains(['\n', '\r']) {
-                    let _ = child.kill();
-                    bail!("Los datos de la sesión contienen saltos de línea");
-                }
                 payload.push_str(a);
                 payload.push('\n');
             }
             stdin.write_all(payload.as_bytes())?;
         }
-        Ok(child)
+        child
     } else {
         // FreeRDP 2 no admite /args-from: la contraseña va en la línea de
         // órdenes (visible para otros usuarios locales mientras dure).
         cmd.args(&args).stdin(Stdio::null());
         cmd.spawn()
-            .with_context(|| format!("No se pudo ejecutar {}", program.display()))
-    }
-}
-
-fn launch_mstsc(session: &Session) -> Result<Child> {
-    let dir = crate::paths::data_dir().join("rdp");
-    std::fs::create_dir_all(&dir)?;
-    let file = dir.join(format!("{}.rdp", session.id));
-    std::fs::write(&file, rdp_file(session))?;
-    Command::new("mstsc.exe")
-        .arg(&file)
-        .spawn()
-        .context("No se pudo ejecutar mstsc.exe")
+            .with_context(|| format!("No se pudo ejecutar {}", program.display()))?
+    };
+    Ok((child, Some(log_path)))
 }
 
 #[cfg(test)]

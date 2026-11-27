@@ -82,7 +82,11 @@ pub fn spawn_local_shell(waker: Waker, cols: u16, rows: u16) -> Result<TermBacke
         while let Some(cmd) = cmd_rx.blocking_recv() {
             match cmd {
                 TermCmd::Input(data) => {
-                    if writer.write_all(&data).and_then(|_| writer.flush()).is_err() {
+                    if writer
+                        .write_all(&data)
+                        .and_then(|_| writer.flush())
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -236,7 +240,11 @@ pub fn key_bytes(key: Key, mods: egui::Modifiers, app_cursor: bool) -> Option<Ve
                     return Some(vec![lower & 0x1f]);
                 }
                 if mods.alt && !mods.ctrl {
-                    let c = if mods.shift { b[0].to_ascii_uppercase() } else { lower };
+                    let c = if mods.shift {
+                        b[0].to_ascii_uppercase()
+                    } else {
+                        lower
+                    };
                     return Some(vec![0x1b, c]);
                 }
             }
@@ -397,8 +405,12 @@ impl TerminalView {
 
         let origin = rect.min + Vec2::splat(pad);
         let to_cell = |pos: Pos2| -> (u16, u16) {
-            let col = ((pos.x - origin.x) / cell_w).floor().clamp(0.0, (cols - 1) as f32) as u16;
-            let row = ((pos.y - origin.y) / cell_h).floor().clamp(0.0, (rows - 1) as f32) as u16;
+            let col = ((pos.x - origin.x) / cell_w)
+                .floor()
+                .clamp(0.0, (cols - 1) as f32) as u16;
+            let row = ((pos.y - origin.y) / cell_h)
+                .floor()
+                .clamp(0.0, (rows - 1) as f32) as u16;
             (row, col)
         };
 
@@ -484,7 +496,9 @@ impl TerminalView {
                     } => {
                         if modifiers.shift && key == Key::PageUp {
                             let cur = self.parser.screen().scrollback();
-                            self.parser.screen_mut().set_scrollback(cur + rows as usize / 2);
+                            self.parser
+                                .screen_mut()
+                                .set_scrollback(cur + rows as usize / 2);
                         } else if modifiers.shift && key == Key::PageDown {
                             let cur = self.parser.screen().scrollback();
                             self.parser
@@ -658,7 +672,11 @@ impl TerminalView {
                 Vec2::new(cell_w, cell_h),
             );
             if has_focus {
-                painter.rect_filled(cursor, 0.0, Color32::from_rgba_unmultiplied(220, 220, 220, 140));
+                painter.rect_filled(
+                    cursor,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(220, 220, 220, 140),
+                );
             } else {
                 painter.rect_stroke(
                     cursor,
@@ -703,8 +721,14 @@ mod tests {
             key_bytes(Key::ArrowRight, egui::Modifiers::CTRL, false).unwrap(),
             b"\x1b[1;5C"
         );
-        assert_eq!(key_bytes(Key::D, egui::Modifiers::CTRL, false).unwrap(), [0x04]);
-        assert_eq!(key_bytes(Key::B, egui::Modifiers::ALT, false).unwrap(), b"\x1bb");
+        assert_eq!(
+            key_bytes(Key::D, egui::Modifiers::CTRL, false).unwrap(),
+            [0x04]
+        );
+        assert_eq!(
+            key_bytes(Key::B, egui::Modifiers::ALT, false).unwrap(),
+            b"\x1bb"
+        );
         assert_eq!(key_bytes(Key::Delete, none, false).unwrap(), b"\x1b[3~");
         assert!(key_bytes(Key::A, none, false).is_none());
     }
@@ -733,7 +757,11 @@ mod tests {
             if view.contents().contains("god42remote") {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "sin salida: {}", view.contents());
+            assert!(
+                std::time::Instant::now() < deadline,
+                "sin salida: {}",
+                view.contents()
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }

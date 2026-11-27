@@ -27,7 +27,10 @@ pub struct RemoteEntry {
 
 pub enum SftpSource {
     /// Abrir una conexión nueva.
-    Connect { session: Box<Session>, creds: Credentials },
+    Connect {
+        session: Box<Session>,
+        creds: Credentials,
+    },
     /// Reutilizar una conexión SSH ya autenticada (p. ej. la del terminal).
     Existing(SshHandle),
 }
@@ -35,22 +38,49 @@ pub enum SftpSource {
 pub enum SftpCmd {
     List(String),
     Mkdir(String),
-    Remove { path: String, is_dir: bool },
-    Rename { from: String, to: String },
-    Download { id: u64, remote: String, local: PathBuf },
-    Upload { id: u64, local: PathBuf, remote: String },
+    Remove {
+        path: String,
+        is_dir: bool,
+    },
+    Rename {
+        from: String,
+        to: String,
+    },
+    Download {
+        id: u64,
+        remote: String,
+        local: PathBuf,
+    },
+    Upload {
+        id: u64,
+        local: PathBuf,
+        remote: String,
+    },
     Cancel(u64),
 }
 
 pub enum SftpEvent {
     Status(String),
     /// Sesión SFTP lista; `home` es el directorio inicial.
-    Ready { home: String },
-    Listing { path: String, entries: Vec<RemoteEntry> },
+    Ready {
+        home: String,
+    },
+    Listing {
+        path: String,
+        entries: Vec<RemoteEntry>,
+    },
     /// Una operación terminó bien (conviene refrescar el listado).
     Done(String),
-    Progress { id: u64, done: u64, total: u64, current: String },
-    TransferFinished { id: u64, error: Option<String> },
+    Progress {
+        id: u64,
+        done: u64,
+        total: u64,
+        current: String,
+    },
+    TransferFinished {
+        id: u64,
+        error: Option<String>,
+    },
     Error(String),
     SaveSecrets(Vec<(String, String)>),
     Closed(Option<String>),
@@ -80,8 +110,14 @@ pub fn parent_remote(path: &str) -> String {
 }
 
 /// `true` si el nombre es seguro como componente único de una ruta local.
-fn safe_component(name: &str) -> bool {
-    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
+/// Los nombres llegan del servidor: uno malicioso no debe poder hacer que
+/// se escriba fuera de la carpeta de destino.
+pub fn safe_component(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\0'])
+        && !(cfg!(windows) && name.contains(['\\', ':']))
 }
 
 type Emit = Arc<dyn Fn(SftpEvent) + Send + Sync>;
@@ -165,15 +201,15 @@ async fn run(
                 };
                 match res {
                     Ok(()) => emit(SftpEvent::Done(format!("Eliminado: {path}"))),
-                    Err(e) => emit(SftpEvent::Error(format!("No se pudo eliminar {path}: {e:#}"))),
+                    Err(e) => emit(SftpEvent::Error(format!(
+                        "No se pudo eliminar {path}: {e:#}"
+                    ))),
                 }
             }
-            SftpCmd::Rename { from, to } => {
-                match sftp.rename(from.as_str(), to.as_str()).await {
-                    Ok(()) => emit(SftpEvent::Done(format!("Renombrado a {to}"))),
-                    Err(e) => emit(SftpEvent::Error(format!("No se pudo renombrar: {e}"))),
-                }
-            }
+            SftpCmd::Rename { from, to } => match sftp.rename(from.as_str(), to.as_str()).await {
+                Ok(()) => emit(SftpEvent::Done(format!("Renombrado a {to}"))),
+                Err(e) => emit(SftpEvent::Error(format!("No se pudo renombrar: {e}"))),
+            },
             SftpCmd::Cancel(id) => {
                 if let Some(flag) = cancels.lock().unwrap().get(&id) {
                     flag.store(true, Ordering::Relaxed);
@@ -216,9 +252,7 @@ async fn run(
     }
     let _ = sftp.close().await;
     if owned {
-        let _ = handle
-            .disconnect(Disconnect::ByApplication, "", "es")
-            .await;
+        let _ = handle.disconnect(Disconnect::ByApplication, "", "es").await;
     }
     Ok(())
 }
@@ -228,7 +262,8 @@ async fn list(sftp: &SftpSession, path: &str) -> Result<(String, Vec<RemoteEntry
     let mut entries = vec![];
     for entry in sftp.read_dir(canonical.as_str()).await? {
         let name = entry.file_name().to_string();
-        if name == "." || name == ".." {
+        // Se descartan nombres imposibles o peligrosos ("..", con "/"…).
+        if !safe_component(&name) {
             continue;
         }
         let meta = entry.metadata();
@@ -291,11 +326,7 @@ struct Transfer {
 }
 
 impl Transfer {
-    fn new(
-        id: u64,
-        cancels: &Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
-        emit: &Emit,
-    ) -> Self {
+    fn new(id: u64, cancels: &Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>, emit: &Emit) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         cancels.lock().unwrap().insert(id, cancel.clone());
         Self {
@@ -466,7 +497,9 @@ mod tests {
         assert!(safe_component("fichero.txt"));
         assert!(!safe_component(".."));
         assert!(!safe_component("a/b"));
-        assert!(!safe_component("..\\x"));
+        assert!(!safe_component("."));
+        assert!(!safe_component("/etc/passwd"));
+        assert_eq!(safe_component("..\\x"), !cfg!(windows));
         assert!(!safe_component(""));
     }
 }

@@ -32,9 +32,9 @@ impl Protocol {
 
     pub fn icon(self) -> &'static str {
         match self {
-            Protocol::Ssh => "🖥",
+            Protocol::Ssh => "💻",
             Protocol::Sftp => "📂",
-            Protocol::Rdp => "🪟",
+            Protocol::Rdp => "🖥",
         }
     }
 }
@@ -215,7 +215,7 @@ impl Tree {
 
     /// Hijos de la carpeta `parent` (o la raíz si es `None`).
     fn children_mut(&mut self, parent: Option<Uuid>) -> Option<&mut Vec<Node>> {
-        fn find(nodes: &mut Vec<Node>, id: Uuid) -> Option<&mut Vec<Node>> {
+        fn find(nodes: &mut [Node], id: Uuid) -> Option<&mut Vec<Node>> {
             for n in nodes.iter_mut() {
                 if let Node::Folder(f) = n {
                     if f.id == id {
@@ -360,6 +360,24 @@ impl Tree {
         }
     }
 
+    /// Carpeta que contiene el nodo (`None` si está en la raíz o no existe).
+    pub fn parent_of(&self, id: Uuid) -> Option<Uuid> {
+        fn go(nodes: &[Node], id: Uuid, parent: Option<Uuid>) -> Option<Option<Uuid>> {
+            for n in nodes {
+                if n.id() == id {
+                    return Some(parent);
+                }
+                if let Node::Folder(f) = n
+                    && let Some(found) = go(&f.children, id, Some(f.id))
+                {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        go(&self.nodes, id, None).flatten()
+    }
+
     /// Todos los ids de sesión contenidos en un nodo (recursivo).
     pub fn session_ids(node: &Node) -> Vec<Uuid> {
         match node {
@@ -418,6 +436,8 @@ mod tests {
         assert_eq!(tree, loaded);
         assert_eq!(loaded.session(sid).unwrap().name, "web-01");
         assert!(loaded.is_inside(prod, sid));
+        assert_eq!(loaded.parent_of(sid), Some(web));
+        assert_eq!(loaded.parent_of(prod), None);
         assert_eq!(loaded.folder_paths()[1].1, "Producción / Web");
     }
 

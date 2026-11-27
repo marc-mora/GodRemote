@@ -33,9 +33,7 @@ impl russh::server::Handler for TestServer {
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
         if !self.allow_password {
             return Ok(Auth::Reject {
-                proceed_with_methods: Some(MethodSet::from(
-                    &[MethodKind::KeyboardInteractive][..],
-                )),
+                proceed_with_methods: Some(MethodSet::from(&[MethodKind::KeyboardInteractive][..])),
                 partial_success: false,
             });
         }
@@ -158,7 +156,10 @@ async fn password_and_keyboard_interactive() {
         .await
         .err()
         .expect("debe fallar");
-    assert!(format!("{err:#}").contains("contraseña incorrecta"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("contraseña incorrecta"),
+        "{err:#}"
+    );
     assert_eq!(a.secrets_asked(), 3);
 
     // Cancelar el diálogo aborta la conexión.
