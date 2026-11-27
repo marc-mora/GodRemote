@@ -20,6 +20,10 @@ use godremote::ssh::{self, Credentials, Endpoint};
 use godremote::terminal::{TermBackend, TermCmd, TermEvent};
 use godremote::xhost::{self, XHost};
 
+/// Marca que deja en la salida el aviso de que la shell ya existe: lo que
+/// se teclee antes de ese momento se descarta.
+const SHELL_READY: &str = "[shell lista]\n";
+
 /// Lee de la shell hasta que la salida contenga `needle`.
 fn wait_output(backend: &TermBackend, output: &mut String, needle: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -31,6 +35,7 @@ fn wait_output(backend: &TermBackend, output: &mut String, needle: &str) {
             Ok(TermEvent::Data(d)) => output.push_str(&String::from_utf8_lossy(&d)),
             Ok(TermEvent::Status(s)) => output.push_str(&format!("[{s}]\n")),
             Ok(TermEvent::Closed(e)) => panic!("sesión cerrada: {e:?}\n{output}"),
+            Ok(TermEvent::Connected(_)) => output.push_str(SHELL_READY),
             Ok(_) => {}
             Err(_) => panic!("no apareció {needle:?} en:\n{output}"),
         }
@@ -114,6 +119,7 @@ fn remote_x_clients_show_up_in_the_embedded_server() {
     let mut output = String::new();
     wait_output(&backend, &mut output, "Reenvío X11 activo");
     assert!(output.contains("Servidor X"), "{output}");
+    wait_output(&backend, &mut output, SHELL_READY);
     // Conectar no arranca nada: el servidor espera a la primera aplicación.
     assert!(host.running().is_none() && host.take_backend().is_none());
 
