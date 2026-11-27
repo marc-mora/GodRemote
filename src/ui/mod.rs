@@ -1,9 +1,11 @@
 //! Interfaz gráfica: árbol de equipos, pestañas y diálogos.
 
+pub mod backdrop_view;
 pub mod desktop_view;
 pub mod editor;
 pub mod keys_view;
 pub mod macros_view;
+pub mod server_bar;
 pub mod sftp_view;
 pub mod themes_view;
 pub mod util;
@@ -31,6 +33,7 @@ use desktop_view::{DesktopState, DesktopView};
 use editor::{EditorResult, SessionEditor};
 use keys_view::KeysWindow;
 use macros_view::{MacroRequest, MacrosWindow};
+use server_bar::ServerBarWindow;
 use sftp_view::{SftpState, SftpView};
 use themes_view::ThemesWindow;
 
@@ -151,6 +154,7 @@ pub struct App {
     themes: ThemeStore,
     settings: Settings,
     themes_window: Option<ThemesWindow>,
+    server_bar_window: Option<ServerBarWindow>,
     macros: MacroStore,
     macros_window: Option<MacrosWindow>,
     /// Macro recién grabada, a la espera de nombre.
@@ -232,6 +236,7 @@ impl App {
             themes,
             settings,
             themes_window: None,
+            server_bar_window: None,
             macros: MacroStore::load(&crate::paths::macros_file()).unwrap_or_default(),
             macros_window: None,
             recorded_macro: None,
@@ -334,7 +339,9 @@ impl App {
                 INITIAL_ROWS,
             ),
         };
-        Ok(TerminalView::new(backend))
+        let mut view = TerminalView::new(backend);
+        view.set_backdrop(session.backdrop.as_ref());
+        Ok(view)
     }
 
     fn open_terminal(&mut self, session: Session) {
@@ -625,6 +632,13 @@ impl App {
                 .clicked()
             {
                 self.themes_window = Some(ThemesWindow::new(&self.settings.theme));
+            }
+            if ui
+                .button("📊 Barra de estado")
+                .on_hover_text("Información del servidor bajo los terminales: CPU, memoria, disco…")
+                .clicked()
+            {
+                self.server_bar_window = Some(ServerBarWindow::new(&self.settings.server_bar));
             }
             let vault_exists = Vault::exists(&crate::paths::vault_file());
             ui.menu_button("🔐 Baúl", |ui| {
@@ -1001,6 +1015,7 @@ impl App {
         let mut open_sftp: Option<(Session, Option<SshHandle>)> = None;
         let mut reconnect = false;
         let mut recorded: Option<Vec<u8>> = None;
+        let mut open_bar_settings = false;
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
@@ -1092,8 +1107,35 @@ impl App {
                         }
                     });
                 });
+                // La barra de información del servidor ocupa una franja fija
+                // bajo el terminal.
+                let bar = tab
+                    .session
+                    .as_ref()
+                    .filter(|s| wants_server_bar(&self.settings.server_bar, s));
+                let area = ui.available_rect_before_wrap();
+                let bar_height = match bar {
+                    Some(_) => server_bar::height(ui).min(area.height() / 3.0),
+                    None => 0.0,
+                };
+                let mut term_rect = area;
+                term_rect.max.y -= bar_height;
                 // Sin diálogos abiertos, el teclado es del terminal.
-                egui::Frame::NONE.show(ui, |ui| term.ui(ui));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(term_rect), |ui| term.ui(ui));
+                if let Some(session) = bar {
+                    let mut bar_rect = area;
+                    bar_rect.min.y = term_rect.max.y;
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |ui| {
+                        if server_bar::show(
+                            ui,
+                            &self.settings.server_bar,
+                            session,
+                            term.monitor.as_ref(),
+                        ) {
+                            open_bar_settings = true;
+                        }
+                    });
+                }
             }
             TabKind::Sftp(view) => view.ui(ui),
             TabKind::Desktop(view) => {
@@ -1160,6 +1202,9 @@ impl App {
         }
         if let Some(bytes) = recorded {
             self.finish_recording(bytes);
+        }
+        if open_bar_settings {
+            self.server_bar_window = Some(ServerBarWindow::new(&self.settings.server_bar));
         }
     }
 
@@ -1865,6 +1910,32 @@ impl eframe::App for App {
                 TabKind::Terminal(t) => {
                     t.poll();
                     secrets.append(&mut t.secrets_to_save);
+                    // Consulta del estado del servidor para la barra.
+                    let bar = &self.settings.server_bar;
+                    let wanted = tab
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| wants_server_bar(bar, s));
+                    match (&t.ssh, wanted) {
+                        (Some(handle), true) => {
+                            if t.monitor.as_ref().is_none_or(|m| m.is_stale(bar)) {
+                                let mut monitor = crate::monitor::spawn(
+                                    self.rt.handle(),
+                                    handle.clone(),
+                                    bar,
+                                    self.waker.clone(),
+                                );
+                                // Mientras llega la primera muestra se
+                                // conserva la última conocida.
+                                monitor.stats = t.monitor.take().and_then(|m| m.stats);
+                                t.monitor = Some(monitor);
+                            }
+                        }
+                        _ => t.monitor = None,
+                    }
+                    if let Some(monitor) = &mut t.monitor {
+                        monitor.poll();
+                    }
                 }
                 TabKind::Sftp(s) => {
                     s.poll();
@@ -1919,6 +1990,18 @@ impl eframe::App for App {
                     self.selected = Some(session.id);
                     self.editor = None;
                     self.save_tree();
+                    // Las pestañas ya abiertas de este equipo toman al
+                    // momento su nuevo fondo y su barra de información.
+                    for tab in &mut self.tabs {
+                        let Some(open) = tab.session.as_mut().filter(|s| s.id == session.id) else {
+                            continue;
+                        };
+                        open.server_info = session.server_info;
+                        open.backdrop = session.backdrop.clone();
+                        if let TabKind::Terminal(term) = &mut tab.kind {
+                            term.set_backdrop(session.backdrop.as_ref());
+                        }
+                    }
                     if connect {
                         self.connect(session, None);
                     }
@@ -1936,6 +2019,22 @@ impl eframe::App for App {
         {
             self.themes_window = None;
             self.focus_active_terminal();
+        }
+        if let Some(win) = &mut self.server_bar_window {
+            let (open, changed) = win.show(&ctx, &mut self.settings.server_bar);
+            if changed {
+                self.settings.server_bar.sanitize();
+                if let Err(e) = self.settings.save(&crate::paths::settings_file()) {
+                    self.notify(
+                        format!("No se pudieron guardar las preferencias: {e:#}"),
+                        true,
+                    );
+                }
+            }
+            if !open {
+                self.server_bar_window = None;
+                self.focus_active_terminal();
+            }
         }
         if let Some(win) = &mut self.macros_window {
             let can_run = matches!(
@@ -1958,6 +2057,13 @@ impl eframe::App for App {
         self.vault_dialog_ui(&ctx);
         self.prompt_ui(&ctx);
     }
+}
+
+/// `true` si el terminal de esta sesión lleva la barra de información del
+/// servidor: solo terminales SSH, y solo si ni las preferencias ni la propia
+/// sesión la desactivan.
+fn wants_server_bar(config: &crate::monitor::ServerBar, session: &Session) -> bool {
+    config.enabled && session.protocol == Protocol::Ssh && session.server_info
 }
 
 #[cfg(test)]

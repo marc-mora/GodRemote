@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use egui::RichText;
 
+use super::backdrop_view::BackdropEditor;
 use crate::theme::{self, Rgb, Settings, Theme, ThemeStore};
 
 /// Tema en edición (copia de trabajo hasta que se guarda).
@@ -20,6 +21,27 @@ pub struct ThemesWindow {
     path: String,
     message: Option<(String, bool)>,
     confirm_delete: Option<String>,
+    backdrop: BackdropEditor,
+}
+
+/// Fila con una medida (tamaño, separación…) y su deslizador.
+fn measure(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    suffix: &str,
+) -> bool {
+    ui.label(label);
+    let changed = ui
+        .add(
+            egui::Slider::new(value, range)
+                .suffix(suffix)
+                .max_decimals(1),
+        )
+        .changed();
+    ui.end_row();
+    changed
 }
 
 fn color_row(ui: &mut egui::Ui, label: &str, color: &mut Rgb) -> bool {
@@ -63,6 +85,7 @@ impl ThemesWindow {
             path: String::new(),
             message: None,
             confirm_delete: None,
+            backdrop: BackdropEditor::default(),
         }
     }
 
@@ -176,10 +199,10 @@ impl ThemesWindow {
             .resizable(false)
             .default_pos([230.0, 50.0])
             .show(ctx, |ui| {
-                ui.set_width(760.0);
+                ui.set_width(820.0);
                 // Alto fijo: el contenido no debe estirar la ventana.
                 ui.allocate_ui_with_layout(
-                    egui::vec2(760.0, 430.0),
+                    egui::vec2(820.0, 520.0),
                     egui::Layout::left_to_right(egui::Align::TOP),
                     |ui| {
                         ui.vertical(|ui| {
@@ -188,7 +211,7 @@ impl ThemesWindow {
                         });
                         ui.separator();
                         ui.vertical(|ui| {
-                            ui.set_width(430.0);
+                            ui.set_width(490.0);
                             self.editor(ui, ctx, store, settings);
                         });
                     },
@@ -259,7 +282,7 @@ impl ThemesWindow {
         let mut activate = None;
         egui::ScrollArea::vertical()
             .id_salt("theme_list")
-            .max_height(190.0)
+            .max_height(230.0)
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 for (name, builtin) in store.names() {
@@ -367,9 +390,9 @@ impl ThemesWindow {
         let Some(editing) = &mut self.editing else {
             ui.strong("Personalizar");
             ui.label(
-                "Elige un tema de la lista para aplicarlo. Para cambiar colores, letra o \
-                 bordes pulsa «Duplicar y editar»: cada elemento de la interfaz y del \
-                 terminal se puede ajustar y los cambios se ven al instante.",
+                "Elige un tema de la lista para aplicarlo. Para cambiar colores, tamaños, \
+                 separaciones o el fondo del terminal pulsa «Duplicar y editar»: todo se \
+                 puede ajustar y los cambios se ven al instante.",
             );
             ui.add_space(6.0);
             ui.label(
@@ -392,19 +415,17 @@ impl ThemesWindow {
         });
         egui::ScrollArea::vertical()
             .id_salt("theme_editor")
-            .max_height(330.0)
+            .max_height(420.0)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                egui::CollapsingHeader::new("Interfaz")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        egui::Grid::new("theme_ui").num_columns(2).show(ui, |ui| {
-                            for (label, color) in editing.theme.ui.fields_mut() {
-                                changed |= color_row(ui, label, color);
-                            }
-                        });
+                egui::CollapsingHeader::new("Colores de la interfaz").show(ui, |ui| {
+                    egui::Grid::new("theme_ui").num_columns(2).show(ui, |ui| {
+                        for (label, color) in editing.theme.ui.fields_mut() {
+                            changed |= color_row(ui, label, color);
+                        }
                     });
-                egui::CollapsingHeader::new("Terminal").show(ui, |ui| {
+                });
+                egui::CollapsingHeader::new("Colores del terminal").show(ui, |ui| {
                     egui::Grid::new("theme_term").num_columns(2).show(ui, |ui| {
                         for (label, color) in editing.theme.terminal.fields_mut() {
                             changed |= color_row(ui, label, color);
@@ -418,35 +439,151 @@ impl ThemesWindow {
                         }
                     });
                 });
-                egui::CollapsingHeader::new("Letra y forma").show(ui, |ui| {
+                egui::CollapsingHeader::new("Letra e interlineado").show(ui, |ui| {
+                    egui::Grid::new("theme_fonts")
+                        .num_columns(2)
+                        .show(ui, |ui| {
+                            let f = &mut editing.theme.fonts;
+                            changed |=
+                                measure(ui, "Letra de la interfaz", &mut f.ui, 8.0..=32.0, " pt");
+                            changed |= measure(ui, "Títulos", &mut f.heading, 8.0..=48.0, " pt");
+                            changed |=
+                                measure(ui, "Texto pequeño", &mut f.small, 6.0..=32.0, " pt");
+                            changed |= measure(ui, "Botones", &mut f.button, 8.0..=32.0, " pt");
+                            changed |= measure(
+                                ui,
+                                "Interlineado de la interfaz",
+                                &mut f.ui_line_spacing,
+                                0.0..=12.0,
+                                " px",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Letra del terminal",
+                                &mut f.terminal,
+                                6.0..=48.0,
+                                " pt",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Interlineado del terminal",
+                                &mut f.terminal_line_height,
+                                0.8..=2.5,
+                                "×",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Separación entre letras del terminal",
+                                &mut f.terminal_letter_spacing,
+                                -1.0..=8.0,
+                                " px",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Barra de información del servidor",
+                                &mut f.server_bar,
+                                7.0..=28.0,
+                                " pt",
+                            );
+                        });
+                });
+                egui::CollapsingHeader::new("Separaciones y forma").show(ui, |ui| {
                     egui::Grid::new("theme_shape")
                         .num_columns(2)
                         .show(ui, |ui| {
-                            let t = &mut editing.theme;
-                            ui.label("Letra de la interfaz");
-                            changed |= ui
-                                .add(egui::Slider::new(&mut t.fonts.ui, 8.0..=32.0).suffix(" pt"))
-                                .changed();
-                            ui.end_row();
-                            ui.label("Letra del terminal");
-                            changed |= ui
-                                .add(
-                                    egui::Slider::new(&mut t.fonts.terminal, 6.0..=48.0)
-                                        .suffix(" pt"),
-                                )
-                                .changed();
-                            ui.end_row();
-                            ui.label("Redondeo de esquinas");
-                            changed |= ui
-                                .add(egui::Slider::new(&mut t.shape.rounding, 0.0..=16.0))
-                                .changed();
-                            ui.end_row();
-                            ui.label("Espaciado");
-                            changed |= ui
-                                .add(egui::Slider::new(&mut t.shape.spacing, 2.0..=20.0))
-                                .changed();
-                            ui.end_row();
+                            let f = &mut editing.theme.shape;
+                            changed |= measure(
+                                ui,
+                                "Separación horizontal entre elementos",
+                                &mut f.spacing,
+                                0.0..=30.0,
+                                " px",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Separación vertical entre elementos",
+                                &mut f.spacing_y,
+                                0.0..=30.0,
+                                " px",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Relleno horizontal de los botones",
+                                &mut f.button_padding_x,
+                                0.0..=40.0,
+                                " px",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Relleno vertical de los botones",
+                                &mut f.button_padding_y,
+                                0.0..=24.0,
+                                " px",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Alto mínimo de filas y botones",
+                                &mut f.row_height,
+                                10.0..=48.0,
+                                " px",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Redondeo de esquinas",
+                                &mut f.rounding,
+                                0.0..=16.0,
+                                " px",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Grosor de los bordes",
+                                &mut f.border,
+                                0.0..=4.0,
+                                " px",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Margen interior de las ventanas",
+                                &mut f.window_margin,
+                                0.0..=32.0,
+                                " px",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Margen interior de los menús",
+                                &mut f.menu_margin,
+                                0.0..=32.0,
+                                " px",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Sangría del árbol y las secciones",
+                                &mut f.indent,
+                                4.0..=48.0,
+                                " px",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Ancho de las barras de desplazamiento",
+                                &mut f.scroll_bar,
+                                2.0..=24.0,
+                                " px",
+                            );
+                            changed |= measure(
+                                ui,
+                                "Margen interior del terminal",
+                                &mut f.terminal_padding,
+                                0.0..=48.0,
+                                " px",
+                            );
                         });
+                });
+                egui::CollapsingHeader::new("Fondo del terminal").show(ui, |ui| {
+                    ui.weak(
+                        "Un texto, un dibujo ASCII o una imagen detrás del texto del terminal. \
+                         Cada equipo puede tener además el suyo propio.",
+                    );
+                    changed |= self.backdrop.show(ui, &mut editing.theme.backdrop, "theme");
                 });
             });
         if changed {

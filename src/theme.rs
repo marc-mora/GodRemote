@@ -5,11 +5,14 @@
 //! la propia aplicación.
 
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, anyhow, bail};
 use egui::Color32;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::backdrop::Backdrop;
+use crate::monitor::ServerBar;
 
 /// Color RGB que se guarda como `"#rrggbb"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,6 +257,12 @@ pub struct TerminalColors {
     pub ansi: AnsiColors,
 }
 
+/// Valor «automático» de las medidas que se derivan de otras: los temas
+/// guardados antes de que existieran conservan así su aspecto.
+fn auto() -> f32 {
+    -1.0
+}
+
 /// Tamaños de letra, en puntos.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -261,18 +270,69 @@ pub struct FontSizes {
     #[serde(rename = "interfaz")]
     pub ui: f32,
     pub terminal: f32,
+    /// Títulos de ventanas y secciones.
+    #[serde(rename = "titulos", default = "auto")]
+    pub heading: f32,
+    /// Texto pequeño (detalles, pistas).
+    #[serde(rename = "pequena", default = "auto")]
+    pub small: f32,
+    /// Texto de los botones.
+    #[serde(rename = "botones", default = "auto")]
+    pub button: f32,
+    /// Barra de información del servidor, bajo el terminal.
+    #[serde(rename = "barra_servidor", default = "auto")]
+    pub server_bar: f32,
+    /// Alto de las líneas del terminal respecto al de la letra (1 = normal).
+    #[serde(rename = "interlineado_terminal")]
+    pub terminal_line_height: f32,
+    /// Píxeles añadidos entre las letras del terminal.
+    #[serde(rename = "separacion_letras_terminal")]
+    pub terminal_letter_spacing: f32,
+    /// Píxeles añadidos entre las líneas de los textos de la interfaz.
+    #[serde(rename = "interlineado_interfaz")]
+    pub ui_line_spacing: f32,
 }
 
-/// Forma de los elementos.
+/// Forma y separaciones de los elementos.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Shape {
     /// Radio de las esquinas de botones, campos y ventanas.
     #[serde(rename = "redondeo")]
     pub rounding: f32,
-    /// Separación entre elementos.
+    /// Separación horizontal entre elementos.
     #[serde(rename = "espaciado")]
     pub spacing: f32,
+    /// Separación vertical entre elementos (filas, botones apilados).
+    #[serde(rename = "separacion_vertical", default = "auto")]
+    pub spacing_y: f32,
+    /// Relleno de los botones a izquierda y derecha del texto.
+    #[serde(rename = "relleno_botones_horizontal", default = "auto")]
+    pub button_padding_x: f32,
+    /// Relleno de los botones por encima y por debajo del texto.
+    #[serde(rename = "relleno_botones_vertical", default = "auto")]
+    pub button_padding_y: f32,
+    /// Alto mínimo de filas, botones y campos.
+    #[serde(rename = "altura_filas")]
+    pub row_height: f32,
+    /// Margen interior de ventanas y diálogos.
+    #[serde(rename = "margen_ventanas")]
+    pub window_margin: f32,
+    /// Margen interior de los menús.
+    #[serde(rename = "margen_menus")]
+    pub menu_margin: f32,
+    /// Sangría de los elementos anidados (árbol de equipos, secciones).
+    #[serde(rename = "sangria")]
+    pub indent: f32,
+    /// Ancho de las barras de desplazamiento.
+    #[serde(rename = "ancho_barra_desplazamiento")]
+    pub scroll_bar: f32,
+    /// Grosor de los bordes.
+    #[serde(rename = "grosor_bordes")]
+    pub border: f32,
+    /// Margen entre el borde del terminal y su texto.
+    #[serde(rename = "margen_terminal")]
+    pub terminal_padding: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -290,6 +350,9 @@ pub struct Theme {
     pub fonts: FontSizes,
     #[serde(rename = "forma")]
     pub shape: Shape,
+    /// Texto, arte ASCII o imagen que se dibuja bajo el texto del terminal.
+    #[serde(rename = "fondo_terminal")]
+    pub backdrop: Backdrop,
 }
 
 // Los valores que falten en un fichero se toman del tema base.
@@ -322,6 +385,13 @@ impl Default for FontSizes {
         Self {
             ui: 14.0,
             terminal: 14.0,
+            heading: 20.0,
+            small: 10.5,
+            button: 14.0,
+            server_bar: 12.0,
+            terminal_line_height: 1.0,
+            terminal_letter_spacing: 0.0,
+            ui_line_spacing: 0.0,
         }
     }
 }
@@ -331,6 +401,16 @@ impl Default for Shape {
         Self {
             rounding: 4.0,
             spacing: 8.0,
+            spacing_y: 4.0,
+            button_padding_x: 8.0,
+            button_padding_y: 2.0,
+            row_height: 18.0,
+            window_margin: 6.0,
+            menu_margin: 6.0,
+            indent: 18.0,
+            scroll_bar: 6.0,
+            border: 1.0,
+            terminal_padding: 4.0,
         }
     }
 }
@@ -390,6 +470,7 @@ impl Theme {
             },
             fonts: FontSizes::default(),
             shape: Shape::default(),
+            backdrop: Backdrop::default(),
         }
     }
 
@@ -444,6 +525,7 @@ impl Theme {
             },
             fonts: FontSizes::default(),
             shape: Shape::default(),
+            backdrop: Backdrop::default(),
         }
     }
 
@@ -498,6 +580,7 @@ impl Theme {
             },
             fonts: FontSizes::default(),
             shape: Shape::default(),
+            backdrop: Backdrop::default(),
         }
     }
 
@@ -552,6 +635,7 @@ impl Theme {
             },
             fonts: FontSizes::default(),
             shape: Shape::default(),
+            backdrop: Backdrop::default(),
         }
     }
 
@@ -606,6 +690,7 @@ impl Theme {
             },
             fonts: FontSizes::default(),
             shape: Shape::default(),
+            backdrop: Backdrop::default(),
         }
     }
 
@@ -629,10 +714,42 @@ impl Theme {
                 default
             }
         };
-        self.fonts.ui = fix(self.fonts.ui, 8.0, 32.0, 14.0);
-        self.fonts.terminal = fix(self.fonts.terminal, 6.0, 48.0, 14.0);
-        self.shape.rounding = fix(self.shape.rounding, 0.0, 16.0, 4.0);
-        self.shape.spacing = fix(self.shape.spacing, 2.0, 20.0, 8.0);
+        // Una medida «automática» (negativa) se deriva de la que depende.
+        let derived = |v: f32, from: f32| if v.is_finite() && v >= 0.0 { v } else { from };
+        let f = &mut self.fonts;
+        f.ui = fix(f.ui, 8.0, 32.0, 14.0);
+        f.terminal = fix(f.terminal, 6.0, 48.0, 14.0);
+        f.heading = fix(derived(f.heading, (f.ui * 1.45).round()), 8.0, 48.0, 20.0);
+        f.small = fix(derived(f.small, f.ui * 0.75), 6.0, 32.0, 10.5);
+        f.button = fix(derived(f.button, f.ui), 8.0, 32.0, 14.0);
+        f.server_bar = fix(
+            derived(f.server_bar, (f.ui * 0.86).round()),
+            7.0,
+            28.0,
+            12.0,
+        );
+        f.terminal_line_height = fix(f.terminal_line_height, 0.8, 2.5, 1.0);
+        f.terminal_letter_spacing = fix(f.terminal_letter_spacing, -1.0, 8.0, 0.0);
+        f.ui_line_spacing = fix(f.ui_line_spacing, 0.0, 12.0, 0.0);
+        let s = &mut self.shape;
+        s.rounding = fix(s.rounding, 0.0, 16.0, 4.0);
+        s.spacing = fix(s.spacing, 0.0, 30.0, 8.0);
+        s.spacing_y = fix(derived(s.spacing_y, s.spacing * 0.5), 0.0, 30.0, 4.0);
+        s.button_padding_x = fix(derived(s.button_padding_x, s.spacing), 0.0, 40.0, 8.0);
+        s.button_padding_y = fix(
+            derived(s.button_padding_y, (s.spacing * 0.25).max(1.0)),
+            0.0,
+            24.0,
+            2.0,
+        );
+        s.row_height = fix(s.row_height, 10.0, 48.0, 18.0);
+        s.window_margin = fix(s.window_margin, 0.0, 32.0, 6.0);
+        s.menu_margin = fix(s.menu_margin, 0.0, 32.0, 6.0);
+        s.indent = fix(s.indent, 4.0, 48.0, 18.0);
+        s.scroll_bar = fix(s.scroll_bar, 2.0, 24.0, 6.0);
+        s.border = fix(s.border, 0.0, 4.0, 1.0);
+        s.terminal_padding = fix(s.terminal_padding, 0.0, 48.0, 4.0);
+        self.backdrop.sanitize();
         self.name = self.name.trim().chars().take(60).collect();
     }
 
@@ -659,7 +776,6 @@ impl Theme {
     /// Aplica el tema a toda la interfaz y al terminal.
     pub fn apply(&self, ctx: &egui::Context) {
         use egui::{CornerRadius, FontFamily, FontId, Stroke, TextStyle};
-        let c = &self.ui;
         ctx.set_theme(if self.dark {
             egui::ThemePreference::Dark
         } else {
@@ -685,7 +801,8 @@ impl Theme {
             v.hyperlink_color = c.link.color32();
             v.warn_fg_color = c.warn.color32();
             v.error_fg_color = c.error.color32();
-            v.window_stroke = Stroke::new(1.0, c.border.color32());
+            let border = theme.shape.border;
+            v.window_stroke = Stroke::new(border, c.border.color32());
             v.window_corner_radius = radius;
             v.menu_corner_radius = radius;
             v.selection.bg_fill = c.accent.color32();
@@ -694,7 +811,7 @@ impl Theme {
             let w = &mut v.widgets;
             w.noninteractive.bg_fill = c.background.color32();
             w.noninteractive.weak_bg_fill = c.background.color32();
-            w.noninteractive.bg_stroke = Stroke::new(1.0, c.border.color32());
+            w.noninteractive.bg_stroke = Stroke::new(border, c.border.color32());
             w.noninteractive.fg_stroke = Stroke::new(1.0, c.text.color32());
             w.inactive.bg_fill = c.button.color32();
             w.inactive.weak_bg_fill = c.button.color32();
@@ -702,15 +819,15 @@ impl Theme {
             w.inactive.fg_stroke = Stroke::new(1.0, c.text.color32());
             w.hovered.bg_fill = c.button_hover.color32();
             w.hovered.weak_bg_fill = c.button_hover.color32();
-            w.hovered.bg_stroke = Stroke::new(1.0, c.text_weak.color32());
+            w.hovered.bg_stroke = Stroke::new(border, c.text_weak.color32());
             w.hovered.fg_stroke = Stroke::new(1.5, c.text_strong.color32());
             w.active.bg_fill = c.button_active.color32();
             w.active.weak_bg_fill = c.button_active.color32();
-            w.active.bg_stroke = Stroke::new(1.0, c.text_strong.color32());
+            w.active.bg_stroke = Stroke::new(border, c.text_strong.color32());
             w.active.fg_stroke = Stroke::new(2.0, c.text_strong.color32());
             w.open.bg_fill = c.button_active.color32();
             w.open.weak_bg_fill = c.button_active.color32();
-            w.open.bg_stroke = Stroke::new(1.0, c.border.color32());
+            w.open.bg_stroke = Stroke::new(border, c.border.color32());
             w.open.fg_stroke = Stroke::new(1.0, c.text_strong.color32());
             for state in [
                 &mut w.noninteractive,
@@ -723,51 +840,46 @@ impl Theme {
             }
             style.visuals = v;
 
-            let size = theme.fonts.ui;
+            let f = &theme.fonts;
             style.text_styles = [
                 (
                     TextStyle::Small,
-                    FontId::new(size * 0.75, FontFamily::Proportional),
+                    FontId::new(f.small, FontFamily::Proportional),
                 ),
-                (TextStyle::Body, FontId::new(size, FontFamily::Proportional)),
+                (TextStyle::Body, FontId::new(f.ui, FontFamily::Proportional)),
                 (
                     TextStyle::Button,
-                    FontId::new(size, FontFamily::Proportional),
+                    FontId::new(f.button, FontFamily::Proportional),
                 ),
                 (
                     TextStyle::Heading,
-                    FontId::new(size * 1.45, FontFamily::Proportional),
+                    FontId::new(f.heading, FontFamily::Proportional),
                 ),
                 (
                     TextStyle::Monospace,
-                    FontId::new(size, FontFamily::Monospace),
+                    FontId::new(f.ui, FontFamily::Monospace),
                 ),
             ]
             .into();
-            style.spacing.item_spacing = egui::vec2(theme.shape.spacing, theme.shape.spacing * 0.5);
-            style.spacing.button_padding =
-                egui::vec2(theme.shape.spacing, (theme.shape.spacing * 0.25).max(1.0));
+            let shape = &theme.shape;
+            let sp = &mut style.spacing;
+            sp.item_spacing = egui::vec2(shape.spacing, shape.spacing_y);
+            sp.button_padding = egui::vec2(shape.button_padding_x, shape.button_padding_y);
+            sp.interact_size.y = shape.row_height;
+            sp.window_margin = egui::Margin::same(shape.window_margin.round() as i8);
+            sp.menu_margin = egui::Margin::same(shape.menu_margin.round() as i8);
+            sp.indent = shape.indent;
+            sp.scroll.bar_width = shape.scroll_bar;
+            sp.scroll.floating_width = (shape.scroll_bar * 0.5).max(2.0);
+            sp.extra_text_line_spacing = f.ui_line_spacing;
         });
 
-        let ansi = self.terminal.ansi.to_array().map(Rgb::color32);
-        *CURRENT.write().unwrap() = Some(Applied {
-            ok: c.ok.color32(),
-            warn: c.warn.color32(),
-            terminal: TermPalette {
-                foreground: self.terminal.foreground.color32(),
-                background: self.terminal.background.color32(),
-                cursor: self.terminal.cursor.color32(),
-                selection_bg: self.terminal.selection_bg.color32(),
-                selection_fg: self.terminal.selection_fg.color32(),
-                ansi,
-                font_size: self.fonts.terminal,
-            },
-        });
+        *CURRENT.write().unwrap() = Some(Applied::from_theme(self));
         ctx.request_repaint();
     }
 }
 
-/// Colores del terminal ya resueltos, listos para dibujar.
+/// Colores y medidas del terminal ya resueltos, listos para dibujar.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TermPalette {
     pub foreground: Color32,
@@ -777,12 +889,49 @@ pub struct TermPalette {
     pub selection_fg: Color32,
     pub ansi: [Color32; 16],
     pub font_size: f32,
+    /// Alto de línea respecto al de la letra.
+    pub line_height: f32,
+    /// Píxeles añadidos entre letras.
+    pub letter_spacing: f32,
+    /// Margen entre el borde y el texto.
+    pub padding: f32,
+    /// Fondo decorativo y el identificador de su imagen.
+    pub backdrop: Arc<Backdrop>,
+    pub backdrop_key: u64,
 }
 
 struct Applied {
     ok: Color32,
     warn: Color32,
+    error: Color32,
+    server_bar_font: f32,
     terminal: TermPalette,
+}
+
+impl Applied {
+    fn from_theme(theme: &Theme) -> Self {
+        let t = &theme.terminal;
+        Applied {
+            ok: theme.ui.ok.color32(),
+            warn: theme.ui.warn.color32(),
+            error: theme.ui.error.color32(),
+            server_bar_font: theme.fonts.server_bar,
+            terminal: TermPalette {
+                foreground: t.foreground.color32(),
+                background: t.background.color32(),
+                cursor: t.cursor.color32(),
+                selection_bg: t.selection_bg.color32(),
+                selection_fg: t.selection_fg.color32(),
+                ansi: t.ansi.to_array().map(Rgb::color32),
+                font_size: theme.fonts.terminal,
+                line_height: theme.fonts.terminal_line_height,
+                letter_spacing: theme.fonts.terminal_letter_spacing,
+                padding: theme.shape.terminal_padding,
+                backdrop_key: theme.backdrop.image_key(),
+                backdrop: Arc::new(theme.backdrop.clone()),
+            },
+        }
+    }
 }
 
 static CURRENT: RwLock<Option<Applied>> = RwLock::new(None);
@@ -791,24 +940,8 @@ fn with_applied<T>(read: impl FnOnce(&Applied) -> T) -> T {
     let guard = CURRENT.read().unwrap();
     match guard.as_ref() {
         Some(applied) => read(applied),
-        None => {
-            // Aún no se ha aplicado ningún tema (pruebas, arranque).
-            let base = Theme::base();
-            let ansi = base.terminal.ansi.to_array().map(Rgb::color32);
-            read(&Applied {
-                ok: base.ui.ok.color32(),
-                warn: base.ui.warn.color32(),
-                terminal: TermPalette {
-                    foreground: base.terminal.foreground.color32(),
-                    background: base.terminal.background.color32(),
-                    cursor: base.terminal.cursor.color32(),
-                    selection_bg: base.terminal.selection_bg.color32(),
-                    selection_fg: base.terminal.selection_fg.color32(),
-                    ansi,
-                    font_size: base.fonts.terminal,
-                },
-            })
-        }
+        // Aún no se ha aplicado ningún tema (pruebas, arranque).
+        None => read(&Applied::from_theme(&Theme::base())),
     }
 }
 
@@ -820,6 +953,16 @@ pub fn ok_color() -> Color32 {
 /// Color de aviso del tema activo.
 pub fn warn_color() -> Color32 {
     with_applied(|a| a.warn)
+}
+
+/// Color de error del tema activo.
+pub fn error_color() -> Color32 {
+    with_applied(|a| a.error)
+}
+
+/// Tamaño de letra de la barra de información del servidor.
+pub fn server_bar_font() -> f32 {
+    with_applied(|a| a.server_bar_font)
 }
 
 /// Paleta del terminal del tema activo.
@@ -852,8 +995,8 @@ pub struct ThemeStore {
     pub load_errors: Vec<String>,
 }
 
-/// Tamaño máximo de un fichero de tema.
-const MAX_THEME_FILE: u64 = 256 * 1024;
+/// Tamaño máximo de un fichero de tema (puede llevar dentro una imagen).
+const MAX_THEME_FILE: u64 = 16 * 1024 * 1024;
 
 fn read_theme_file(path: &Path) -> Result<Theme> {
     let meta =
@@ -1006,22 +1149,28 @@ pub fn default_export_dir() -> PathBuf {
 pub struct Settings {
     #[serde(rename = "tema")]
     pub theme: String,
+    /// Barra de información del servidor bajo los terminales SSH.
+    #[serde(rename = "barra_servidor")]
+    pub server_bar: ServerBar,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: BASE_NAME.into(),
+            server_bar: ServerBar::default(),
         }
     }
 }
 
 impl Settings {
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path)
+        let mut settings: Settings = std::fs::read(path)
             .ok()
             .and_then(|data| serde_json::from_slice(&data).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        settings.server_bar.sanitize();
+        settings
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -1079,6 +1228,73 @@ mod tests {
         assert!(format!("{e}").contains("acentoo"), "{e}");
         assert!(Theme::from_json("{").is_err());
         assert!(Theme::from_json(r#"{"nombre":"   "}"#).is_err());
+    }
+
+    #[test]
+    fn older_themes_keep_their_look() {
+        // Un tema guardado antes de que existieran las medidas nuevas: las
+        // que dependían de la letra y del espaciado se derivan de ellos.
+        let t = Theme::from_json(
+            r##"{"nombre":"Viejo","letra":{"interfaz":18,"terminal":16},
+                 "forma":{"redondeo":2,"espaciado":12}}"##,
+        )
+        .unwrap();
+        assert_eq!(
+            (t.fonts.heading, t.fonts.small, t.fonts.button),
+            (26.0, 13.5, 18.0)
+        );
+        assert_eq!(t.fonts.terminal_line_height, 1.0);
+        assert_eq!((t.shape.spacing, t.shape.spacing_y), (12.0, 6.0));
+        assert_eq!(
+            (t.shape.button_padding_x, t.shape.button_padding_y),
+            (12.0, 3.0)
+        );
+        assert_eq!(t.shape.row_height, Shape::default().row_height);
+        assert_eq!(t.backdrop, Backdrop::default());
+        // Una vez guardado, las medidas quedan escritas y no cambian.
+        let json = t.to_json();
+        assert!(json.contains("\"titulos\": 26.0"), "{json}");
+        assert!(json.contains("\"interlineado_terminal\": 1.0"), "{json}");
+        assert!(
+            json.contains("\"relleno_botones_horizontal\": 12.0"),
+            "{json}"
+        );
+        assert!(json.contains("\"fondo_terminal\""), "{json}");
+        assert_eq!(Theme::from_json(&json).unwrap(), t);
+    }
+
+    #[test]
+    fn sizes_spacing_and_backdrop_are_configurable() {
+        let t = Theme::from_json(
+            r##"{"nombre":"Amplio",
+                 "letra":{"titulos":30,"botones":11,"interlineado_terminal":9,
+                          "separacion_letras_terminal":2,"barra_servidor":10},
+                 "forma":{"separacion_vertical":0,"relleno_botones_vertical":10,
+                          "altura_filas":30,"margen_terminal":12},
+                 "fondo_terminal":{"tipo":"texto","texto":"PRODUCCIÓN","opacidad":250,
+                                   "color":"#ff0000","giro":-30,"repetir":true}}"##,
+        )
+        .unwrap();
+        assert_eq!((t.fonts.heading, t.fonts.button), (30.0, 11.0));
+        // Fuera de rango se recorta.
+        assert_eq!(t.fonts.terminal_line_height, 2.5);
+        assert_eq!(t.fonts.terminal_letter_spacing, 2.0);
+        // Un cero explícito se respeta: no es «automático».
+        assert_eq!(t.shape.spacing_y, 0.0);
+        assert_eq!((t.shape.button_padding_y, t.shape.row_height), (10.0, 30.0));
+        assert_eq!(t.backdrop.kind, crate::backdrop::BackdropKind::Text);
+        assert_eq!(t.backdrop.opacity, 100.0);
+        assert!(t.backdrop.repeat && t.backdrop.is_visible());
+        // Las medidas llegan al terminal.
+        let applied = Applied::from_theme(&t);
+        assert_eq!(applied.server_bar_font, 10.0);
+        assert_eq!(applied.terminal.line_height, 2.5);
+        assert_eq!(applied.terminal.padding, 12.0);
+        assert_eq!(applied.terminal.backdrop.text, "PRODUCCIÓN");
+        // Un fondo mal escrito se rechaza con un mensaje que lo señala.
+        let e =
+            Theme::from_json(r##"{"nombre":"x","fondo_terminal":{"tipo":"video"}}"##).unwrap_err();
+        assert!(format!("{e}").contains("video"), "{e}");
     }
 
     #[test]
@@ -1143,6 +1359,11 @@ mod tests {
         assert_eq!(Settings::load(&path).theme, BASE_NAME);
         let s = Settings {
             theme: "Nord".into(),
+            server_bar: ServerBar {
+                interval: 30,
+                disks: vec!["/".into(), "/home".into()],
+                ..Default::default()
+            },
         };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);

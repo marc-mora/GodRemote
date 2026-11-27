@@ -22,6 +22,7 @@ pub struct SessionEditor {
     error: Option<String>,
     keys: Vec<KeyInfo>,
     serial_ports: Vec<String>,
+    backdrop: super::backdrop_view::BackdropEditor,
 }
 
 pub enum EditorResult {
@@ -70,6 +71,7 @@ impl SessionEditor {
             error: None,
             keys: crate::keys::list(),
             serial_ports: crate::serial::available_ports(),
+            backdrop: Default::default(),
         }
     }
 
@@ -103,6 +105,9 @@ impl SessionEditor {
                         }
                         if self.session.protocol == Protocol::Ssh {
                             self.advanced_ssh(ui);
+                        }
+                        if self.session.protocol.has_terminal() {
+                            self.terminal_look(ui);
                         }
                     });
                 ui.add_space(6.0);
@@ -668,6 +673,43 @@ impl SessionEditor {
             });
     }
 
+    /// Aspecto del terminal de este equipo: barra de información y fondo.
+    fn terminal_look(&mut self, ui: &mut egui::Ui) {
+        let s = &mut self.session;
+        let configured = s.backdrop.is_some() || !s.server_info;
+        egui::CollapsingHeader::new("Terminal: barra de información y fondo")
+            .id_salt("terminal_look")
+            .default_open(configured)
+            .show(ui, |ui| {
+                if s.protocol == Protocol::Ssh {
+                    ui.checkbox(
+                        &mut s.server_info,
+                        "Mostrar la barra de información del servidor",
+                    )
+                    .on_hover_text(
+                        "CPU, memoria, disco, red… Se consultan por un canal aparte de la \
+                         misma conexión. Desmárcalo en equipos sin shell POSIX (routers, \
+                         conmutadores) o donde no quieras órdenes adicionales",
+                    );
+                }
+                let mut own = s.backdrop.is_some();
+                if ui
+                    .checkbox(&mut own, "Fondo propio para este equipo")
+                    .on_hover_text(
+                        "Sustituye al fondo del tema: por ejemplo, «PRODUCCIÓN» en rojo \
+                         para no confundir servidores",
+                    )
+                    .changed()
+                {
+                    s.backdrop = own.then(Default::default);
+                }
+                if let Some(backdrop) = &mut s.backdrop {
+                    ui.set_max_width(440.0);
+                    self.backdrop.show(ui, backdrop, "session");
+                }
+            });
+    }
+
     /// Valida y guarda la sesión (y sus secretos en el baúl).
     fn commit(&mut self, tree: &mut Tree, vault: &mut Option<Vault>) -> Result<(), String> {
         let mut s = self.session.clone();
@@ -687,6 +729,12 @@ impl SessionEditor {
         }
         if !s.protocol.uses_network() {
             s.jumps.clear();
+        }
+        if !s.protocol.has_terminal() {
+            s.backdrop = None;
+        }
+        if let Some(backdrop) = &mut s.backdrop {
+            backdrop.sanitize();
         }
         s.validate()?;
         // Los saltos deben formar un camino válido (sin bucles, todos SSH).

@@ -6,6 +6,7 @@ explorador SFTP, escritorios remotos integrados (RDP y VNC), túneles, gestor de
 claves, macros, temas personalizables y un baúl cifrado para las credenciales.
 
 ![Terminal SSH](docs/terminal.png)
+![Barra de información del servidor y fondo del terminal](docs/barra-y-fondo.png)
 ![Escritorio remoto integrado](docs/escritorio.png)
 ![Temas](docs/temas.png)
 
@@ -24,7 +25,9 @@ claves, macros, temas personalizables y un baúl cifrado para las credenciales.
 | **VNC** | Cliente integrado (RFB 3.3–3.8; Raw, CopyRect, Hextile, ZRLE; contraseña VNC). |
 | **Telnet y serie** | Terminales para Telnet y para puertos serie (`COM3`, `/dev/ttyUSB0`…). |
 | **Macros** | Graba lo que tecleas en un terminal, edítalo y reprodúcelo en cualquier otro. |
-| **Temas** | Cinco temas integrados y editor en vivo de todos los colores, letra y bordes. Importar y exportar en JSON. |
+| **Barra de información** | Bajo cada terminal SSH: nombre del servidor, sistema, tiempo encendido, CPU, memoria, disco, red… Se elige qué se muestra, en qué orden y cada cuánto se actualiza. |
+| **Temas** | Cinco temas integrados y editor en vivo de colores, tamaños de letra, interlineados, separaciones y bordes. Importar y exportar en JSON. |
+| **Fondo del terminal** | Un texto, un dibujo ASCII o una imagen detrás del texto, con la opacidad que se quiera. Por tema o por equipo. |
 | **Claves** | Lista las claves de `~/.ssh` y las propias, genera pares Ed25519 / ECDSA (con passphrase opcional), importa claves y copia la pública. |
 | **Credenciales** | Baúl cifrado con contraseña maestra (Argon2id + XChaCha20-Poly1305). Las contraseñas solo se guardan tras una autenticación correcta. |
 
@@ -89,19 +92,49 @@ En el editor de una sesión:
 - **Túneles**: tipo, dirección y puerto de escucha, y destino. La cabecera del
   terminal muestra cuántos están activos.
 
+### Barra de información del servidor
+
+Bajo cada terminal SSH hay una barra con el estado del servidor. **📊 Barra de
+estado** (o el engranaje de la propia barra) abre sus ajustes:
+
+- **Qué se muestra y en qué orden**: nombre de la sesión, nombre del servidor,
+  usuario y dirección, direcciones IP, sistema operativo, kernel, tiempo
+  encendido, carga media, uso de CPU, memoria, intercambio, espacio libre en
+  disco, tráfico de red, usuarios conectados, procesos y hora del servidor.
+- **Discos**: las rutas cuyo espacio libre interesa (`/, /home, /var`).
+- **Actualizar cada** tantos segundos, barritas de uso, y a partir de qué
+  porcentaje un valor se pinta en color de aviso o de error.
+
+Los datos se piden por un canal aparte de la misma conexión SSH: no se
+escribe nada en tu terminal ni se abre otra conexión. Hace falta que el
+servidor tenga una shell POSIX (`sh`); el uso de CPU, memoria y red sale de
+`/proc`, así que en sistemas que no son Linux solo aparecen el nombre, el
+sistema y el disco. En equipos donde no proceda (routers, conmutadores) se
+desactiva en la ficha de la sesión, en «Terminal: barra de información y
+fondo».
+
 ### Temas
 
 **🎨 Temas** abre el gestor:
 
 - Elige un tema de la lista y se aplica al instante.
-- **Duplicar y editar** abre el editor: cada color de la interfaz y del
-  terminal (incluidos los 16 colores ANSI), el tamaño de letra, el redondeo y
-  el espaciado. Los cambios se ven en vivo.
+- **Duplicar y editar** abre el editor, con todo agrupado por secciones. Los
+  cambios se ven en vivo:
+  - **Colores** de la interfaz y del terminal, incluidos los 16 ANSI.
+  - **Letra e interlineado**: tamaño de la letra de la interfaz, títulos,
+    texto pequeño, botones, terminal y barra de información; interlineado de
+    la interfaz y del terminal, y separación entre las letras del terminal.
+  - **Separaciones y forma**: separación horizontal y vertical entre
+    elementos, relleno de los botones, alto mínimo de filas y botones,
+    redondeo, grosor de bordes, márgenes de ventanas y menús, sangría del
+    árbol, ancho de las barras de desplazamiento y margen del terminal.
+  - **Fondo del terminal** (véase más abajo).
 - **Descargar tema base** guarda un JSON legible para modificarlo con
   cualquier editor de texto; **Importar un tema** lo carga (también se puede
   soltar el fichero sobre la ventana).
 
-Un tema es un JSON como este; los campos que falten se toman del tema base:
+Un tema es un JSON como este; los campos que falten se toman del tema base
+(el fichero que da «Descargar tema base» los trae todos):
 
 ```json
 {
@@ -109,10 +142,31 @@ Un tema es un JSON como este; los campos que falten se toman del tema base:
   "oscuro": true,
   "interfaz": { "fondo": "#1b1b1b", "acento": "#d35400", "texto": "#c4c4c4" },
   "terminal": { "fondo": "#1a120b", "texto": "#ffd9a8", "ansi": { "rojo": "#cc6666" } },
-  "letra": { "interfaz": 14, "terminal": 16 },
-  "forma": { "redondeo": 4, "espaciado": 8 }
+  "letra": { "interfaz": 14, "terminal": 16, "interlineado_terminal": 1.2 },
+  "forma": { "redondeo": 4, "espaciado": 8, "relleno_botones_vertical": 4 },
+  "fondo_terminal": { "tipo": "texto", "texto": "PRODUCCIÓN", "color": "#ff5c5c",
+                      "opacidad": 15, "giro": -25, "repetir": true }
 }
 ```
+
+### Fondo del terminal
+
+En el editor de temas, **Fondo del terminal** permite poner detrás del texto:
+
+- un **texto** (por ejemplo `PRODUCCIÓN`), con su tamaño, color y giro, una
+  sola vez o repetido por todo el terminal como una marca de agua;
+- un **dibujo ASCII**, escrito, pegado o cargado de un fichero de texto;
+- una **imagen** (PNG, JPEG, GIF, BMP o WebP), a su tamaño, ajustada,
+  rellenando, estirada o en mosaico.
+
+En los tres casos se elige la **opacidad** (de 0 a 100 %) y la posición. La
+imagen se guarda dentro del propio tema, así que al exportarlo viaja con él;
+las muy grandes se reducen al cargarlas.
+
+Cada equipo puede tener además **su propio fondo**, que sustituye al del
+tema: en la ficha de la sesión, «Terminal: barra de información y fondo» →
+«Fondo propio para este equipo». Sirve para distinguir de un vistazo los
+servidores delicados.
 
 ### Macros
 
@@ -133,7 +187,7 @@ Linux, `%APPDATA%\godremote` en Windows; se puede cambiar con la variable
 | `vault.json` | Contraseñas y passphrases, cifradas. |
 | `keys/` | Claves generadas o importadas desde la aplicación. |
 | `themes/` | Temas del usuario. |
-| `settings.json` | Tema elegido. |
+| `settings.json` | Tema elegido y ajustes de la barra de información. |
 | `macros.json` | Macros de terminal. |
 | `tls_known_hosts.json` | Huellas de los certificados RDP aceptados. |
 | `rdp/` | Registros de la última ejecución del cliente RDP externo. |
@@ -174,6 +228,11 @@ recuperar; el resto de la configuración sigue intacta.
 - X11: hace falta un servidor X local; GodRemote no trae uno propio.
 - Los túneles van ligados al terminal de la sesión: no hay un gestor de
   túneles independiente.
+- Barra de información: solo en terminales SSH (no en Telnet, serie ni en el
+  terminal local) y pensada para servidores Linux; en Windows no da datos.
+  Un servidor que limite a una las sesiones por conexión (`MaxSessions 1`)
+  no deja abrir el canal que necesita.
+- Fondo del terminal: de un GIF animado se usa solo el primer fotograma.
 - Saltos: como máximo ocho encadenados; cada salto se autentica con su
   propia sesión (no hay reenvío del agente SSH entre saltos).
 - Sin Mosh, FTP ni editor de texto remoto.
@@ -186,8 +245,8 @@ recuperar; el resto de la configuración sigue intacta.
 cargo test
 ```
 
-- Pruebas unitarias del modelo, baúl, claves, terminal, temas, macros,
-  Telnet, X11, túneles, VNC y RDP.
+- Pruebas unitarias del modelo, baúl, claves, terminal, temas, fondos,
+  barra de información, macros, Telnet, X11, túneles, VNC y RDP.
 - `tests/auth_methods.rs`: contraseña y keyboard-interactive contra un
   servidor SSH en el propio proceso.
 - `tests/ssh_integration.rs`: clave con passphrase, verificación de host,
@@ -195,6 +254,9 @@ cargo test
 - `tests/ssh_features.rs`: uno y varios saltos encadenados (tres `sshd`
   reales), túneles `-L`/`-R`/`-D` y X11; Telnet contra un `telnetd` real,
   directo y a través de dos saltos.
+- `tests/monitor_integration.rs`: barra de información contra un `sshd`
+  real (datos coherentes con los del equipo, y la consulta deja de
+  ejecutarse en el servidor al cerrarla).
 - `tests/vnc_integration.rs`: cliente VNC contra `x11vnc`, directo y a
   través de un salto SSH.
 - `tests/rdp_integration.rs`: cliente RDP integrado contra
@@ -225,6 +287,8 @@ src/
   trust.rs        confianza en certificados TLS
   terminal.rs     emulador de terminal y shell local
   theme.rs        temas
+  backdrop.rs     fondo del terminal (texto, ASCII, imagen)
+  monitor.rs      consulta del estado del servidor
   macros.rs       macros de terminal
   ui/             interfaz (egui)
 ```

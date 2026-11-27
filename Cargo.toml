@@ -1,6 +1,6 @@
 [package]
 name = "godremote"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "Gestor de conexiones remotas (SSH, SFTP, RDP) con árbol de equipos y baúl de credenciales"
 license = "MIT"
@@ -27,6 +27,7 @@ ironrdp-svc = "0.10"
 ironrdp-tokio = "0.12"
 # zlib enlazada estáticamente: `winscard` (vía sspi) la exige y no queremos
 # depender de la libz del sistema.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 libz-sys = { version = "1", default-features = false, features = ["static"] }
 portable-pty = "0.9"
 rand = "0.10"

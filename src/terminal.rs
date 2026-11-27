@@ -7,6 +7,9 @@ use anyhow::Result;
 use egui::{Align2, Color32, Event, EventFilter, FontId, Key, Pos2, Rect, Sense, Stroke, Vec2};
 use tokio::sync::mpsc;
 
+use std::sync::Arc;
+
+use crate::backdrop::Backdrop;
 use crate::ssh::{SshHandle, Waker};
 use crate::theme::TermPalette;
 
@@ -318,6 +321,11 @@ pub struct TerminalView {
     mouse_cell: (u16, u16),
     /// Teclas grabadas para una macro (si se está grabando).
     recording: Option<Vec<u8>>,
+    /// Fondo propio de la sesión (y el identificador de su imagen); si no
+    /// hay, se usa el del tema.
+    pub backdrop: Option<(Arc<Backdrop>, u64)>,
+    /// Consulta del estado del servidor para la barra inferior.
+    pub monitor: Option<crate::monitor::Monitor>,
 }
 
 pub const INITIAL_COLS: u16 = 100;
@@ -343,7 +351,14 @@ impl TerminalView {
             mouse_down: None,
             mouse_cell: (0, 0),
             recording: None,
+            backdrop: None,
+            monitor: None,
         }
+    }
+
+    /// Usa un fondo propio en lugar del del tema.
+    pub fn set_backdrop(&mut self, backdrop: Option<&Backdrop>) {
+        self.backdrop = backdrop.map(|b| (Arc::new(b.clone()), b.image_key()));
     }
 
     /// Texto visible actualmente (útil para pruebas y para copiar todo).
@@ -386,6 +401,7 @@ impl TerminalView {
                         None => self.note(33, "[Sesión finalizada]"),
                     }
                     self.ssh = None;
+                    self.monitor = None;
                     self.tunnels.clear();
                     self.state = ConnState::Closed(err);
                 }
@@ -484,13 +500,17 @@ impl TerminalView {
 
         let palette = crate::theme::terminal_palette();
         let font = FontId::monospace((palette.font_size + self.font_delta).clamp(6.0, 60.0));
-        let (cell_w, cell_h) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
-        let cell_w = cell_w.max(1.0);
-        let cell_h = cell_h.max(1.0);
+        let (glyph_w, row_h) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+        // El interlineado y la separación entre letras del tema agrandan la
+        // celda; el texto se centra verticalmente en ella.
+        let letter_spacing = palette.letter_spacing;
+        let cell_w = (glyph_w + letter_spacing).max(1.0);
+        let cell_h = (row_h * palette.line_height).round().max(1.0);
+        let text_dy = ((cell_h - row_h) / 2.0).round();
 
         let avail = ui.available_size();
         let (rect, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
-        let pad = 4.0;
+        let pad = palette.padding;
         let cols = (((rect.width() - 2.0 * pad) / cell_w).floor() as i32).clamp(2, 500) as u16;
         let rows = (((rect.height() - 2.0 * pad) / cell_h).floor() as i32).clamp(1, 300) as u16;
         self.resize(cols, rows);
@@ -752,6 +772,14 @@ impl TerminalView {
         }
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, palette.background);
+        match &self.backdrop {
+            Some((backdrop, key)) => backdrop.paint(&painter, rect, *key, palette.foreground),
+            None => {
+                palette
+                    .backdrop
+                    .paint(&painter, rect, palette.backdrop_key, palette.foreground)
+            }
+        }
 
         let selection = self.selection_ordered();
         let in_selection = |row: u16, col: u16| -> bool {
@@ -782,7 +810,7 @@ impl TerminalView {
                     && !text.trim_end().is_empty()
                 {
                     painter.text(
-                        Pos2::new(origin.x + start as f32 * cell_w, y),
+                        Pos2::new(origin.x + start as f32 * cell_w, y + text_dy),
                         Align2::LEFT_TOP,
                         text,
                         font.clone(),
@@ -824,7 +852,9 @@ impl TerminalView {
 
                 // Texto
                 let contents = cell.contents();
-                let simple = contents.len() <= 1 && contents.is_ascii();
+                // Con separación entre letras cada carácter va en su celda:
+                // un tramo dibujado de una vez no la respetaría.
+                let simple = contents.len() <= 1 && contents.is_ascii() && letter_spacing == 0.0;
                 if simple {
                     let ch = contents.chars().next().unwrap_or(' ');
                     match &mut text_run {
@@ -838,13 +868,15 @@ impl TerminalView {
                     // No ASCII (o ancho doble): se dibuja en su celda exacta
                     // para no desalinear el resto de la fila.
                     flush_text(&mut text_run);
-                    painter.text(
-                        Pos2::new(origin.x + col as f32 * cell_w, y),
-                        Align2::LEFT_TOP,
-                        contents,
-                        font.clone(),
-                        fg,
-                    );
+                    if !contents.trim().is_empty() {
+                        painter.text(
+                            Pos2::new(origin.x + col as f32 * cell_w, y + text_dy),
+                            Align2::LEFT_TOP,
+                            contents,
+                            font.clone(),
+                            fg,
+                        );
+                    }
                 }
                 if cell.underline() {
                     let x = origin.x + col as f32 * cell_w;
@@ -889,7 +921,7 @@ impl TerminalView {
             painter.text(
                 rect.right_top() + Vec2::new(-8.0, 4.0),
                 Align2::RIGHT_TOP,
-                format!("↑ historial ({offset} líneas)"),
+                format!("⬆ historial ({offset} líneas)"),
                 FontId::proportional(12.0),
                 crate::theme::warn_color(),
             );

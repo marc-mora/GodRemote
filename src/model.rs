@@ -63,6 +63,12 @@ impl Protocol {
         matches!(self, Protocol::Ssh | Protocol::Sftp)
     }
 
+    /// `true` si la sesión se abre en un terminal (y no en un explorador
+    /// de ficheros o un escritorio remoto).
+    pub fn has_terminal(self) -> bool {
+        matches!(self, Protocol::Ssh | Protocol::Telnet | Protocol::Serial)
+    }
+
     /// Protocolos que se conectan a un host y puerto TCP.
     pub fn uses_network(self) -> bool {
         self != Protocol::Serial
@@ -269,6 +275,12 @@ pub struct Session {
     pub x11_forwarding: bool,
     pub rdp: RdpOptions,
     pub serial: SerialOptions,
+    /// Mostrar bajo el terminal la barra con el estado del servidor (abre
+    /// un canal SSH aparte para consultarlo).
+    pub server_info: bool,
+    /// Fondo del terminal propio de este equipo; sin él se usa el del tema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backdrop: Option<crate::backdrop::Backdrop>,
     pub notes: String,
 }
 
@@ -289,6 +301,8 @@ impl Default for Session {
             x11_forwarding: false,
             rdp: RdpOptions::default(),
             serial: SerialOptions::default(),
+            server_info: true,
+            backdrop: None,
             notes: String::new(),
         }
     }
@@ -381,6 +395,9 @@ impl Session {
             && self.jumps.is_empty()
         {
             self.jumps.push(jump);
+        }
+        if let Some(backdrop) = &mut self.backdrop {
+            backdrop.sanitize();
         }
     }
 }
