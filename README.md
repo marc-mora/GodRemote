@@ -3,34 +3,41 @@
 Gestor de conexiones remotas escrito en Rust, al estilo de MobaXterm: un árbol
 jerárquico de equipos, terminales con pestañas (SSH, Telnet, puerto serie),
 explorador SFTP, escritorios remotos integrados (RDP y VNC), túneles, gestor de
-claves, snippets con atajos, escritura simultánea en varios terminales, temas
-personalizables y un baúl cifrado para las credenciales.
+claves, snippets con atajos, vista dividida y escritura simultánea en varios
+terminales, ajustes heredados por carpeta, importación desde otras
+herramientas, temas personalizables y un baúl cifrado para las credenciales.
 
 ![Terminal SSH](docs/terminal.png)
 ![Barra de información del servidor y fondo del terminal](docs/barra-y-fondo.png)
+![Vista dividida con difusión](docs/vista-dividida.png)
 ![Escribir en varios terminales a la vez](docs/difusion.png)
 ![Snippets con atajos de teclado](docs/snippets.png)
 ![Escritorio remoto integrado](docs/escritorio.png)
 ![Temas](docs/temas.png)
+![Ajustes](docs/ajustes.png)
 
 ## Qué hace
 
 | Área | Funcionalidad |
 |------|---------------|
 | **Equipos** | Árbol de carpetas y subcarpetas, búsqueda, mover, duplicar, renombrar y eliminar. Conexión rápida `usuario@host[:puerto]`. |
+| **Carpetas con valores** | Una carpeta puede dar a sus equipos el usuario, la autenticación, los saltos, el fondo del terminal y la barra de información. |
+| **Importar y copiar** | Importa equipos de `~/.ssh/config`, PuTTY y MobaXterm. Copia de seguridad de toda la configuración en un solo fichero. |
 | **SSH** | Terminal integrado (xterm-256color, historial de 10 000 líneas, selección y copiar/pegar, ratón para `htop`, `mc`, `vim`…). Autenticación por contraseña, keyboard-interactive (PAM, códigos OTP), clave privada (OpenSSH, PEM, PuTTY `.ppk`) y agente SSH / Pageant. |
 | **Saltos (bastiones)** | Cada equipo tiene su lista ordenada de saltos SSH, como `ProxyJump a,b,c`. Vale para SSH, SFTP, Telnet, VNC y RDP integrado. |
 | **Túneles** | Reenvío local (`-L`), remoto (`-R`) y dinámico SOCKS5 (`-D`), por sesión. Se abren con el terminal y se cierran con él. |
 | **X11** | Reenvío de aplicaciones gráficas al servidor X local, con cookie de autenticación sustituida. |
 | **Verificación de host** | Usa `~/.ssh/known_hosts`, compartido con OpenSSH. Pregunta la primera vez y **rechaza** la conexión si la clave del servidor cambia. |
-| **SFTP** | Dos paneles (local / remoto), subida y descarga recursivas con progreso y cancelación, crear carpeta, renombrar y eliminar. Se puede abrir sobre la conexión SSH de un terminal. Fechas en hora local. |
+| **Terminal** | Búsqueda en pantalla e historial, registro de la sesión en un fichero, reconexión automática si se cae la red y reapertura de las pestañas al arrancar. |
+| **Vista dividida** | Varios terminales a la vez en mosaico, combinable con la difusión. |
+| **SFTP** | Dos paneles (local / remoto), subida y descarga recursivas con progreso y cancelación, crear carpeta, renombrar y eliminar. Se puede abrir sobre la conexión SSH de un terminal, seguir su carpeta y editar ficheros remotos con el editor local. Fechas en hora local. |
 | **RDP** | Cliente integrado en una pestaña, o el cliente externo del sistema (FreeRDP / `mstsc`). |
 | **VNC** | Cliente integrado (RFB 3.3–3.8; Raw, CopyRect, Hextile, ZRLE; contraseña VNC). |
 | **Telnet y serie** | Terminales para Telnet y para puertos serie (`COM3`, `/dev/ttyUSB0`…). |
-| **Snippets** | Textos y órdenes con nombre que se envían al terminal desde el menú o con un atajo de teclado propio (`Ctrl+Alt+D`, `F6`…). Se escriben a mano o se graban tecleando. |
+| **Snippets** | Textos y órdenes con nombre que se envían al terminal desde el menú o con un atajo de teclado propio (`Ctrl+Alt+D`, `F6`…). Se escriben a mano o se graban tecleando, y admiten variables (`{{host}}`, `{{?Pregunta}}`). |
 | **Difusión** | Lo que escribes en un terminal se envía a la vez a todos los terminales abiertos o solo a los que elijas. |
 | **Barra de información** | Bajo cada terminal SSH: nombre del servidor, sistema, tiempo encendido, CPU, memoria, disco, red… Se elige qué se muestra, en qué orden y cada cuánto se actualiza. |
-| **Temas** | Cinco temas integrados y editor en vivo de colores, tamaños de letra, interlineados, separaciones y bordes. Importar y exportar en JSON. |
+| **Temas** | Cinco temas integrados y editor en vivo de colores, tipos y tamaños de letra, interlineados, separaciones y bordes. Importar y exportar en JSON. |
 | **Fondo del terminal** | Un texto, un dibujo ASCII o una imagen detrás del texto, con la opacidad que se quiera. Por tema o por equipo. |
 | **Claves** | Lista las claves de `~/.ssh` y las propias, genera pares Ed25519 / ECDSA (con passphrase opcional), importa claves y copia la pública. |
 | **Credenciales** | Baúl cifrado con contraseña maestra (Argon2id + XChaCha20-Poly1305). Las contraseñas solo se guardan tras una autenticación correcta. |
@@ -65,6 +72,36 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 El resultado es un único `godremote.exe` que solo depende de DLL del sistema.
 
+### Dos ediciones: completa y «SSH reforzada»
+
+El cliente RDP integrado depende de IronRDP, cuyas dependencias fijan una
+versión preliminar de `rsa` que impide a Cargo elegir la última versión de
+la librería SSH (russh). Eso se decide al compilar, así que hay dos
+ediciones del mismo código:
+
+| Edición | RDP integrado | Librería SSH | Cómo se compila |
+|---------|---------------|--------------|-----------------|
+| **Completa** (`godremote`) | Sí | russh 0.65.1 | `cargo build --release` |
+| **SSH reforzada** (`godremote-reforzado`) | No (RDP con el cliente externo) | russh 0.65.4 | `cargo build --release --manifest-path reforzado/Cargo.toml --target-dir target` |
+
+Para Windows, ya compiladas: `dist/GodRemote-windows-x64.zip` (completa) y
+`dist/GodRemote-ssh-reforzado-windows-x64.zip` (SSH reforzada). Las dos usan
+la misma carpeta de configuración, así que se puede pasar de una a otra.
+
+A la 0.65.1 le faltan varios endurecimientos frente a servidores SSH
+maliciosos publicados entre la 0.65.2 y la 0.65.4. Si no usas el RDP
+integrado, o te conectas a servidores en los que no confías del todo, usa la
+edición reforzada. **⚙ Ajustes** dice qué edición y qué versión de la
+librería estás usando; en la completa, además, permite desactivar el RDP
+integrado para que RDP se abra siempre con el cliente externo (eso cambia el
+cliente, no la librería).
+
+`reforzado/` tiene su propio `Cargo.toml` y `Cargo.lock` porque un
+`Cargo.lock` incluye también las dependencias opcionales; una prueba
+comprueba que las dos listas de dependencias no se separan. Cuando IronRDP
+deje de fijar esa versión bastará `cargo update -p russh` y sobrará la
+segunda edición.
+
 ## Uso
 
 - **➕ Sesión** crea un equipo; **📁 Carpeta** crea una carpeta dentro de la
@@ -81,6 +118,21 @@ El resultado es un único `godremote.exe` que solo depende de DLL del sistema.
   la pestaña tiene el foco. `Ctrl+V` envía antes el portapapeles local. Los
   botones **Ctrl+Alt+Supr** y **Win** envían esas teclas, que el sistema local
   no deja capturar.
+
+### Carpetas que dan valores a sus equipos
+
+Clic derecho sobre una carpeta → **Editar carpeta…** permite definir, para
+los equipos que contiene (y los de sus subcarpetas):
+
+- el **usuario** y el **fondo del terminal**, que se aplican a los equipos
+  que no tengan el suyo;
+- la **autenticación** (con su contraseña o passphrase en el baúl) y los
+  **saltos**, que usan los equipos que marcan «la de la carpeta» en su ficha
+  (los equipos nuevos lo marcan solos);
+- desactivar la **barra de información** en todos ellos.
+
+La ficha de cada equipo indica qué hereda y de qué carpeta. Si una
+subcarpeta define un valor, manda sobre el de la carpeta de arriba.
 
 ### Túneles, salto y X11
 
@@ -172,6 +224,63 @@ tema: en la ficha de la sesión, «Terminal: barra de información y fondo» →
 «Fondo propio para este equipo». Sirve para distinguir de un vistazo los
 servidores delicados.
 
+### Vista dividida
+
+**⊞ Dividir**, a la izquierda de las pestañas, reparte los terminales en
+mosaico: todos los abiertos o solo los que elijas, con las columnas que
+quieras. Un clic en un terminal le da el teclado (se marca con un marco);
+doble clic en su título, o su botón de ampliar, lo deja a pantalla completa.
+Con la vista dividida activa, el botón **📡 Difusión** pasa a la barra de
+pestañas: es la forma cómoda de escribir en varios servidores viendo lo que
+responde cada uno.
+
+### Buscar, registrar y reconectar
+
+- **Buscar** (`Ctrl+Mayús+F` o el botón 🔍): busca en la pantalla y en todo
+  el historial, resalta las coincidencias y salta entre ellas con Intro y
+  Mayús+Intro.
+- **⏺ Registrar** guarda en un fichero de texto lo que vaya mostrando el
+  terminal, sin colores ni secuencias de escape. En **⚙ Ajustes** se puede
+  pedir que se registre siempre, con la hora en cada línea, y elegir la
+  carpeta.
+- **Reconexión**: si un terminal pierde la conexión, se vuelve a conectar
+  solo, con esperas crecientes, conservando lo que había en pantalla. No se
+  reintenta si lo que falla es la contraseña o la clave, ni si cierras tú la
+  sesión. Se ajusta (o se desactiva) en **⚙ Ajustes**, donde también se
+  puede pedir que al arrancar se reabran las pestañas de la última vez.
+
+### SFTP: editar y seguir al terminal
+
+- **📝** abre el fichero remoto seleccionado con el editor de tu equipo (el
+  asociado en el sistema, o el que indiques en **⚙ Ajustes**, por ejemplo
+  `code -w` o `notepad`). Cada vez que lo guardes se sube solo; el panel
+  muestra los ficheros en edición y cuándo se subieron.
+- Un panel SFTP abierto desde un terminal (**📂 SFTP**) puede **seguir al
+  terminal**: va a la carpeta en la que esté la shell. Necesita que la shell
+  la anuncie en el título de la ventana (lo hace el `bash` de Debian, Ubuntu
+  o Fedora tal como viene) o con la secuencia OSC 7.
+
+### Importar equipos y copia de seguridad
+
+**⚙ Ajustes → Importar equipos o hacer una copia…**:
+
+- **OpenSSH**: un equipo por cada `Host` de `~/.ssh/config`, con su
+  `HostName`, `User`, `Port`, `IdentityFile` y `ProxyJump` (como saltos).
+- **PuTTY**: el fichero `.reg` que da
+  `reg export HKCU\Software\SimonTatham\PuTTY\Sessions putty.reg`; en
+  Windows, también directamente las sesiones guardadas en el equipo.
+- **MobaXterm**: el fichero de «Export all sessions to file» o
+  `MobaXterm.ini`; se importan SSH, SFTP, Telnet, RDP y VNC, con sus
+  carpetas.
+
+Lo importado queda en una carpeta nueva del árbol. Las contraseñas no se
+importan.
+
+La **copia de seguridad** guarda en un solo fichero los equipos, el baúl
+(cifrado, tal cual), los ajustes, los snippets, los temas y, si se quiere,
+las claves de la carpeta de GodRemote. Al restaurarla se guarda antes la
+configuración actual, por si hay que volver atrás.
+
 ### Snippets y atajos
 
 Un snippet es un texto o una serie de órdenes con nombre que se envía al
@@ -191,6 +300,14 @@ snippets no pueden compartir atajo. Los atajos actúan cuando el teclado está
 en un terminal conectado, y tienen prioridad sobre lo que esa combinación
 signifique en la shell (por eso convienen Ctrl+Alt+letra, Ctrl+Mayús+letra o
 las teclas de función, que no chocan con nada).
+
+En el texto se pueden usar **variables**, que se sustituyen al lanzarlo:
+`{{host}}`, `{{usuario}}`, `{{puerto}}`, `{{nombre}}`, `{{fecha}}` y
+`{{hora}}`. Con `{{?Servicio}}` o `{{?Servicio=nginx}}` se pide un dato (con
+su valor por defecto) antes de enviarlo. Con la difusión activa, cada
+terminal recibe el snippet con sus propios datos. Lo que vaya entre llaves
+dobles y no sea una variable (`docker ps --format '{{.Names}}'`) se deja
+como está.
 
 ### Escribir en varios terminales a la vez
 
@@ -219,7 +336,10 @@ Linux, `%APPDATA%\godremote` en Windows; se puede cambiar con la variable
 | `vault.json` | Contraseñas y passphrases, cifradas. |
 | `keys/` | Claves generadas o importadas desde la aplicación. |
 | `themes/` | Temas del usuario. |
-| `settings.json` | Tema elegido y ajustes de la barra de información. |
+| `settings.json` | Tema elegido y demás ajustes. |
+| `state.json` | Pestañas abiertas al cerrar (para reabrirlas). |
+| `logs/` | Registros de las sesiones de terminal. |
+| `edit/` | Copias temporales de los ficheros remotos en edición. |
 | `macros.json` | Snippets y sus atajos. |
 | `tls_known_hosts.json` | Huellas de los certificados RDP aceptados. |
 | `rdp/` | Registros de la última ejecución del cliente RDP externo. |
@@ -248,11 +368,26 @@ recuperar; el resto de la configuración sigue intacta.
   de texto y los caracteres no ASCII están implementados pero sin verificar
   contra un servidor real. Si algo falla, la misma sesión se puede abrir con
   el cliente externo (clic derecho → «Abrir con el cliente externo»).
-- **Versión de la librería SSH**: el cliente RDP integrado obliga hoy a usar
-  russh 0.65.1 en lugar de 0.65.4 (véase la nota de `Cargo.toml`), con lo que
-  faltan varios endurecimientos frente a servidores maliciosos publicados en
-  0.65.2–0.65.4. Se recupera con `cargo update -p russh` cuando las
-  dependencias de IronRDP lo permitan.
+- **Versión de la librería SSH**: la edición completa usa russh 0.65.1 en
+  lugar de 0.65.4 (véase «Dos ediciones»); la edición «SSH reforzada» usa la
+  0.65.4 y no trae RDP integrado.
+- **Importación**: los formatos de PuTTY y MobaXterm se han programado a
+  partir de su documentación y se han probado con ficheros de ejemplo
+  escritos a mano, no con exportaciones reales. De MobaXterm no se importan
+  las pasarelas SSH (se avisa para añadirlas como saltos) ni los tipos que
+  GodRemote no tiene. Los `Include` y `Match` de OpenSSH no se siguen.
+- **Carpetas con valores**: cambiar una carpeta no afecta a las pestañas ya
+  abiertas, solo a las conexiones nuevas.
+- **Vista dividida**: solo terminales (no SFTP ni escritorios), 16 como
+  máximo; en el mosaico cada terminal lleva una cabecera reducida.
+- **Reconexión automática**: solo en terminales; en Telnet no se distingue
+  un corte de un cierre normal y no se reintenta.
+- **Seguir al terminal**: depende de que la shell anuncie su carpeta; en
+  `zsh`, `fish` o shells mínimas puede hacer falta configurarlo.
+- **Edición remota**: si otra persona cambia el fichero en el servidor
+  mientras lo editas, al guardar se sobrescribe sin aviso.
+- **Tipos de letra**: un tema que pide una fuente que no está instalada usa
+  la integrada (y lo avisa en el editor).
 - VNC: sin cifrado (VeNCrypt/TLS) ni las codificaciones Tight; el portapapeles
   solo admite texto Latin-1, como define el protocolo.
 - Escritorios remotos: la tecla Windows y Ctrl+Alt+Supr solo desde los
@@ -272,7 +407,7 @@ recuperar; el resto de la configuración sigue intacta.
   tenga en pantalla: conviene que todos estén en el mismo punto.
 - Saltos: como máximo ocho encadenados; cada salto se autentica con su
   propia sesión (no hay reenvío del agente SSH entre saltos).
-- Sin Mosh, FTP ni editor de texto remoto.
+- Sin Mosh ni FTP.
 - Solo se ha probado en Linux (X11). El ejecutable de Windows se compila
   desde Linux y no se ha podido ejecutar en el entorno de desarrollo.
 
@@ -282,9 +417,18 @@ recuperar; el resto de la configuración sigue intacta.
 cargo test
 ```
 
-- Pruebas unitarias del modelo, baúl, claves, terminal, temas, fondos,
-  barra de información, snippets y atajos, difusión, Telnet, X11, túneles,
-  VNC y RDP.
+```bash
+cargo test --manifest-path reforzado/Cargo.toml --target-dir target
+```
+
+La segunda orden pasa las mismas pruebas (menos las del RDP integrado) con
+la edición «SSH reforzada», es decir, contra russh 0.65.4.
+
+- Pruebas unitarias del modelo y la herencia por carpetas, baúl, claves,
+  terminal (búsqueda, reinicio, carpeta de trabajo), registro de sesiones,
+  temas, tipos de letra, fondos, barra de información, snippets (atajos y
+  variables), difusión, vista dividida, importadores, copia de seguridad,
+  Telnet, X11, túneles, VNC y RDP.
 - `tests/auth_methods.rs`: contraseña y keyboard-interactive contra un
   servidor SSH en el propio proceso.
 - `tests/ssh_integration.rs`: clave con passphrase, verificación de host,
@@ -324,9 +468,13 @@ src/
   rdp.rs          lanzador del cliente RDP externo
   trust.rs        confianza en certificados TLS
   terminal.rs     emulador de terminal y shell local
-  theme.rs        temas
+  theme.rs        temas y ajustes
+  fonts.rs        tipos de letra del sistema
   backdrop.rs     fondo del terminal (texto, ASCII, imagen)
   monitor.rs      consulta del estado del servidor
-  macros.rs       snippets de terminal y sus atajos
+  session_log.rs  registro de sesiones en ficheros
+  macros.rs       snippets de terminal, atajos y variables
+  import.rs       importación de OpenSSH, PuTTY y MobaXterm
+  backup.rs       copia de seguridad de la configuración
   ui/             interfaz (egui)
 ```

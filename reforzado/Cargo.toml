@@ -14,7 +14,7 @@
 
 [package]
 name = "godremote"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "Gestor de conexiones remotas (edición SSH reforzada, sin RDP integrado)"
 license = "MIT"
