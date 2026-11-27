@@ -2537,7 +2537,7 @@ impl App {
                 .running()
                 .is_some_and(|server| server.client_count() > 0),
             TabKind::Desktop(view) => view.state == DesktopState::Connected,
-            TabKind::Sftp(_) => false,
+            TabKind::Sftp(view) => view.is_transferring(),
         }
     }
 
@@ -2583,12 +2583,16 @@ impl App {
             match (pending.ids.len(), pending.live.as_slice()) {
                 (1, [title]) => {
                     ui.heading(format!("¿Cerrar «{title}»?"));
-                    ui.label("Su sesión sigue conectada: lo que esté en marcha se interrumpirá.");
+                    ui.label(
+                        "Tiene una sesión conectada o transferencias a medias: lo que esté en \
+                         marcha se interrumpirá.",
+                    );
                 }
                 (total, live) => {
                     ui.heading(format!("¿Cerrar {total} pestañas?"));
                     ui.label(format!(
-                        "{} de ellas siguen conectadas; lo que esté en marcha se interrumpirá:",
+                        "{} de ellas tienen sesiones conectadas o transferencias a medias; lo \
+                         que esté en marcha se interrumpirá:",
                         live.len()
                     ));
                     for title in live.iter().take(8) {
@@ -2660,8 +2664,10 @@ impl App {
             let mut parts = vec![];
             match sessions {
                 0 => {}
-                1 => parts.push("1 sesión conectada".to_string()),
-                n => parts.push(format!("{n} sesiones conectadas")),
+                1 => parts.push("1 pestaña con una sesión o transferencias en curso".to_string()),
+                n => parts.push(format!(
+                    "{n} pestañas con sesiones o transferencias en curso"
+                )),
             }
             match tunnels {
                 0 => {}

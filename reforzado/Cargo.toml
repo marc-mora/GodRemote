@@ -101,6 +101,10 @@ name = "xserver_ssh"
 path = "../tests/xserver_ssh.rs"
 
 [[test]]
+name = "sftp_features"
+path = "../tests/sftp_features.rs"
+
+[[test]]
 name = "fleet"
 path = "../tests/fleet.rs"
 

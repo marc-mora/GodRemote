@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use common::{answers, prompter};
 use godremote::keys::{self, KeyAlgorithm};
 use godremote::model::{AuthMethod, Session};
-use godremote::sftp::{self, SftpCmd, SftpEvent, SftpSource};
+use godremote::sftp::{self, OnConflict, SftpCmd, SftpEvent, SftpSource};
 use godremote::ssh::{self, Credentials, Endpoint};
 use godremote::terminal::{TermCmd, TermEvent};
 
@@ -280,6 +280,7 @@ fn ssh_shell_and_sftp_end_to_end() {
             id: 1,
             local: local_src.clone(),
             remote: format!("{work_remote}/subido"),
+            on_conflict: OnConflict::Ask,
         })
         .unwrap();
     let mut saw_progress = false;
@@ -291,7 +292,7 @@ fn ssh_shell_and_sftp_end_to_end() {
             saw_progress = true;
             None
         }
-        SftpEvent::TransferFinished { id: 1, error } => {
+        SftpEvent::TransferFinished { id: 1, error, .. } => {
             assert!(error.is_none(), "{error:?}");
             Some(())
         }
@@ -342,10 +343,11 @@ fn ssh_shell_and_sftp_end_to_end() {
             id: 2,
             remote: format!("{work_remote}/subido"),
             local: local_dst.clone(),
+            on_conflict: OnConflict::Ask,
         })
         .unwrap();
     wait_sftp(&client, |ev| match ev {
-        SftpEvent::TransferFinished { id: 2, error } => {
+        SftpEvent::TransferFinished { id: 2, error, .. } => {
             assert!(error.is_none(), "{error:?}");
             Some(())
         }

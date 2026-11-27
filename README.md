@@ -18,6 +18,7 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 ![Confirmación al pegar varias líneas y color de la carpeta](docs/protecciones.png)
 ![Una orden en varios equipos](docs/varios-equipos.png)
 ![Visor del baúl](docs/baul.png)
+![Sincronizar carpetas por SFTP](docs/sftp-sincronizar.png)
 ![Servidor X integrado](docs/servidor-x.png)
 ![Snippets con atajos de teclado](docs/snippets.png)
 ![Escritorio remoto integrado](docs/escritorio.png)
@@ -43,7 +44,7 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 | **Protecciones** | Pregunta antes de pegar varias líneas y antes de cerrar pestañas (o la aplicación) con sesiones conectadas. |
 | **Automatización** | Órdenes que se envían solas al conectar a un equipo, y ejecutar una orden en todos los equipos de una carpeta recogiendo la salida y el código de cada uno. |
 | **Vista dividida** | Varios terminales a la vez en mosaico, combinable con la difusión. |
-| **SFTP** | Dos paneles (local / remoto), subida y descarga recursivas con progreso y cancelación, crear carpeta, renombrar y eliminar. Se puede abrir sobre la conexión SSH de un terminal, seguir su carpeta y editar ficheros remotos con el editor local. Fechas en hora local. |
+| **SFTP** | Dos paneles (local / remoto), subida y descarga recursivas con progreso y cancelación, crear carpeta, renombrar y eliminar. Arrastrar y soltar desde el sistema, permisos (`chmod`), reanudar transferencias a medias y sincronizar carpetas con un plan previo. Se puede abrir sobre la conexión SSH de un terminal, seguir su carpeta y editar ficheros remotos con el editor local. Fechas en hora local. |
 | **RDP** | Cliente integrado en una pestaña, o el cliente externo del sistema (FreeRDP / `mstsc`). |
 | **VNC** | Cliente integrado (RFB 3.3–3.8; Raw, CopyRect, Hextile, ZRLE; contraseña VNC). |
 | **Telnet y serie** | Terminales para Telnet y para puertos serie (`COM3`, `/dev/ttyUSB0`…). |
@@ -449,6 +450,27 @@ bash, zsh, fish… en Linux y macOS— para abrir una en una sola pestaña. En
 los ajustes también se puede escribir cualquier orden, por ejemplo
 `wsl.exe -d Ubuntu`.
 
+### SFTP: soltar, permisos, reanudar y sincronizar
+
+- **Arrastrar y soltar**: suelta ficheros o carpetas del explorador del
+  sistema sobre la pestaña SFTP y se suben a la carpeta remota que estás
+  viendo, con el progreso y la cancelación de siempre.
+- **Permisos**: la lista remota muestra los permisos (`rwxr-xr-x`). Clic
+  derecho → **Permisos…** abre las nueve casillas y el valor en octal o en
+  texto; en una carpeta se puede aplicar también a todo su contenido.
+- **Si el destino ya existe**, se pregunta fichero a fichero (también dentro
+  de las carpetas): **Reanudar** continúa desde donde se quedó cuando el
+  destino es más pequeño que el origen, **Sustituir** u **Omitir**, con la
+  opción de aplicarlo a todos.
+- **Sincronizar…** compara la carpeta local con la remota (con sus
+  subcarpetas, por tamaño y fecha) y enseña el **plan** antes de tocar nada:
+  qué se sube, qué se descarga, qué está igual y qué existe solo en un lado.
+  Hay tres modos —local → remoto, remoto → local y en los dos sentidos— y
+  una casilla aparte, desmarcada, para **borrar** del destino lo que sobra
+  (solo en los modos de un sentido, con el número de ficheros a la vista).
+  Las copias conservan la fecha, de modo que una segunda pasada no encuentra
+  nada que hacer.
+
 ### SFTP: editar y seguir al terminal
 
 - **📝** abre el fichero remoto seleccionado con el editor de tu equipo (el
@@ -606,6 +628,14 @@ recuperar; el resto de la configuración sigue intacta.
   `zsh`, `fish` o shells mínimas puede hacer falta configurarlo.
 - **Edición remota**: si otra persona cambia el fichero en el servidor
   mientras lo editas, al guardar se sobrescribe sin aviso.
+- **SFTP**: reanudar da por bueno lo que ya hay en el destino (no hay suma
+  de comprobación). Las transferencias normales no conservan la fecha del
+  fichero; la sincronización sí. La sincronización se detiene en el primer
+  error, no sigue enlaces simbólicos ni ficheros especiales (los lista como
+  «no se sincroniza») y aplica el mismo modo a ficheros y carpetas en el
+  cambio de permisos recursivo. Arrastrar y soltar se ha probado en Linux
+  (X11) con un origen sintético, no desde un explorador de archivos real ni
+  en Windows, macOS o Wayland.
 - **Tipos de letra**: un tema que pide una fuente que no está instalada usa
   la integrada (y lo avisa en el editor).
 - VNC: sin cifrado (VeNCrypt/TLS) ni las codificaciones Tight; el portapapeles
@@ -713,6 +743,10 @@ la edición «SSH reforzada», es decir, contra russh 0.65.4.
 - `tests/agent_and_proxy.rs`: el equipo remoto lista las claves del agente
   local solo cuando se pide el reenvío, y SSH a través de un proxy HTTP con
   sus excepciones, contra un `sshd` real.
+- `tests/sftp_features.rs`: permisos (también recursivos y sin seguir
+  enlaces), reanudar subidas y descargas, conflictos, sincronización en sus
+  tres modos con y sin borrado, y que nada sale de las carpetas elegidas,
+  contra un `sshd` real.
 - `tests/fleet.rs`: una orden en varios equipos contra un `sshd` real:
   salida, códigos, límite en paralelo, tiempo máximo y cancelación.
 - `tests/xserver_ssh.rs`: de extremo a extremo: una aplicación lanzada por
