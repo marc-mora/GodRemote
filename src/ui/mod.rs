@@ -25,7 +25,9 @@ use crate::macros::MacroStore;
 use crate::model::{AuthMethod, Node, Protocol, Session, Tree};
 use crate::sftp::SftpSource;
 use crate::ssh::{Credentials, Endpoint, PromptRequest, Prompter, SecretAnswer, SshHandle, Waker};
-use crate::terminal::{ConnState, INITIAL_COLS, INITIAL_ROWS, TermInput, TerminalView};
+use crate::terminal::{
+    ConnState, INITIAL_COLS, INITIAL_ROWS, TermBackend, TermInput, TerminalView,
+};
 use crate::theme::{Settings, ThemeStore};
 use crate::theme::{ok_color, warn_color};
 use crate::tunnels::TunnelStatus;
@@ -52,6 +54,61 @@ struct Tab {
     /// Sesión de origen (para reconectar o abrir SFTP); `None` = shell local.
     session: Option<Session>,
     kind: TabKind,
+    /// Reconexión automática en marcha (solo terminales).
+    reconnect: Option<Reconnect>,
+}
+
+/// Reconexión automática de un terminal cuya conexión se cayó.
+struct Reconnect {
+    /// Intentos hechos hasta ahora.
+    attempt: u32,
+    /// Cuándo toca el siguiente intento; `None` si hay uno en curso.
+    next: Option<Instant>,
+}
+
+/// Espera antes de cada intento de reconexión, en segundos.
+const RECONNECT_DELAYS: [u64; 6] = [2, 5, 10, 20, 30, 60];
+
+fn reconnect_delay(attempt: u32) -> Duration {
+    Duration::from_secs(RECONNECT_DELAYS[(attempt as usize).min(RECONNECT_DELAYS.len() - 1)])
+}
+
+/// Un corte de red merece reintentar. Un fallo de autenticación o de
+/// confianza en el servidor no: repetirlo no lo arregla y varios intentos
+/// fallidos seguidos pueden bloquear la cuenta.
+fn worth_retrying(error: &str) -> bool {
+    let error = error.to_lowercase();
+    ![
+        "autenticación",
+        "cancelad",
+        "contraseña",
+        "clave",
+        "agente",
+        "certificado",
+        "known_hosts",
+        "rechaz",
+    ]
+    .iter()
+    .any(|word| error.contains(word))
+}
+
+/// Pestañas abiertas, para reabrirlas al arrancar.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct SavedTabs {
+    #[serde(default, rename = "pestanas")]
+    tabs: Vec<SavedTab>,
+    #[serde(default, rename = "activa")]
+    active: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct SavedTab {
+    /// Sesión del árbol; `None` es un terminal local.
+    #[serde(rename = "sesion")]
+    session: Option<Uuid>,
+    /// `terminal`, `sftp` o `escritorio`.
+    #[serde(rename = "tipo")]
+    kind: String,
 }
 
 enum VaultDialog {
@@ -168,6 +225,10 @@ pub struct App {
     toast: Option<(String, bool, Instant)>,
     quick_connect: String,
     broadcast: Broadcast,
+    /// Pestañas guardadas en disco la última vez.
+    saved_tabs: SavedTabs,
+    /// Pestañas por reabrir al arrancar (cuando el baúl ya esté resuelto).
+    pending_restore: Option<SavedTabs>,
 }
 
 /// Difusión: lo que se escribe en un terminal se repite en otros.
@@ -238,6 +299,11 @@ impl App {
                 Tree::default()
             }
         };
+        let saved_tabs: SavedTabs = std::fs::read(crate::paths::state_file())
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default();
+        let restore_tabs = settings.restore_tabs && !saved_tabs.tabs.is_empty();
         let vault_dialog = if Vault::exists(&crate::paths::vault_file()) {
             VaultDialog::Unlock {
                 password: String::new(),
@@ -286,6 +352,8 @@ impl App {
             toast,
             quick_connect: String::new(),
             broadcast: Broadcast::default(),
+            pending_restore: restore_tabs.then(|| saved_tabs.clone()),
+            saved_tabs,
         }
     }
 
@@ -336,6 +404,7 @@ impl App {
             title,
             session,
             kind,
+            reconnect: None,
         });
         self.active = self.tabs.len() - 1;
     }
@@ -362,7 +431,15 @@ impl App {
 
     /// Crea el terminal de una sesión según su protocolo.
     fn new_terminal(&self, session: &Session) -> Result<TerminalView, String> {
-        let backend = match session.protocol {
+        let mut view = TerminalView::new(self.terminal_backend(session)?);
+        view.set_backdrop(session.backdrop.as_ref());
+        view.log = self.automatic_log(&session.display_name(), &session.target());
+        Ok(view)
+    }
+
+    /// Abre la conexión de un terminal según el protocolo de la sesión.
+    fn terminal_backend(&self, session: &Session) -> Result<TermBackend, String> {
+        Ok(match session.protocol {
             Protocol::Telnet => crate::telnet::spawn_via(
                 self.rt.handle(),
                 session.host.trim().to_string(),
@@ -381,11 +458,139 @@ impl App {
                 INITIAL_COLS,
                 INITIAL_ROWS,
             ),
+        })
+    }
+
+    /// Vuelve a conectar el terminal de una pestaña, conservando su
+    /// historial.
+    fn restart_terminal(&mut self, index: usize, message: &str) -> Result<(), String> {
+        let Some(session) = self.tabs.get(index).and_then(|t| t.session.clone()) else {
+            return Ok(());
         };
-        let mut view = TerminalView::new(backend);
-        view.set_backdrop(session.backdrop.as_ref());
-        view.log = self.automatic_log(&session.display_name(), &session.target());
-        Ok(view)
+        let backend = self.terminal_backend(&session)?;
+        if let Some(TabKind::Terminal(term)) = self.tabs.get_mut(index).map(|t| &mut t.kind) {
+            term.restart(backend, message);
+        }
+        Ok(())
+    }
+
+    /// Reconexión automática: los terminales que han perdido la conexión se
+    /// reintentan con esperas crecientes.
+    fn auto_reconnect(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        let enabled = self.settings.reconnect;
+        let max = self.settings.reconnect_attempts;
+        let mut due = vec![];
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let TabKind::Terminal(term) = &tab.kind else {
+                continue;
+            };
+            match &term.state {
+                ConnState::Connecting => {}
+                ConnState::Connected => tab.reconnect = None,
+                ConnState::Closed(Some(error))
+                    if enabled && tab.session.is_some() && worth_retrying(error) =>
+                {
+                    match &mut tab.reconnect {
+                        // Solo se reintenta lo que llegó a estar conectado.
+                        None if term.was_connected => {
+                            tab.reconnect = Some(Reconnect {
+                                attempt: 0,
+                                next: Some(now + reconnect_delay(0)),
+                            });
+                        }
+                        None => {}
+                        Some(r) => match r.next {
+                            Some(at) if now >= at => due.push((index, r.attempt + 1)),
+                            // La cuenta atrás de la cabecera va por segundos.
+                            Some(_) => ctx.request_repaint_after(Duration::from_millis(500)),
+                            // El intento en curso ha fallado.
+                            None if r.attempt >= max => {}
+                            None => r.next = Some(now + reconnect_delay(r.attempt)),
+                        },
+                    }
+                }
+                ConnState::Closed(_) => tab.reconnect = None,
+            }
+        }
+        for (index, attempt) in due {
+            let message = format!("[Reconectando… intento {attempt} de {max}]");
+            match self.restart_terminal(index, &message) {
+                Ok(()) => {
+                    self.tabs[index].reconnect = Some(Reconnect {
+                        attempt,
+                        next: None,
+                    });
+                }
+                Err(e) => {
+                    self.tabs[index].reconnect = None;
+                    self.notify(e, true);
+                }
+            }
+        }
+    }
+
+    /// Pestañas que se pueden reabrir: las de sesiones del árbol y los
+    /// terminales locales.
+    fn tabs_snapshot(&self) -> SavedTabs {
+        let mut active = 0;
+        let mut tabs = vec![];
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let session = match &tab.session {
+                Some(s) if self.tree.session(s.id).is_some() => Some(s.id),
+                Some(_) => continue,
+                None => None,
+            };
+            let kind = match &tab.kind {
+                TabKind::Terminal(_) => "terminal",
+                TabKind::Sftp(_) if session.is_some() => "sftp",
+                TabKind::Desktop(_) if session.is_some() => "escritorio",
+                _ => continue,
+            };
+            if index == self.active {
+                active = tabs.len();
+            }
+            tabs.push(SavedTab {
+                session,
+                kind: kind.to_string(),
+            });
+        }
+        SavedTabs { tabs, active }
+    }
+
+    /// Guarda las pestañas abiertas cuando cambian y, al arrancar, reabre
+    /// las de la última vez si así se ha pedido.
+    fn sync_saved_tabs(&mut self) {
+        if let Some(saved) = self.pending_restore.take() {
+            // Con el baúl aún sin abrir se pedirían contraseñas guardadas.
+            if self.vault_dialog.is_some() {
+                self.pending_restore = Some(saved);
+                return;
+            }
+            for tab in &saved.tabs {
+                match (
+                    tab.session.and_then(|id| self.tree.session(id).cloned()),
+                    tab.kind.as_str(),
+                ) {
+                    (None, "terminal") if tab.session.is_none() => self.open_local_terminal(),
+                    (Some(session), "terminal") => self.open_terminal(session),
+                    (Some(session), "sftp") => self.open_sftp(session, None),
+                    (Some(session), "escritorio") => self.connect(session, None),
+                    _ => {}
+                }
+            }
+            if !self.tabs.is_empty() {
+                self.active = saved.active.min(self.tabs.len() - 1);
+            }
+            return;
+        }
+        let snapshot = self.tabs_snapshot();
+        if snapshot != self.saved_tabs {
+            if let Ok(data) = serde_json::to_vec_pretty(&snapshot) {
+                let _ = crate::paths::write_private(&crate::paths::state_file(), &data);
+            }
+            self.saved_tabs = snapshot;
+        }
     }
 
     /// Registro de sesión para un terminal nuevo, si los ajustes piden
@@ -1288,6 +1493,7 @@ impl App {
             .collect();
         let mut mirrored: Vec<TermInput> = vec![];
         let mut notice: Option<(String, bool)> = None;
+        let mut cancel_reconnect = false;
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
@@ -1308,6 +1514,29 @@ impl App {
                         ConnState::Closed(_) => {
                             status_dot(ui, ui.visuals().error_fg_color);
                             ui.colored_label(ui.visuals().error_fg_color, "Desconectado");
+                            if let Some(r) = &tab.reconnect {
+                                let max = self.settings.reconnect_attempts;
+                                match r.next {
+                                    Some(at) => {
+                                        let secs =
+                                            at.saturating_duration_since(Instant::now()).as_secs()
+                                                + 1;
+                                        ui.colored_label(
+                                            warn_color(),
+                                            format!(
+                                                "Reconectando en {secs} s (intento {} de {max})",
+                                                r.attempt + 1
+                                            ),
+                                        );
+                                        if ui.small_button("Cancelar").clicked() {
+                                            cancel_reconnect = true;
+                                        }
+                                    }
+                                    None => {
+                                        ui.weak("No se pudo reconectar");
+                                    }
+                                }
+                            }
                             if tab.session.is_some() && ui.button("⟳ Reconectar").clicked() {
                                 reconnect = true;
                             }
@@ -1548,11 +1777,22 @@ impl App {
                     Err(e) => self.notify(e, true),
                 }
             } else {
-                match self.new_terminal(&session) {
-                    Ok(view) => self.tabs[self.active].kind = TabKind::Terminal(Box::new(view)),
+                let active = self.active;
+                match self.restart_terminal(active, "[Reconectando…]") {
+                    Ok(()) => {
+                        self.tabs[active].reconnect = None;
+                        self.focus_active_terminal();
+                    }
                     Err(e) => self.notify(e, true),
                 }
             }
+        }
+        if cancel_reconnect && let Some(tab) = self.tabs.get_mut(self.active) {
+            // Se deja como un intento agotado: no vuelve a programarse.
+            tab.reconnect = Some(Reconnect {
+                attempt: u32::MAX,
+                next: None,
+            });
         }
         if let Some((session, handle)) = open_sftp {
             self.open_sftp(session, handle);
@@ -2316,6 +2556,8 @@ impl eframe::App for App {
                 .is_some_and(|id| self.tree.session(id).is_some())
         });
         self.store_secrets(secrets);
+        self.auto_reconnect(ui.ctx());
+        self.sync_saved_tabs();
 
         // --- Disposición --------------------------------------------------
         egui::Panel::top("toolbar").show(ui, |ui| {
@@ -2554,7 +2796,33 @@ fn wants_server_bar(config: &crate::monitor::ServerBar, session: &Session) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::rdp_error_summary;
+    use super::{rdp_error_summary, reconnect_delay, worth_retrying};
+
+    #[test]
+    fn reconnection_policy() {
+        // Cortes de red: se reintenta, cada vez con más espera.
+        assert!(worth_retrying("Connection reset by peer"));
+        assert!(worth_retrying(
+            "Tiempo de espera agotado conectando a 10.0.0.5:22"
+        ));
+        assert!(worth_retrying(
+            "El último salto no pudo abrir la conexión con x:22: refused"
+        ));
+        assert!(reconnect_delay(0) < reconnect_delay(3));
+        assert_eq!(reconnect_delay(99), reconnect_delay(5));
+        // Autenticación o confianza: insistir puede bloquear la cuenta.
+        assert!(!worth_retrying(
+            "Autenticación fallida: contraseña incorrecta"
+        ));
+        assert!(!worth_retrying("Autenticación cancelada"));
+        assert!(!worth_retrying(
+            "El servidor rechazó la clave /home/u/.ssh/id"
+        ));
+        assert!(!worth_retrying("Clave de host rechazada por el usuario"));
+        assert!(!worth_retrying(
+            "Ninguna clave del agente fue aceptada por el servidor"
+        ));
+    }
 
     #[test]
     fn freerdp_log_summary() {

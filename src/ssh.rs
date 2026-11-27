@@ -960,6 +960,8 @@ async fn run_shell(
     emit(TermEvent::Connected(Some(handle.clone())));
 
     let mut exit_status = None;
+    // La pestaña se cerró desde aquí (no es una caída de la conexión).
+    let mut closed_by_user = false;
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => match cmd {
@@ -967,7 +969,10 @@ async fn run_shell(
                 Some(TermCmd::Resize { cols, rows }) => {
                     channel.window_change(cols as u32, rows as u32, 0, 0).await?
                 }
-                Some(TermCmd::Close) | None => break,
+                Some(TermCmd::Close) | None => {
+                    closed_by_user = true;
+                    break;
+                }
             },
             msg = channel.wait() => match msg {
                 Some(ChannelMsg::Data { data }) => emit(TermEvent::Data(data.to_vec())),
@@ -975,6 +980,8 @@ async fn run_shell(
                     emit(TermEvent::Data(data.to_vec()))
                 }
                 Some(ChannelMsg::ExitStatus { exit_status: code }) => exit_status = Some(code),
+                // La shell murió por una señal: también es un final ordenado.
+                Some(ChannelMsg::ExitSignal { .. }) => exit_status = Some(128),
                 Some(ChannelMsg::Close) | None => break,
                 Some(_) => {}
             },
@@ -989,6 +996,9 @@ async fn run_shell(
         let _ = handle.disconnect(Disconnect::ByApplication, "", "es").await;
     }
     match exit_status {
+        // Sin código de salida y sin haberlo cerrado nosotros, el canal se
+        // ha cortado: la conexión se ha caído (red, reinicio del servidor…).
+        None if !closed_by_user => bail!("Se perdió la conexión con el servidor"),
         Some(0) | None => Ok(()),
         Some(code) => {
             emit(TermEvent::Status(format!(

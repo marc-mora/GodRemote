@@ -364,6 +364,9 @@ pub struct TerminalView {
     mouse_cell: (u16, u16),
     /// Teclas grabadas para una macro (si se está grabando).
     recording: Option<Vec<u8>>,
+    /// La sesión llegó a conectarse: si después se cierra con error es una
+    /// caída de la conexión, no un fallo al conectar.
+    pub was_connected: bool,
     /// Registro de la sesión en un fichero, si está activo.
     pub log: Option<crate::session_log::SessionLog>,
     /// Búsqueda en curso, si la barra de búsqueda está abierta.
@@ -403,6 +406,7 @@ impl TerminalView {
             mouse_down: None,
             mouse_cell: (0, 0),
             recording: None,
+            was_connected: false,
             log: None,
             search: None,
             mirror: None,
@@ -415,6 +419,36 @@ impl TerminalView {
     /// Usa un fondo propio en lugar del del tema.
     pub fn set_backdrop(&mut self, backdrop: Option<&Backdrop>) {
         self.backdrop = backdrop.map(|b| (Arc::new(b.clone()), b.image_key()));
+    }
+
+    /// Vuelve a conectar el mismo terminal con otra conexión, conservando
+    /// lo que había en pantalla, el historial y el registro.
+    pub fn restart(&mut self, backend: TermBackend, message: &str) {
+        let _ = self.backend.cmd.send(TermCmd::Close);
+        self.backend = backend;
+        self.state = ConnState::Connecting;
+        self.was_connected = false;
+        self.ssh = None;
+        self.monitor = None;
+        self.tunnels.clear();
+        self.mouse_down = None;
+        // La aplicación que hubiera a pantalla completa ya no existe: se
+        // sale de la pantalla alternativa y se restablecen los modos.
+        if self.parser.screen().alternate_screen() {
+            self.parser.process(b"\x1b[?1049l");
+        }
+        self.parser
+            .process(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1l\x1b[?2004l\x1b[0m");
+        self.note(33, message);
+        if let Some(log) = &mut self.log {
+            log.note(message);
+        }
+        // La conexión nueva arranca con el tamaño inicial: se le comunica
+        // el real en el siguiente fotograma.
+        let _ = self.backend.cmd.send(TermCmd::Resize {
+            cols: self.cols,
+            rows: self.rows,
+        });
     }
 
     /// Texto visible actualmente (útil para pruebas y para copiar todo).
@@ -439,6 +473,7 @@ impl TerminalView {
                 TermEvent::Connected(handle) => {
                     self.ssh = handle;
                     self.state = ConnState::Connected;
+                    self.was_connected = true;
                 }
                 TermEvent::Data(data) => {
                     if let Some(log) = &mut self.log {
@@ -1413,6 +1448,39 @@ mod tests {
         b.poll();
         b.apply_input(&TermInput::Bytes(b"perdido".to_vec()));
         assert!(sent_bytes(&mut sent_b).is_empty());
+    }
+
+    #[test]
+    fn restart_keeps_the_history() {
+        let (mut view, _sent, remote) = fake_terminal();
+        remote
+            .send(TermEvent::Data(b"antes de la caida\r\n".to_vec()))
+            .unwrap();
+        remote
+            .send(TermEvent::Closed(Some("Connection reset".into())))
+            .unwrap();
+        view.poll();
+        assert!(view.was_connected && !view.is_connected());
+
+        let (cmd, mut sent) = mpsc::unbounded_channel();
+        let (remote, events) = std::sync::mpsc::channel();
+        view.restart(TermBackend { cmd, events }, "[Reconectando…]");
+        assert_eq!(view.state, ConnState::Connecting);
+        assert!(!view.was_connected);
+        // A la conexión nueva se le dice el tamaño del terminal.
+        assert!(matches!(sent.try_recv(), Ok(TermCmd::Resize { .. })));
+        remote.send(TermEvent::Connected(None)).unwrap();
+        remote
+            .send(TermEvent::Data(b"despues\r\n".to_vec()))
+            .unwrap();
+        view.poll();
+        let text = view.contents();
+        assert!(text.contains("antes de la caida"), "{text}");
+        assert!(
+            text.contains("[Reconectando…]") && text.contains("despues"),
+            "{text}"
+        );
+        assert!(view.is_connected() && view.was_connected);
     }
 
     #[test]

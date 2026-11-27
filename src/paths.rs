@@ -35,6 +35,11 @@ pub fn themes_dir() -> PathBuf {
     data_dir().join("themes")
 }
 
+/// Pestañas abiertas al cerrar la aplicación (para reabrirlas).
+pub fn state_file() -> PathBuf {
+    data_dir().join("state.json")
+}
+
 /// Registros de las sesiones de terminal.
 pub fn logs_dir() -> PathBuf {
     data_dir().join("logs")

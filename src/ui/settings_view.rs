@@ -34,6 +34,29 @@ impl SettingsWindow {
                 ui.set_width(520.0);
                 rdp_section(ui, settings);
                 ui.separator();
+                ui.strong("Conexión");
+                ui.horizontal(|ui| {
+                    ui.checkbox(
+                        &mut settings.reconnect,
+                        "Reconectar los terminales que pierdan la conexión, hasta",
+                    );
+                    ui.add_enabled(
+                        settings.reconnect,
+                        egui::DragValue::new(&mut settings.reconnect_attempts)
+                            .range(1..=50)
+                            .suffix(" intentos"),
+                    );
+                })
+                .response
+                .on_hover_text(
+                    "Con esperas cada vez más largas. No se reintenta si lo que falla es la \
+                     contraseña o la clave, ni si cierras tú la sesión",
+                );
+                ui.checkbox(
+                    &mut settings.restore_tabs,
+                    "Al arrancar, reabrir las pestañas que había al cerrar",
+                );
+                ui.separator();
                 log_section(ui, settings, &mut request);
                 ui.separator();
                 ui.strong("Barra de información del servidor");

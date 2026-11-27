@@ -1182,6 +1182,15 @@ pub struct Settings {
     /// Registro de las sesiones de terminal en ficheros.
     #[serde(rename = "registro")]
     pub log: crate::session_log::LogSettings,
+    /// Volver a conectar solo cuando un terminal pierde la conexión.
+    #[serde(rename = "reconectar")]
+    pub reconnect: bool,
+    /// Intentos de reconexión antes de desistir.
+    #[serde(rename = "reintentos")]
+    pub reconnect_attempts: u32,
+    /// Reabrir al arrancar las pestañas que había al cerrar.
+    #[serde(rename = "restaurar_pestanas")]
+    pub restore_tabs: bool,
 }
 
 impl Default for Settings {
@@ -1191,6 +1200,9 @@ impl Default for Settings {
             server_bar: ServerBar::default(),
             rdp_embedded: true,
             log: Default::default(),
+            reconnect: true,
+            reconnect_attempts: 6,
+            restore_tabs: false,
         }
     }
 }
@@ -1202,6 +1214,7 @@ impl Settings {
             .and_then(|data| serde_json::from_slice(&data).ok())
             .unwrap_or_default();
         settings.server_bar.sanitize();
+        settings.reconnect_attempts = settings.reconnect_attempts.clamp(1, 50);
         settings
     }
 
@@ -1406,6 +1419,9 @@ mod tests {
                 folder: "~/registros".into(),
                 timestamps: true,
             },
+            reconnect: false,
+            reconnect_attempts: 3,
+            restore_tabs: true,
         };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);
