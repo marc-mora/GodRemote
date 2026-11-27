@@ -2,6 +2,7 @@
 
 pub mod backdrop;
 pub mod desktop;
+pub mod fonts;
 pub mod keys;
 pub mod macros;
 pub mod model;

@@ -1877,6 +1877,7 @@ dependencies = [
  "serde_json",
  "serialport",
  "sha2",
+ "skrifa",
  "tempfile",
  "tokio",
  "tokio-rustls",

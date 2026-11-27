@@ -291,6 +291,13 @@ pub struct FontSizes {
     /// Píxeles añadidos entre las líneas de los textos de la interfaz.
     #[serde(rename = "interlineado_interfaz")]
     pub ui_line_spacing: f32,
+    /// Tipo de letra de la interfaz: nombre de una familia instalada o ruta
+    /// de un fichero `.ttf`/`.otf`. Vacío = la letra integrada.
+    #[serde(rename = "fuente_interfaz")]
+    pub ui_family: String,
+    /// Tipo de letra del terminal (conviene que sea de ancho fijo).
+    #[serde(rename = "fuente_terminal")]
+    pub terminal_family: String,
 }
 
 /// Forma y separaciones de los elementos.
@@ -392,6 +399,8 @@ impl Default for FontSizes {
             terminal_line_height: 1.0,
             terminal_letter_spacing: 0.0,
             ui_line_spacing: 0.0,
+            ui_family: String::new(),
+            terminal_family: String::new(),
         }
     }
 }
@@ -731,6 +740,8 @@ impl Theme {
         f.terminal_line_height = fix(f.terminal_line_height, 0.8, 2.5, 1.0);
         f.terminal_letter_spacing = fix(f.terminal_letter_spacing, -1.0, 8.0, 0.0);
         f.ui_line_spacing = fix(f.ui_line_spacing, 0.0, 12.0, 0.0);
+        f.ui_family = f.ui_family.trim().chars().take(400).collect();
+        f.terminal_family = f.terminal_family.trim().chars().take(400).collect();
         let s = &mut self.shape;
         s.rounding = fix(s.rounding, 0.0, 16.0, 4.0);
         s.spacing = fix(s.spacing, 0.0, 30.0, 8.0);
@@ -775,6 +786,9 @@ impl Theme {
 
     /// Aplica el tema a toda la interfaz y al terminal.
     pub fn apply(&self, ctx: &egui::Context) {
+        // Tipos de letra (solo se recargan si han cambiado).
+        let warnings = crate::fonts::apply(ctx, &self.fonts.ui_family, &self.fonts.terminal_family);
+        *FONT_WARNINGS.write().unwrap() = warnings;
         use egui::{CornerRadius, FontFamily, FontId, Stroke, TextStyle};
         ctx.set_theme(if self.dark {
             egui::ThemePreference::Dark
@@ -935,6 +949,15 @@ impl Applied {
 }
 
 static CURRENT: RwLock<Option<Applied>> = RwLock::new(None);
+
+/// Tipos de letra del tema activo que no se pudieron cargar.
+static FONT_WARNINGS: RwLock<Vec<String>> = RwLock::new(Vec::new());
+
+/// Avisos sobre los tipos de letra del tema activo (p. ej. uno que no está
+/// instalado en este equipo).
+pub fn font_warnings() -> Vec<String> {
+    FONT_WARNINGS.read().unwrap().clone()
+}
 
 fn with_applied<T>(read: impl FnOnce(&Applied) -> T) -> T {
     let guard = CURRENT.read().unwrap();
@@ -1260,6 +1283,7 @@ mod tests {
         let json = t.to_json();
         assert!(json.contains("\"titulos\": 26.0"), "{json}");
         assert!(json.contains("\"interlineado_terminal\": 1.0"), "{json}");
+        assert!(json.contains("\"fuente_terminal\": \"\""), "{json}");
         assert!(
             json.contains("\"relleno_botones_horizontal\": 12.0"),
             "{json}"
@@ -1273,6 +1297,7 @@ mod tests {
         let t = Theme::from_json(
             r##"{"nombre":"Amplio",
                  "letra":{"titulos":30,"botones":11,"interlineado_terminal":9,
+                          "fuente_terminal":"  JetBrains Mono  ",
                           "separacion_letras_terminal":2,"barra_servidor":10},
                  "forma":{"separacion_vertical":0,"relleno_botones_vertical":10,
                           "altura_filas":30,"margen_terminal":12},
@@ -1284,6 +1309,8 @@ mod tests {
         // Fuera de rango se recorta.
         assert_eq!(t.fonts.terminal_line_height, 2.5);
         assert_eq!(t.fonts.terminal_letter_spacing, 2.0);
+        assert_eq!(t.fonts.terminal_family, "JetBrains Mono");
+        assert_eq!(t.fonts.ui_family, "");
         // Un cero explícito se respeta: no es «automático».
         assert_eq!(t.shape.spacing_y, 0.0);
         assert_eq!((t.shape.button_padding_y, t.shape.row_height), (10.0, 30.0));

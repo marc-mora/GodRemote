@@ -545,7 +545,16 @@ impl TerminalView {
 
         let palette = crate::theme::terminal_palette();
         let font = FontId::monospace((palette.font_size + self.font_delta).clamp(6.0, 60.0));
-        let (glyph_w, row_h) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+        let (glyph_w, narrow_w, row_h) = ui.fonts_mut(|f| {
+            (
+                f.glyph_width(&font, 'M'),
+                f.glyph_width(&font, 'i'),
+                f.row_height(&font),
+            )
+        });
+        // Con una letra que no es de ancho fijo cada carácter se coloca en
+        // su celda; si no, las columnas no cuadrarían.
+        let per_cell = palette.letter_spacing != 0.0 || (glyph_w - narrow_w).abs() > 0.01;
         // El interlineado y la separación entre letras del tema agrandan la
         // celda; el texto se centra verticalmente en ella.
         let letter_spacing = palette.letter_spacing;
@@ -899,7 +908,7 @@ impl TerminalView {
                 let contents = cell.contents();
                 // Con separación entre letras cada carácter va en su celda:
                 // un tramo dibujado de una vez no la respetaría.
-                let simple = contents.len() <= 1 && contents.is_ascii() && letter_spacing == 0.0;
+                let simple = contents.len() <= 1 && contents.is_ascii() && !per_cell;
                 if simple {
                     let ch = contents.chars().next().unwrap_or(' ');
                     match &mut text_run {

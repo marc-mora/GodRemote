@@ -22,6 +22,105 @@ pub struct ThemesWindow {
     message: Option<(String, bool)>,
     confirm_delete: Option<String>,
     backdrop: BackdropEditor,
+    /// Texto con el que se filtra la lista de tipos de letra.
+    font_filter: String,
+    /// En el terminal, ofrecer solo tipos de letra de ancho fijo.
+    mono_only: bool,
+}
+
+/// Fila para elegir un tipo de letra: los instalados (con buscador), el
+/// integrado o un fichero. `mono_only` solo se ofrece para el terminal.
+fn font_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut String,
+    filter: &mut String,
+    mut mono_only: Option<&mut bool>,
+) -> bool {
+    const BUILTIN: &str = "(la integrada)";
+    let mut changed = false;
+    ui.label(label);
+    ui.horizontal(|ui| {
+        let shown = if value.is_empty() {
+            BUILTIN.to_string()
+        } else {
+            // De una ruta se muestra solo el nombre del fichero.
+            std::path::Path::new(value.as_str())
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| value.clone())
+        };
+        egui::ComboBox::from_id_salt(("font_picker", label))
+            .selected_text(shown)
+            .width(220.0)
+            .height(300.0)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show_ui(ui, |ui| {
+                ui.set_min_width(260.0);
+                // Alto fijo desde el principio: la lista llega después (se
+                // busca en segundo plano) y el desplegable no crecería.
+                ui.set_min_height(250.0);
+                let search = ui.add(
+                    egui::TextEdit::singleline(filter)
+                        .hint_text("🔍 Buscar…")
+                        .desired_width(f32::INFINITY),
+                );
+                // Al abrir el desplegable se puede escribir directamente.
+                if ui.memory(|m| m.focused().is_none()) {
+                    search.request_focus();
+                }
+                if let Some(mono_only) = mono_only.as_deref_mut() {
+                    ui.checkbox(mono_only, "Solo de ancho fijo");
+                }
+                if ui.selectable_label(value.is_empty(), BUILTIN).clicked() {
+                    value.clear();
+                    changed = true;
+                    ui.close();
+                }
+                ui.separator();
+                let Some(fonts) = crate::fonts::system_fonts() else {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.weak("Buscando tipos de letra…");
+                    });
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(200));
+                    return;
+                };
+                let needle = filter.trim().to_lowercase();
+                let only_mono = mono_only.as_deref().is_some_and(|m| *m);
+                let mut any = false;
+                for font in fonts.iter().filter(|f| {
+                    (!only_mono || f.monospace)
+                        && (needle.is_empty() || f.family.to_lowercase().contains(&needle))
+                }) {
+                    any = true;
+                    let selected = value.eq_ignore_ascii_case(&font.family);
+                    if ui.selectable_label(selected, &font.family).clicked() {
+                        *value = font.family.clone();
+                        changed = true;
+                        ui.close();
+                    }
+                }
+                if !any {
+                    ui.weak("Ninguno coincide.");
+                }
+            });
+        if ui
+            .button("📂")
+            .on_hover_text("Usar un fichero de fuente (.ttf u .otf)")
+            .clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .set_title("Tipo de letra")
+                .add_filter("Fuentes", &["ttf", "otf", "ttc"])
+                .pick_file()
+        {
+            *value = path.display().to_string();
+            changed = true;
+        }
+    });
+    ui.end_row();
+    changed
 }
 
 /// Fila con una medida (tamaño, separación…) y su deslizador.
@@ -86,6 +185,8 @@ impl ThemesWindow {
             message: None,
             confirm_delete: None,
             backdrop: BackdropEditor::default(),
+            font_filter: String::new(),
+            mono_only: true,
         }
     }
 
@@ -440,6 +541,28 @@ impl ThemesWindow {
                     });
                 });
                 egui::CollapsingHeader::new("Letra e interlineado").show(ui, |ui| {
+                    egui::Grid::new("theme_font_families")
+                        .num_columns(2)
+                        .show(ui, |ui| {
+                            let f = &mut editing.theme.fonts;
+                            changed |= font_picker(
+                                ui,
+                                "Tipo de letra de la interfaz",
+                                &mut f.ui_family,
+                                &mut self.font_filter,
+                                None,
+                            );
+                            changed |= font_picker(
+                                ui,
+                                "Tipo de letra del terminal",
+                                &mut f.terminal_family,
+                                &mut self.font_filter,
+                                Some(&mut self.mono_only),
+                            );
+                        });
+                    for warning in theme::font_warnings() {
+                        ui.colored_label(theme::warn_color(), warning);
+                    }
                     egui::Grid::new("theme_fonts")
                         .num_columns(2)
                         .show(ui, |ui| {
