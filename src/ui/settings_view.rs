@@ -9,6 +9,8 @@ pub struct SettingsRequest {
     pub open_server_bar: bool,
     /// Abrir esta carpeta en el explorador de archivos.
     pub open_folder: Option<std::path::PathBuf>,
+    /// Abrir la ventana de importación y copias de seguridad.
+    pub open_transfer: bool,
 }
 
 #[derive(Default)]
@@ -58,6 +60,18 @@ impl SettingsWindow {
                 );
                 ui.separator();
                 log_section(ui, settings, &mut request);
+                ui.separator();
+                ui.strong("Importar y copias de seguridad");
+                if ui
+                    .button("Importar equipos o hacer una copia…")
+                    .on_hover_text(
+                        "Importar de OpenSSH, PuTTY o MobaXterm, y guardar o restaurar toda la \
+                         configuración en un solo fichero",
+                    )
+                    .clicked()
+                {
+                    request.open_transfer = true;
+                }
                 ui.separator();
                 ui.strong("Barra de información del servidor");
                 ui.horizontal(|ui| {

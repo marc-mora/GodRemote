@@ -10,6 +10,7 @@ pub mod server_bar;
 pub mod settings_view;
 pub mod sftp_view;
 pub mod themes_view;
+pub mod transfer_view;
 pub mod util;
 
 use std::collections::VecDeque;
@@ -42,6 +43,7 @@ use server_bar::ServerBarWindow;
 use settings_view::SettingsWindow;
 use sftp_view::{SftpState, SftpView};
 use themes_view::ThemesWindow;
+use transfer_view::{TransferRequest, TransferWindow};
 
 enum TabKind {
     Terminal(Box<TerminalView>),
@@ -209,6 +211,7 @@ pub struct App {
     themes_window: Option<ThemesWindow>,
     server_bar_window: Option<ServerBarWindow>,
     settings_window: Option<SettingsWindow>,
+    transfer_window: Option<TransferWindow>,
     macros: MacroStore,
     macros_window: Option<MacrosWindow>,
     /// Macro recién grabada, a la espera de nombre.
@@ -338,6 +341,7 @@ impl App {
             themes_window: None,
             server_bar_window: None,
             settings_window: None,
+            transfer_window: None,
             macros: MacroStore::load(&crate::paths::macros_file()).unwrap_or_default(),
             macros_window: None,
             recorded_macro: None,
@@ -764,6 +768,37 @@ impl App {
                 });
             }
             Err(e) => self.notify(format!("{e:#}"), true),
+        }
+    }
+
+    /// Vuelve a leer la configuración del disco (tras restaurar una copia
+    /// de seguridad). El baúl queda bloqueado: puede ser otro.
+    fn reload_config(&mut self, ctx: &egui::Context) {
+        match Tree::load(&crate::paths::sessions_file()) {
+            Ok(tree) => self.tree = tree,
+            Err(e) => self.notify(format!("No se pudieron leer las sesiones: {e:#}"), true),
+        }
+        self.themes = ThemeStore::load(&crate::paths::themes_dir());
+        self.settings = Settings::load(&crate::paths::settings_file());
+        if !self.themes.exists(&self.settings.theme) {
+            self.settings.theme = crate::theme::BASE_NAME.into();
+        }
+        if let Some(theme) = self.themes.get(&self.settings.theme) {
+            theme.apply(ctx);
+        }
+        self.macros = MacroStore::load(&crate::paths::macros_file()).unwrap_or_default();
+        self.vault = None;
+        self.selected = None;
+        self.editor = None;
+        self.folder_editor = None;
+        self.themes_window = None;
+        self.macros_window = None;
+        if Vault::exists(&crate::paths::vault_file()) {
+            self.vault_dialog = Some(VaultDialog::Unlock {
+                password: String::new(),
+                error: None,
+                focus: true,
+            });
         }
     }
 
@@ -2567,6 +2602,9 @@ impl eframe::App for App {
             if request.open_server_bar {
                 self.server_bar_window = Some(ServerBarWindow::new(&self.settings.server_bar));
             }
+            if request.open_transfer {
+                self.transfer_window = Some(TransferWindow::default());
+            }
             if let Some(folder) = request.open_folder {
                 let _ = std::fs::create_dir_all(&folder);
                 if let Err(e) = crate::paths::open_with_system(&folder) {
@@ -2575,6 +2613,23 @@ impl eframe::App for App {
             }
             if !open {
                 self.settings_window = None;
+                self.focus_active_terminal();
+            }
+        }
+        if let Some(win) = &mut self.transfer_window {
+            let (open, request) = win.show(&ctx);
+            match request {
+                TransferRequest::None => {}
+                TransferRequest::Imported(folder) => {
+                    let id = folder.id;
+                    self.tree.insert(None, Node::Folder(*folder));
+                    self.selected = Some(id);
+                    self.save_tree();
+                }
+                TransferRequest::Restored => self.reload_config(&ctx),
+            }
+            if !open {
+                self.transfer_window = None;
                 self.focus_active_terminal();
             }
         }
