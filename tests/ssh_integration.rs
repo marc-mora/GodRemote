@@ -15,7 +15,7 @@ use common::{answers, prompter};
 use godremote::keys::{self, KeyAlgorithm};
 use godremote::model::{AuthMethod, Session};
 use godremote::sftp::{self, SftpCmd, SftpEvent, SftpSource};
-use godremote::ssh::{self, Credentials};
+use godremote::ssh::{self, Credentials, Endpoint};
 use godremote::terminal::{TermCmd, TermEvent};
 
 struct Sshd(Child);
@@ -193,8 +193,7 @@ fn ssh_shell_and_sftp_end_to_end() {
     };
     let backend = ssh::spawn_shell(
         rt.handle(),
-        session.clone(),
-        creds.clone(),
+        Endpoint::direct(session.clone(), creds.clone()),
         prompter(a.clone()),
         80,
         24,
@@ -403,10 +402,7 @@ fn ssh_shell_and_sftp_end_to_end() {
     // 5. SFTP con conexión propia.
     let client = sftp::spawn(
         rt.handle(),
-        SftpSource::Connect {
-            session: Box::new(session.clone()),
-            creds: creds.clone(),
-        },
+        SftpSource::Connect(Box::new(Endpoint::direct(session.clone(), creds.clone()))),
         prompter(answers(false, &[])),
     );
     wait_sftp(&client, |ev| {

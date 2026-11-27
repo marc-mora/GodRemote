@@ -17,8 +17,25 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Formatea segundos Unix como `AAAA-MM-DD HH:MM` (UTC).
+/// Formatea segundos Unix como `AAAA-MM-DD HH:MM` en la hora local.
 pub fn format_time(secs: i64) -> String {
+    format_time_with_offset(secs, local_offset(secs))
+}
+
+/// Desfase de la zona horaria local (segundos al este de UTC) en ese
+/// instante; tiene en cuenta el horario de verano de esa fecha.
+fn local_offset(secs: i64) -> i64 {
+    use chrono::{Offset, TimeZone};
+    chrono::Local
+        .timestamp_opt(secs, 0)
+        .single()
+        .map(|dt| dt.offset().fix().local_minus_utc() as i64)
+        .unwrap_or(0)
+}
+
+/// Formatea segundos Unix aplicando un desfase fijo respecto a UTC.
+pub fn format_time_with_offset(secs: i64, offset_secs: i64) -> String {
+    let secs = secs + offset_secs;
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     // Algoritmo de fecha civil (Howard Hinnant).
@@ -99,9 +116,28 @@ mod tests {
 
     #[test]
     fn times() {
-        assert_eq!(format_time(0), "1970-01-01 00:00");
-        assert_eq!(format_time(951_782_400), "2000-02-29 00:00");
-        assert_eq!(format_time(1_700_000_000), "2023-11-14 22:13");
+        assert_eq!(format_time_with_offset(0, 0), "1970-01-01 00:00");
+        assert_eq!(format_time_with_offset(951_782_400, 0), "2000-02-29 00:00");
+        assert_eq!(
+            format_time_with_offset(1_700_000_000, 0),
+            "2023-11-14 22:13"
+        );
+        // Madrid en invierno (UTC+1) y en verano (UTC+2); cambio de día.
+        assert_eq!(
+            format_time_with_offset(1_700_000_000, 3600),
+            "2023-11-14 23:13"
+        );
+        assert_eq!(
+            format_time_with_offset(1_690_929_000, 7200),
+            "2023-08-02 00:30"
+        );
+        assert_eq!(format_time_with_offset(0, -5 * 3600), "1969-12-31 19:00");
+        // La hora local coincide con aplicar el desfase que da el sistema.
+        let now = 1_700_000_000;
+        assert_eq!(
+            format_time(now),
+            format_time_with_offset(now, local_offset(now))
+        );
     }
 
     #[test]

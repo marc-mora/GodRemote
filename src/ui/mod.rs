@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::model::{AuthMethod, Node, Protocol, Session, Tree};
 use crate::sftp::SftpSource;
-use crate::ssh::{Credentials, PromptRequest, Prompter, SecretAnswer, SshHandle, Waker};
+use crate::ssh::{Credentials, Endpoint, PromptRequest, Prompter, SecretAnswer, SshHandle, Waker};
 use crate::terminal::{ConnState, INITIAL_COLS, INITIAL_ROWS, TerminalView};
 use crate::vault::Vault;
 use editor::{EditorResult, SessionEditor};
@@ -251,25 +251,76 @@ impl App {
         self.active = self.tabs.len() - 1;
     }
 
-    fn new_terminal(&self, session: &Session) -> TerminalView {
-        let backend = crate::ssh::spawn_shell(
-            self.rt.handle(),
-            session.clone(),
-            self.creds_for(session),
-            self.prompter.clone(),
-            INITIAL_COLS,
-            INITIAL_ROWS,
-        );
-        TerminalView::new(backend)
+    /// Reúne lo necesario para conectar por SSH: secretos de la sesión y de
+    /// cada salto (bastión) de su cadena.
+    fn endpoint_for(&self, session: &Session) -> Result<Endpoint, String> {
+        let mut chain = vec![session.clone()];
+        let mut next = session.jump;
+        while let Some(id) = next {
+            if chain.iter().any(|s| s.id == id) {
+                return Err("La cadena de saltos forma un bucle".into());
+            }
+            if chain.len() > crate::ssh::MAX_JUMPS {
+                return Err("Demasiados saltos encadenados".into());
+            }
+            let jump = self
+                .tree
+                .session(id)
+                .ok_or("La sesión de salto ya no existe; edita la sesión")?;
+            if !jump.protocol.is_ssh() {
+                return Err(format!(
+                    "El salto «{}» no es una sesión SSH",
+                    jump.display_name()
+                ));
+            }
+            next = jump.jump;
+            chain.push(jump.clone());
+        }
+        // El último de la cadena es el más cercano a nosotros.
+        let mut endpoint: Option<Endpoint> = None;
+        for hop in chain.into_iter().rev() {
+            endpoint = Some(Endpoint {
+                creds: self.creds_for(&hop),
+                session: hop,
+                via: endpoint.map(Box::new),
+            });
+        }
+        endpoint.ok_or_else(|| "Sesión no válida".to_string())
+    }
+
+    /// Crea el terminal de una sesión según su protocolo.
+    fn new_terminal(&self, session: &Session) -> Result<TerminalView, String> {
+        let backend = match session.protocol {
+            Protocol::Telnet => crate::telnet::spawn(
+                self.rt.handle(),
+                session.host.trim().to_string(),
+                session.port,
+                self.waker.clone(),
+                INITIAL_COLS,
+                INITIAL_ROWS,
+            ),
+            Protocol::Serial => crate::serial::spawn(&session.serial, self.waker.clone())
+                .map_err(|e| format!("{e:#}"))?,
+            _ => crate::ssh::spawn_shell(
+                self.rt.handle(),
+                self.endpoint_for(session)?,
+                self.prompter.clone(),
+                INITIAL_COLS,
+                INITIAL_ROWS,
+            ),
+        };
+        Ok(TerminalView::new(backend))
     }
 
     fn open_terminal(&mut self, session: Session) {
-        let view = self.new_terminal(&session);
-        self.push_tab(
-            session.display_name(),
-            Some(session),
-            TabKind::Terminal(Box::new(view)),
-        );
+        match self.new_terminal(&session) {
+            Ok(view) => self.push_tab(
+                session.display_name(),
+                Some(session),
+                TabKind::Terminal(Box::new(view)),
+            ),
+            Err(e) => self.notify(e, true),
+        }
     }
 
     fn open_local_terminal(&mut self) {
@@ -286,9 +337,9 @@ impl App {
     fn open_sftp(&mut self, session: Session, shared: Option<SshHandle>) {
         let source = match shared {
             Some(handle) => SftpSource::Existing(handle),
-            None => SftpSource::Connect {
-                creds: self.creds_for(&session),
-                session: Box::new(session.clone()),
+            None => match self.endpoint_for(&session) {
+                Ok(endpoint) => SftpSource::Connect(Box::new(endpoint)),
+                Err(e) => return self.notify(e, true),
             },
         };
         let client = crate::sftp::spawn(self.rt.handle(), source, self.prompter.clone());
@@ -350,13 +401,11 @@ impl App {
     /// Abre una sesión con el protocolo indicado (o el suyo propio).
     fn connect(&mut self, session: Session, protocol: Option<Protocol>) {
         match protocol.unwrap_or(session.protocol) {
-            Protocol::Ssh => self.open_terminal(session),
+            Protocol::Ssh | Protocol::Telnet | Protocol::Serial => self.open_terminal(session),
             Protocol::Sftp => self.open_sftp(session, None),
             Protocol::Rdp => self.open_rdp(session),
             // Pendiente de integrar.
-            Protocol::Vnc | Protocol::Telnet | Protocol::Serial => {
-                self.notify("Protocolo aún no disponible", true)
-            }
+            Protocol::Vnc => self.notify("Protocolo aún no disponible", true),
         }
     }
 
@@ -760,8 +809,10 @@ impl App {
         });
 
         if reconnect && let Some(session) = self.tabs[self.active].session.clone() {
-            let view = self.new_terminal(&session);
-            self.tabs[self.active].kind = TabKind::Terminal(Box::new(view));
+            match self.new_terminal(&session) {
+                Ok(view) => self.tabs[self.active].kind = TabKind::Terminal(Box::new(view)),
+                Err(e) => self.notify(e, true),
+            }
         }
         if let Some((session, handle)) = open_sftp {
             self.open_sftp(session, handle);

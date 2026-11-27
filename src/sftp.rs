@@ -11,8 +11,7 @@ use russh_sftp::client::SftpSession;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-use crate::model::Session;
-use crate::ssh::{Credentials, Prompter, SshHandle};
+use crate::ssh::{Endpoint, Prompter, SshHandle};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteEntry {
@@ -26,11 +25,8 @@ pub struct RemoteEntry {
 }
 
 pub enum SftpSource {
-    /// Abrir una conexión nueva.
-    Connect {
-        session: Box<Session>,
-        creds: Credentials,
-    },
+    /// Abrir una conexión nueva (con sus saltos, si los tiene).
+    Connect(Box<Endpoint>),
     /// Reutilizar una conexión SSH ya autenticada (p. ej. la del terminal).
     Existing(SshHandle),
 }
@@ -150,12 +146,12 @@ async fn run(
 ) -> Result<()> {
     let (handle, owned) = match source {
         SftpSource::Existing(h) => (h, false),
-        SftpSource::Connect { session, creds } => {
+        SftpSource::Connect(endpoint) => {
             let status = {
                 let emit = emit.clone();
                 move |s: String| emit(SftpEvent::Status(s))
             };
-            let connected = crate::ssh::connect(&session, creds, prompter, &status).await?;
+            let connected = crate::ssh::connect_endpoint(&endpoint, prompter, &status).await?;
             if !connected.to_save.is_empty() {
                 emit(SftpEvent::SaveSecrets(connected.to_save));
             }

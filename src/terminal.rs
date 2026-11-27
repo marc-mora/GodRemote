@@ -23,6 +23,11 @@ pub enum TermEvent {
     Data(Vec<u8>),
     /// Secretos validados que el usuario pidió guardar en el baúl.
     SaveSecrets(Vec<(String, String)>),
+    /// Estado de uno de los túneles de la sesión.
+    Tunnel {
+        index: usize,
+        status: crate::tunnels::TunnelStatus,
+    },
     /// Fin de la sesión, con el error si lo hubo.
     Closed(Option<String>),
 }
@@ -258,6 +263,61 @@ pub fn key_bytes(key: Key, mods: egui::Modifiers, app_cursor: bool) -> Option<Ve
     })
 }
 
+/// Codifica un evento de ratón para la aplicación remota (xterm).
+///
+/// `code`: 0 izquierdo, 1 central, 2 derecho, 3 ninguno; +32 movimiento;
+/// 64/65 rueda arriba/abajo. `col`/`row` empiezan en 0.
+pub fn mouse_report(
+    encoding: vt100::MouseProtocolEncoding,
+    code: u8,
+    mods: egui::Modifiers,
+    col: u16,
+    row: u16,
+    release: bool,
+) -> Option<Vec<u8>> {
+    let mut cb = code as u32;
+    if mods.shift {
+        cb += 4;
+    }
+    if mods.alt {
+        cb += 8;
+    }
+    if mods.ctrl {
+        cb += 16;
+    }
+    let (x, y) = (col as u32 + 1, row as u32 + 1);
+    match encoding {
+        vt100::MouseProtocolEncoding::Sgr => {
+            Some(format!("\x1b[<{cb};{x};{y}{}", if release { 'm' } else { 'M' }).into_bytes())
+        }
+        vt100::MouseProtocolEncoding::Default => {
+            // El formato clásico no distingue qué botón se suelta y no puede
+            // expresar coordenadas mayores de 223.
+            let cb = if release { (cb & !3) | 3 } else { cb };
+            if x > 223 || y > 223 {
+                return None;
+            }
+            Some(vec![
+                0x1b,
+                b'[',
+                b'M',
+                (cb + 32) as u8,
+                (x + 32) as u8,
+                (y + 32) as u8,
+            ])
+        }
+        vt100::MouseProtocolEncoding::Utf8 => {
+            let cb = if release { (cb & !3) | 3 } else { cb };
+            let mut out = vec![0x1b, b'[', b'M'];
+            for v in [cb + 32, x + 32, y + 32] {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(char::from_u32(v)?.encode_utf8(&mut buf).as_bytes());
+            }
+            Some(out)
+        }
+    }
+}
+
 /// Una pestaña de terminal: estado del emulador + conexión con la shell.
 pub struct TerminalView {
     parser: vt100::Parser,
@@ -269,11 +329,18 @@ pub struct TerminalView {
     pub ssh: Option<SshHandle>,
     /// Secretos pendientes de guardar en el baúl (los recoge la app).
     pub secrets_to_save: Vec<(String, String)>,
+    /// Estado de los túneles de la sesión (por índice).
+    pub tunnels: Vec<Option<crate::tunnels::TunnelStatus>>,
     /// Selección: (fila, columna) inicial y final, en coordenadas de pantalla.
     selection: Option<((u16, u16), (u16, u16))>,
     pub font_size: f32,
     scroll_accum: f32,
     want_focus: bool,
+    /// Botón pulsado mientras la aplicación remota controla el ratón.
+    mouse_down: Option<u8>,
+    mouse_cell: (u16, u16),
+    /// Teclas grabadas para una macro (si se está grabando).
+    recording: Option<Vec<u8>>,
 }
 
 pub const INITIAL_COLS: u16 = 100;
@@ -291,10 +358,14 @@ impl TerminalView {
             state: ConnState::Connecting,
             ssh: None,
             secrets_to_save: vec![],
+            tunnels: vec![],
             selection: None,
             font_size: 14.0,
             scroll_accum: 0.0,
             want_focus: true,
+            mouse_down: None,
+            mouse_cell: (0, 0),
+            recording: None,
         }
     }
 
@@ -323,23 +394,67 @@ impl TerminalView {
                 }
                 TermEvent::Data(data) => self.parser.process(&data),
                 TermEvent::SaveSecrets(s) => self.secrets_to_save.extend(s),
+                TermEvent::Tunnel { index, status } => {
+                    if let crate::tunnels::TunnelStatus::Failed(e) = &status {
+                        self.note(31, &format!("Túnel {}: {e}", index + 1));
+                    }
+                    if self.tunnels.len() <= index {
+                        self.tunnels.resize(index + 1, None);
+                    }
+                    self.tunnels[index] = Some(status);
+                }
                 TermEvent::Closed(err) => {
                     match &err {
                         Some(e) => self.note(31, &format!("Error: {e}")),
                         None => self.note(33, "[Sesión finalizada]"),
                     }
                     self.ssh = None;
+                    self.tunnels.clear();
                     self.state = ConnState::Closed(err);
                 }
             }
         }
     }
 
-    fn send(&mut self, data: Vec<u8>) {
+    /// Envía bytes a la shell sin registrarlos en la macro en curso.
+    fn send_raw(&mut self, data: Vec<u8>) {
         if self.state == ConnState::Connected && !data.is_empty() {
             self.parser.screen_mut().set_scrollback(0);
             let _ = self.backend.cmd.send(TermCmd::Input(data));
         }
+    }
+
+    /// Envía entrada de teclado (se graba si hay una macro en curso).
+    fn send(&mut self, data: Vec<u8>) {
+        if self.state == ConnState::Connected
+            && let Some(rec) = &mut self.recording
+        {
+            rec.extend_from_slice(&data);
+        }
+        self.send_raw(data);
+    }
+
+    /// Envía un texto tal cual (macros). Los saltos de línea son Intro.
+    pub fn send_text(&mut self, text: &str) {
+        let text = text.replace("\r\n", "\r").replace('\n', "\r");
+        self.send_raw(text.into_bytes());
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.state == ConnState::Connected
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    pub fn start_recording(&mut self) {
+        self.recording = Some(vec![]);
+    }
+
+    /// Termina la grabación y devuelve lo tecleado.
+    pub fn stop_recording(&mut self) -> Vec<u8> {
+        self.recording.take().unwrap_or_default()
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -419,18 +534,91 @@ impl TerminalView {
             response.request_focus();
             self.want_focus = false;
         }
-        if response.drag_started()
-            && let Some(pos) = response.interact_pointer_pos()
-        {
-            let cell = to_cell(pos);
-            self.selection = Some((cell, cell));
-        } else if response.dragged()
-            && let Some(pos) = response.interact_pointer_pos()
-            && let Some(sel) = &mut self.selection
-        {
-            sel.1 = to_cell(pos);
-        } else if response.clicked() {
+        // Si la aplicación remota pide el ratón (htop, mc, vim…) se le envían
+        // los eventos; con Mayús pulsada se vuelve a la selección local.
+        let mouse_mode = self.parser.screen().mouse_protocol_mode();
+        let mouse_encoding = self.parser.screen().mouse_protocol_encoding();
+        let app_mouse = mouse_mode != vt100::MouseProtocolMode::None
+            && self.state == ConnState::Connected
+            && !ui.input(|i| i.modifiers.shift);
+        if app_mouse {
             self.selection = None;
+            let over = response.contains_pointer();
+            for event in ui.input(|i| i.events.clone()) {
+                match event {
+                    Event::PointerButton {
+                        pos,
+                        button,
+                        pressed,
+                        modifiers,
+                    } => {
+                        let code = match button {
+                            egui::PointerButton::Primary => 0,
+                            egui::PointerButton::Middle => 1,
+                            egui::PointerButton::Secondary => 2,
+                            _ => continue,
+                        };
+                        let (row, col) = to_cell(pos);
+                        if pressed {
+                            if !over || !rect.contains(pos) {
+                                continue;
+                            }
+                            self.mouse_down = Some(code);
+                            self.mouse_cell = (row, col);
+                            if let Some(r) =
+                                mouse_report(mouse_encoding, code, modifiers, col, row, false)
+                            {
+                                self.send_raw(r);
+                            }
+                        } else if self.mouse_down.take().is_some()
+                            && mouse_mode != vt100::MouseProtocolMode::Press
+                            && let Some(r) =
+                                mouse_report(mouse_encoding, code, modifiers, col, row, true)
+                        {
+                            self.send_raw(r);
+                        }
+                    }
+                    Event::PointerMoved(pos) => {
+                        let cell = to_cell(pos);
+                        if cell == self.mouse_cell {
+                            continue;
+                        }
+                        let code = match (mouse_mode, self.mouse_down) {
+                            (vt100::MouseProtocolMode::AnyMotion, down) => {
+                                (over && rect.contains(pos) || down.is_some())
+                                    .then_some(down.unwrap_or(3))
+                            }
+                            (vt100::MouseProtocolMode::ButtonMotion, Some(down)) => Some(down),
+                            _ => None,
+                        };
+                        if let Some(code) = code {
+                            self.mouse_cell = cell;
+                            let mods = ui.input(|i| i.modifiers);
+                            if let Some(r) =
+                                mouse_report(mouse_encoding, code + 32, mods, cell.1, cell.0, false)
+                            {
+                                self.send_raw(r);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            self.mouse_down = None;
+            if response.drag_started()
+                && let Some(pos) = response.interact_pointer_pos()
+            {
+                let cell = to_cell(pos);
+                self.selection = Some((cell, cell));
+            } else if response.dragged()
+                && let Some(pos) = response.interact_pointer_pos()
+                && let Some(sel) = &mut self.selection
+            {
+                sel.1 = to_cell(pos);
+            } else if response.clicked() {
+                self.selection = None;
+            }
         }
 
         let has_focus = response.has_focus();
@@ -448,7 +636,7 @@ impl TerminalView {
             });
         }
 
-        // --- Rueda: historial ---------------------------------------------
+        // --- Rueda ---------------------------------------------------------
         if response.hovered() {
             let dy = ui.input(|i| i.smooth_scroll_delta().y);
             if dy != 0.0 {
@@ -456,10 +644,39 @@ impl TerminalView {
                 let lines = self.scroll_accum.trunc();
                 if lines != 0.0 {
                     self.scroll_accum -= lines;
-                    let current = self.parser.screen().scrollback() as i64;
-                    let next = (current + lines as i64).max(0) as usize;
-                    self.parser.screen_mut().set_scrollback(next);
-                    self.selection = None;
+                    let count = (lines.abs() as usize).min(20);
+                    if app_mouse {
+                        // La aplicación remota recibe la rueda.
+                        let (row, col) = ui
+                            .input(|i| i.pointer.hover_pos())
+                            .map(to_cell)
+                            .unwrap_or((0, 0));
+                        let code = if lines > 0.0 { 64 } else { 65 };
+                        let mods = ui.input(|i| i.modifiers);
+                        for _ in 0..count {
+                            if let Some(r) =
+                                mouse_report(mouse_encoding, code, mods, col, row, false)
+                            {
+                                self.send_raw(r);
+                            }
+                        }
+                    } else if self.parser.screen().alternate_screen() {
+                        // Pantalla alternativa (less, man…): la rueda son flechas.
+                        let key = if lines > 0.0 {
+                            Key::ArrowUp
+                        } else {
+                            Key::ArrowDown
+                        };
+                        let app_cursor = self.parser.screen().application_cursor();
+                        if let Some(bytes) = key_bytes(key, egui::Modifiers::NONE, app_cursor) {
+                            self.send_raw(bytes.repeat(count));
+                        }
+                    } else {
+                        let current = self.parser.screen().scrollback() as i64;
+                        let next = (current + lines as i64).max(0) as usize;
+                        self.parser.screen_mut().set_scrollback(next);
+                        self.selection = None;
+                    }
                 }
             }
         }
@@ -516,28 +733,32 @@ impl TerminalView {
         // --- Menú contextual ----------------------------------------------
         let selected = self.selected_text();
         let mut paste_request = false;
-        response.context_menu(|ui| {
-            if ui
-                .add_enabled(selected.is_some(), egui::Button::new("Copiar"))
-                .clicked()
-            {
-                if let Some(text) = &selected {
-                    ui.ctx().copy_text(text.clone());
+        // (Si la aplicación remota usa el ratón, el clic derecho es suyo.)
+        let menu_response = if app_mouse { None } else { Some(&response) };
+        menu_response.map(|r| {
+            r.context_menu(|ui| {
+                if ui
+                    .add_enabled(selected.is_some(), egui::Button::new("Copiar"))
+                    .clicked()
+                {
+                    if let Some(text) = &selected {
+                        ui.ctx().copy_text(text.clone());
+                    }
+                    ui.close();
                 }
-                ui.close();
-            }
-            if ui.button("Pegar").clicked() {
-                paste_request = true;
-                ui.close();
-            }
-            if ui.button("Copiar toda la pantalla").clicked() {
-                ui.ctx().copy_text(self.parser.screen().contents());
-                ui.close();
-            }
-            if ui.button("Limpiar historial").clicked() {
-                self.parser.screen_mut().clear_scrollback();
-                ui.close();
-            }
+                if ui.button("Pegar").clicked() {
+                    paste_request = true;
+                    ui.close();
+                }
+                if ui.button("Copiar toda la pantalla").clicked() {
+                    ui.ctx().copy_text(self.parser.screen().contents());
+                    ui.close();
+                }
+                if ui.button("Limpiar historial").clicked() {
+                    self.parser.screen_mut().clear_scrollback();
+                    ui.close();
+                }
+            })
         });
         if paste_request {
             // El portapapeles se pide al sistema; llega como Event::Paste.
@@ -731,6 +952,42 @@ mod tests {
         );
         assert_eq!(key_bytes(Key::Delete, none, false).unwrap(), b"\x1b[3~");
         assert!(key_bytes(Key::A, none, false).is_none());
+    }
+
+    #[test]
+    fn mouse_reports() {
+        use vt100::MouseProtocolEncoding as Enc;
+        let none = egui::Modifiers::NONE;
+        // SGR: coordenadas desde 1; soltar termina en 'm'.
+        assert_eq!(
+            mouse_report(Enc::Sgr, 0, none, 9, 4, false).unwrap(),
+            b"\x1b[<0;10;5M"
+        );
+        assert_eq!(
+            mouse_report(Enc::Sgr, 2, none, 0, 0, true).unwrap(),
+            b"\x1b[<2;1;1m"
+        );
+        assert_eq!(
+            mouse_report(Enc::Sgr, 64, egui::Modifiers::CTRL, 299, 99, false).unwrap(),
+            b"\x1b[<80;300;100M"
+        );
+        // Clásico: todo desplazado 32; soltar es el botón 3.
+        assert_eq!(
+            mouse_report(Enc::Default, 0, none, 0, 0, false).unwrap(),
+            [0x1b, b'[', b'M', 32, 33, 33]
+        );
+        assert_eq!(
+            mouse_report(Enc::Default, 1, none, 1, 1, true).unwrap(),
+            [0x1b, b'[', b'M', 35, 34, 34]
+        );
+        assert!(mouse_report(Enc::Default, 0, none, 250, 0, false).is_none());
+        // UTF-8 admite columnas grandes.
+        let r = mouse_report(Enc::Utf8, 0, none, 250, 0, false).unwrap();
+        assert_eq!(&r[..3], b"\x1b[M");
+        assert_eq!(
+            std::str::from_utf8(&r[3..]).unwrap().chars().nth(1),
+            char::from_u32(283)
+        );
     }
 
     #[test]
