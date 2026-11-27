@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use std::sync::Arc;
 
 use crate::backdrop::Backdrop;
+use crate::highlight::{Compiled, HlColor};
 use crate::ssh::{SshHandle, Waker};
 use crate::theme::TermPalette;
 
@@ -317,9 +318,15 @@ pub fn mouse_report(
 struct TermCallbacks {
     title: String,
     cwd: Option<String>,
+    /// Ha sonado la campana (BEL) desde la última vez que se miró.
+    bell: bool,
 }
 
 impl vt100::Callbacks for TermCallbacks {
+    fn audible_bell(&mut self, _: &mut vt100::Screen) {
+        self.bell = true;
+    }
+
     fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
         self.title = String::from_utf8_lossy(title).chars().take(300).collect();
     }
@@ -393,6 +400,111 @@ fn find_all(line: &[char], needle: &[char]) -> Vec<usize> {
         .collect()
 }
 
+/// Un enlace visible en pantalla.
+struct Link {
+    url: String,
+    /// Sus tramos: fila, primera columna y la siguiente a la última (un
+    /// enlace largo sigue en la fila de debajo).
+    spans: Vec<(u16, u16, u16)>,
+}
+
+/// Lo que se añade al texto de la pantalla: palabras resaltadas y enlaces.
+#[derive(Default)]
+struct Decor {
+    cols: u16,
+    /// Color impuesto a cada celda (fila × columna).
+    colors: Vec<Option<HlColor>>,
+    links: Vec<Link>,
+}
+
+impl Decor {
+    fn color(&self, row: u16, col: u16) -> Option<HlColor> {
+        self.colors
+            .get(row as usize * self.cols as usize + col as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn link_at(&self, row: u16, col: u16) -> Option<&Link> {
+        self.links.iter().find(|link| {
+            link.spans
+                .iter()
+                .any(|(r, start, end)| *r == row && (*start..*end).contains(&col))
+        })
+    }
+}
+
+/// Estado para el que se calculó un [`Decor`]: contenido, desplazamiento del
+/// historial, filas, columnas y versión de las reglas.
+type DecorKey = (u64, usize, u16, u16, u64);
+
+/// Busca enlaces y palabras resaltadas en lo que muestra la pantalla. Una
+/// línea que no cabe y sigue en la fila siguiente se trata entera.
+fn decorate(screen: &vt100::Screen, rows: u16, cols: u16, rules: &Compiled) -> Decor {
+    let width = cols as usize;
+    let mut decor = Decor {
+        cols,
+        colors: vec![None; rows as usize * width],
+        links: vec![],
+    };
+    if rules.is_idle() {
+        return decor;
+    }
+    let mut row = 0;
+    while row < rows {
+        let first = row as usize;
+        let mut line: Vec<char> = Vec::with_capacity(width);
+        loop {
+            for col in 0..cols {
+                let ch = screen
+                    .cell(row, col)
+                    .and_then(|cell| cell.contents().chars().next())
+                    .unwrap_or(' ');
+                line.push(ch);
+            }
+            let wrapped = screen.row_wrapped(row);
+            row += 1;
+            if !wrapped || row >= rows {
+                break;
+            }
+        }
+        if line.iter().all(|c| *c == ' ') {
+            continue;
+        }
+        let cell_of = |index: usize| ((first + index / width) as u16, (index % width) as u16);
+        for (range, color) in rules.spans(&line) {
+            for index in range {
+                // Lo que la aplicación remota ya coloreó se respeta.
+                let (r, c) = cell_of(index);
+                let plain = screen
+                    .cell(r, c)
+                    .is_some_and(|cell| cell.fgcolor() == vt100::Color::Default && !cell.inverse());
+                if plain {
+                    decor.colors[first * width + index] = Some(color);
+                }
+            }
+        }
+        if rules.links {
+            for (range, url) in crate::highlight::find_links(&line) {
+                let mut spans = vec![];
+                let mut start = range.start;
+                while start < range.end {
+                    let line_row = start / width;
+                    let end = range.end.min((line_row + 1) * width);
+                    spans.push((
+                        (first + line_row) as u16,
+                        (start - line_row * width) as u16,
+                        (end - line_row * width) as u16,
+                    ));
+                    start = end;
+                }
+                decor.links.push(Link { url, spans });
+            }
+        }
+    }
+    decor
+}
+
 /// Una pestaña de terminal: estado del emulador + conexión con la shell.
 pub struct TerminalView {
     parser: vt100::Parser<TermCallbacks>,
@@ -417,6 +529,17 @@ pub struct TerminalView {
     mouse_cell: (u16, u16),
     /// Teclas grabadas para una macro (si se está grabando).
     recording: Option<Vec<u8>>,
+    /// Ha llegado salida desde la última vez que la aplicación lo miró.
+    activity: bool,
+    /// Cambia cada vez que cambia el contenido de la pantalla.
+    generation: u64,
+    /// Enlaces y resaltado de lo que se ve, y para qué estado se calcularon
+    /// (contenido, desplazamiento, tamaño y versión de las reglas).
+    decor: Option<(DecorKey, Arc<Decor>)>,
+    /// Enlace sobre el que se abrió el menú contextual.
+    menu_link: Option<String>,
+    /// Avisos para el usuario (los recoge la aplicación).
+    pub notices: Vec<String>,
     /// La sesión llegó a conectarse: si después se cierra con error es una
     /// caída de la conexión, no un fallo al conectar.
     pub was_connected: bool,
@@ -464,6 +587,11 @@ impl TerminalView {
             mouse_down: None,
             mouse_cell: (0, 0),
             recording: None,
+            activity: false,
+            generation: 0,
+            decor: None,
+            menu_link: None,
+            notices: vec![],
             was_connected: false,
             log: None,
             search: None,
@@ -509,6 +637,13 @@ impl TerminalView {
         });
     }
 
+    /// Devuelve si ha llegado salida y si ha sonado la campana desde la
+    /// última llamada.
+    pub fn take_activity(&mut self) -> (bool, bool) {
+        let bell = std::mem::take(&mut self.parser.callbacks_mut().bell);
+        (std::mem::take(&mut self.activity), bell)
+    }
+
     /// Carpeta de trabajo de la shell, si esta la anuncia (con OSC 7 o en
     /// el título de la ventana). Puede empezar por `~`.
     pub fn working_dir(&self) -> Option<String> {
@@ -528,6 +663,36 @@ impl TerminalView {
     fn note(&mut self, color: u8, text: &str) {
         let line = format!("\r\x1b[{color}m{text}\x1b[0m\r\n");
         self.parser.process(line.as_bytes());
+        self.generation += 1;
+    }
+
+    /// Enlaces y palabras resaltadas de lo que se ve ahora. Solo se
+    /// recalculan cuando cambia la pantalla.
+    fn decor(&mut self, rules: &Compiled) -> Arc<Decor> {
+        let screen = self.parser.screen();
+        let key = (
+            self.generation,
+            screen.scrollback(),
+            self.rows,
+            self.cols,
+            rules.version,
+        );
+        if let Some((cached, decor)) = &self.decor
+            && *cached == key
+        {
+            return decor.clone();
+        }
+        let decor = Arc::new(decorate(screen, self.rows, self.cols, rules));
+        self.decor = Some((key, decor.clone()));
+        decor
+    }
+
+    /// Abre un enlace con el navegador del sistema.
+    fn open_link(&mut self, url: &str) {
+        if let Err(e) = crate::paths::open_url(url) {
+            self.notices
+                .push(format!("No se pudo abrir el enlace: {e}"));
+        }
     }
 
     /// Procesa los eventos pendientes de la shell.
@@ -544,7 +709,9 @@ impl TerminalView {
                     if let Some(log) = &mut self.log {
                         log.feed(&data);
                     }
+                    self.activity |= !data.is_empty();
                     self.parser.process(&data);
+                    self.generation += 1;
                 }
                 TermEvent::SaveSecrets(s) => self.secrets_to_save.extend(s),
                 TermEvent::Tunnel { index, status } => {
@@ -947,6 +1114,38 @@ impl TerminalView {
             }
         }
 
+        // --- Enlaces --------------------------------------------------------
+        // Enlace bajo el puntero: se abre con Ctrl+clic o desde el menú.
+        let rules = crate::highlight::current();
+        let grid = Rect::from_min_size(
+            origin,
+            Vec2::new(cols as f32 * cell_w, rows as f32 * cell_h),
+        );
+        let hovered_url = (!app_mouse)
+            .then(|| response.hover_pos())
+            .flatten()
+            .filter(|pos| grid.contains(*pos))
+            .map(to_cell)
+            .and_then(|(row, col)| {
+                self.decor(&rules)
+                    .link_at(row, col)
+                    .map(|link| link.url.clone())
+            });
+        if response.secondary_clicked() {
+            self.menu_link = hovered_url.clone();
+        }
+        if let Some(url) = &hovered_url {
+            if ui.input(|i| i.modifiers.command) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                if response.clicked() {
+                    self.open_link(url);
+                }
+            }
+            response
+                .clone()
+                .on_hover_text_at_pointer(format!("{url}\nCtrl+clic para abrirlo"));
+        }
+
         let has_focus = response.has_focus();
         self.has_focus = has_focus;
         if has_focus {
@@ -1063,10 +1262,23 @@ impl TerminalView {
         // --- Menú contextual ----------------------------------------------
         let selected = self.selected_text();
         let mut paste_request = false;
+        let menu_link = self.menu_link.clone();
+        let mut open_link = None;
         // (Si la aplicación remota usa el ratón, el clic derecho es suyo.)
         let menu_response = if app_mouse { None } else { Some(&response) };
         menu_response.map(|r| {
             r.context_menu(|ui| {
+                if let Some(url) = &menu_link {
+                    if ui.button("🔗 Abrir enlace").on_hover_text(url).clicked() {
+                        open_link = Some(url.clone());
+                        ui.close();
+                    }
+                    if ui.button("Copiar enlace").clicked() {
+                        ui.ctx().copy_text(url.clone());
+                        ui.close();
+                    }
+                    ui.separator();
+                }
                 if ui
                     .add_enabled(selected.is_some(), egui::Button::new("Copiar"))
                     .clicked()
@@ -1086,10 +1298,14 @@ impl TerminalView {
                 }
                 if ui.button("Limpiar historial").clicked() {
                     self.parser.screen_mut().clear_scrollback();
+                    self.generation += 1;
                     ui.close();
                 }
             })
         });
+        if let Some(url) = open_link {
+            self.open_link(&url);
+        }
         if paste_request {
             // El portapapeles se pide al sistema; llega como Event::Paste.
             ui.ctx()
@@ -1131,6 +1347,7 @@ impl TerminalView {
             }
         }
 
+        let decor = self.decor(&rules);
         let screen = self.parser.screen();
         for row in 0..rows {
             let y = origin.y + row as f32 * cell_h;
@@ -1171,7 +1388,11 @@ impl TerminalView {
                 if cell.is_wide_continuation() {
                     continue;
                 }
-                let mut fg = resolve(cell.fgcolor(), palette.foreground, cell.bold(), &palette);
+                let mut fg = match decor.color(row, col) {
+                    // Palabra resaltada por una regla de los ajustes.
+                    Some(color) => color.resolve(&palette),
+                    None => resolve(cell.fgcolor(), palette.foreground, cell.bold(), &palette),
+                };
                 let mut bg = resolve(cell.bgcolor(), palette.background, false, &palette);
                 if cell.inverse() {
                     std::mem::swap(&mut fg, &mut bg);
@@ -1236,6 +1457,24 @@ impl TerminalView {
             }
             flush_bg(&mut bg_run, cols);
             flush_text(&mut text_run);
+        }
+
+        // Enlace bajo el puntero: subrayado.
+        if let Some(link) = hovered_url
+            .as_ref()
+            .and_then(|url| decor.links.iter().find(|link| link.url == *url))
+        {
+            let color = ui.visuals().hyperlink_color;
+            for (row, start, end) in &link.spans {
+                let y = origin.y + (*row + 1) as f32 * cell_h - 1.5;
+                painter.line_segment(
+                    [
+                        Pos2::new(origin.x + *start as f32 * cell_w, y),
+                        Pos2::new(origin.x + *end as f32 * cell_w, y),
+                    ],
+                    Stroke::new(1.0, color),
+                );
+            }
         }
 
         // Cursor
@@ -1533,12 +1772,67 @@ mod tests {
         // Un título que no es una carpeta (vim, top…) no cuenta.
         feed(&mut view, b"\x1b]0;vim notas.txt\x07");
         assert_eq!(view.working_dir(), None);
+        // La salida y la campana se anotan una sola vez.
+        assert_eq!(view.take_activity(), (true, false));
+        assert_eq!(view.take_activity(), (false, false));
+        feed(&mut view, b"ya\x07");
+        assert_eq!(view.take_activity(), (true, true));
         // OSC 7 manda sobre el título.
         feed(&mut view, b"\x1b]7;file://web/srv/datos%20nuevos\x07");
         assert_eq!(view.working_dir().as_deref(), Some("/srv/datos nuevos"));
         assert_eq!(dir_from_url("http://x/y"), None);
         assert_eq!(dir_from_title("sin arroba: /tmp"), None);
         assert_eq!(dir_from_title("u@h: no-es-ruta"), None);
+    }
+
+    #[test]
+    fn links_and_highlights_follow_the_screen() {
+        let (mut view, _sent, events) = fake_terminal();
+        let feed = |view: &mut TerminalView, data: &[u8]| {
+            events.send(TermEvent::Data(data.to_vec())).unwrap();
+            view.poll();
+        };
+        let rules = Compiled::new(&crate::highlight::Highlight::default());
+        // Un enlace más largo que la fila sigue en la de debajo.
+        let long = format!("https://ejemplo.com/{}", "a".repeat(100));
+        feed(
+            &mut view,
+            format!("ver {long}.\r\nERROR: algo \x1b[32mfailed\x1b[0m; todo OK\r\n").as_bytes(),
+        );
+        let decor = view.decor(&rules);
+        assert_eq!(decor.links.len(), 1);
+        assert_eq!(decor.links[0].url, long);
+        assert_eq!(decor.links[0].spans, [(0, 4, 100), (1, 0, 24)]);
+        assert!(decor.link_at(0, 3).is_none());
+        assert!(decor.link_at(0, 4).is_some());
+        assert!(decor.link_at(1, 23).is_some());
+        // El punto final no es del enlace.
+        assert!(decor.link_at(1, 24).is_none());
+        // «ERROR» y «OK» se pintan; «failed» ya venía en verde y se respeta.
+        assert_eq!(decor.color(2, 0), Some(HlColor::Red));
+        assert_eq!(decor.color(2, 4), Some(HlColor::Red));
+        assert_eq!(decor.color(2, 5), None);
+        assert_eq!(decor.color(2, 12), None);
+        assert_eq!(decor.color(2, 25), Some(HlColor::Green));
+        // Sin cambios en pantalla se reutiliza lo calculado.
+        assert!(Arc::ptr_eq(&decor, &view.decor(&rules)));
+        feed(&mut view, b"warning\r\n");
+        let decor = view.decor(&rules);
+        assert_eq!(decor.color(3, 0), Some(HlColor::Yellow));
+        // Al desplazar el historial, los enlaces se mueven con el texto.
+        feed(&mut view, "\r\n".repeat(27).as_bytes());
+        assert!(view.decor(&rules).links.is_empty());
+        view.parser.screen_mut().set_scrollback(2);
+        assert_eq!(view.decor(&rules).links[0].spans, [(0, 4, 100), (1, 0, 24)]);
+        assert_eq!(view.decor(&rules).color(2, 0), Some(HlColor::Red));
+        // Con las reglas apagadas no hay nada que pintar.
+        let off = Compiled::new(&crate::highlight::Highlight {
+            enabled: false,
+            links: false,
+            rules: vec![],
+        });
+        let decor = view.decor(&off);
+        assert!(decor.links.is_empty() && decor.colors.iter().all(Option::is_none));
     }
 
     #[test]

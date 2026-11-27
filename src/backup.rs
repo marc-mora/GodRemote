@@ -10,11 +10,12 @@ use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
 /// Ficheros sueltos de la carpeta de datos que entran en la copia.
-const FILES: [&str; 5] = [
+const FILES: [&str; 6] = [
     "sessions.json",
     "vault.json",
     "settings.json",
     "macros.json",
+    "tunnels.json",
     "tls_known_hosts.json",
 ];
 /// Carpetas que entran en la copia (solo sus ficheros, sin subcarpetas).
@@ -210,6 +211,9 @@ impl Backup {
         }
         if has("macros.json") {
             parts.push("los snippets".to_string());
+        }
+        if has("tunnels.json") {
+            parts.push("los túneles".to_string());
         }
         if count("themes/") > 0 {
             parts.push(format!("{} tema(s)", count("themes/")));

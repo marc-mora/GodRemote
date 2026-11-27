@@ -25,10 +25,11 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 | **Importar y copiar** | Importa equipos de `~/.ssh/config`, PuTTY y MobaXterm. Copia de seguridad de toda la configuración en un solo fichero. |
 | **SSH** | Terminal integrado (xterm-256color, historial de 10 000 líneas, selección y copiar/pegar, ratón para `htop`, `mc`, `vim`…). Autenticación por contraseña, keyboard-interactive (PAM, códigos OTP), clave privada (OpenSSH, PEM, PuTTY `.ppk`) y agente SSH / Pageant. |
 | **Saltos (bastiones)** | Cada equipo tiene su lista ordenada de saltos SSH, como `ProxyJump a,b,c`. Vale para SSH, SFTP, Telnet, VNC y RDP integrado. |
-| **Túneles** | Reenvío local (`-L`), remoto (`-R`) y dinámico SOCKS5 (`-D`), por sesión. Se abren con el terminal y se cierran con él. |
+| **Túneles** | Reenvío local (`-L`), remoto (`-R`) y dinámico SOCKS5 (`-D`). Ligados a una sesión (se abren y se cierran con su terminal) o guardados en el **gestor de túneles**, que los inicia y los detiene sin abrir un terminal. |
 | **X11** | Reenvío de aplicaciones gráficas al servidor X local, con cookie de autenticación sustituida. |
 | **Verificación de host** | Usa `~/.ssh/known_hosts`, compartido con OpenSSH. Pregunta la primera vez y **rechaza** la conexión si la clave del servidor cambia. |
-| **Terminal** | Búsqueda en pantalla e historial, registro de la sesión en un fichero, reconexión automática si se cae la red y reapertura de las pestañas al arrancar. |
+| **Terminal** | Búsqueda en pantalla e historial, registro de la sesión en un fichero, reconexión automática si se cae la red y reapertura de las pestañas al arrancar. Enlaces que se abren con `Ctrl+clic` y palabras resaltadas (errores en rojo, avisos en amarillo…) con reglas propias. |
+| **Pestañas** | Se reordenan arrastrando, se renombran con doble clic y avisan cuando hay salida nueva (o suena la campana) en una que no estás mirando. |
 | **Vista dividida** | Varios terminales a la vez en mosaico, combinable con la difusión. |
 | **SFTP** | Dos paneles (local / remoto), subida y descarga recursivas con progreso y cancelación, crear carpeta, renombrar y eliminar. Se puede abrir sobre la conexión SSH de un terminal, seguir su carpeta y editar ficheros remotos con el editor local. Fechas en hora local. |
 | **RDP** | Cliente integrado en una pestaña, o el cliente externo del sistema (FreeRDP / `mstsc`). |
@@ -112,6 +113,11 @@ segunda edición.
   interrupción; `Ctrl+V` pega; `Mayús+RePág/AvPág` o la rueda recorren el
   historial. Cuando una aplicación remota usa el ratón, `Mayús` devuelve el
   ratón a la selección local.
+- En las pestañas: **arrastra** una para cambiarla de sitio, **doble clic**
+  para renombrarla (Intro guarda, Escape cancela), clic central para
+  cerrarla y **clic derecho** para duplicarla, llevarla al principio o al
+  final y cerrar las demás o las de su derecha. El nombre que le pongas se
+  conserva al reabrir las pestañas.
 - En SFTP: doble clic entra en una carpeta o transfiere un fichero;
   `Ctrl+clic` selecciona varios.
 - En un escritorio remoto: el teclado y el ratón van al equipo remoto mientras
@@ -146,7 +152,24 @@ En el editor de una sesión:
 - **X11**: necesita un servidor X local (el propio escritorio en Linux;
   VcXsrv, Xming o WSLg en Windows; XQuartz en macOS).
 - **Túneles**: tipo, dirección y puerto de escucha, y destino. La cabecera del
-  terminal muestra cuántos están activos.
+  terminal muestra cuántos están activos. Estos túneles viven mientras viva
+  el terminal de la sesión.
+
+### Gestor de túneles
+
+**🔀 Túneles**, en la barra superior, guarda túneles que no dependen de
+ningún terminal. Cada uno tiene un nombre, el equipo SSH del árbol por el que
+pasa (con sus saltos y su autenticación, heredada o propia), el tipo (`-L`,
+`-R` o `-D`), dónde escucha y a dónde lleva.
+
+- **▶ Iniciar** abre una conexión SSH solo para ese túnel; **⏹ Detener** la
+  cierra. El botón de la barra muestra cuántos hay en marcha, en verde, o en
+  rojo si alguno ha fallado.
+- **Iniciarlo al abrir GodRemote** lo arranca solo (después de desbloquear el
+  baúl, para no pedir contraseñas que ya están guardadas).
+- Si la conexión se cae, el túnel se vuelve a levantar solo con las mismas
+  esperas y el mismo límite de intentos que los terminales (**⚙ Ajustes**).
+- Los túneles se guardan en `tunnels.json` y entran en la copia de seguridad.
 
 ### Barra de información del servidor
 
@@ -249,6 +272,22 @@ responde cada uno.
   sesión. Se ajusta (o se desactiva) en **⚙ Ajustes**, donde también se
   puede pedir que al arrancar se reabran las pestañas de la última vez.
 
+### Enlaces, palabras resaltadas y avisos de actividad
+
+- **Enlaces**: las direcciones `http://`, `https://`, `ftp://` y `www.…` que
+  aparezcan en el terminal se subrayan al pasar el ratón y se abren en el
+  navegador con **Ctrl+clic**, o con el botón derecho (**Abrir enlace** /
+  **Copiar enlace**). Un enlace partido en dos filas se reconoce entero.
+- **Palabras resaltadas**: `error`, `failed`, `denied`… salen en rojo;
+  `warning`, `timeout`… en amarillo; `ok`, `success`, `done`… en verde. En
+  **⚙ Ajustes** se cambian las listas, se añaden reglas con su color (uno
+  de la paleta del tema o uno propio) o se apaga todo. Solo cuentan las
+  palabras enteras, sin distinguir mayúsculas, y lo que el servidor ya haya
+  coloreado se deja como está.
+- **Actividad**: una pestaña de terminal que recibe salida mientras miras
+  otra se destaca; si además ha sonado la campana, lleva un 🔔. Se quita al
+  abrirla, y se puede desactivar en **⚙ Ajustes**.
+
 ### SFTP: editar y seguir al terminal
 
 - **📝** abre el fichero remoto seleccionado con el editor de tu equipo (el
@@ -341,6 +380,7 @@ Linux, `%APPDATA%\godremote` en Windows; se puede cambiar con la variable
 | `logs/` | Registros de las sesiones de terminal. |
 | `edit/` | Copias temporales de los ficheros remotos en edición. |
 | `macros.json` | Snippets y sus atajos. |
+| `tunnels.json` | Túneles del gestor de túneles. |
 | `tls_known_hosts.json` | Huellas de los certificados RDP aceptados. |
 | `rdp/` | Registros de la última ejecución del cliente RDP externo. |
 
@@ -357,6 +397,12 @@ recuperar; el resto de la configuración sigue intacta.
   otra dirección.
 - El reenvío X11 da a las aplicaciones remotas acceso a tu servidor X (pueden
   leer el teclado y la pantalla): actívalo solo con servidores de confianza.
+- Los enlaces del terminal los escribe el servidor: solo se abren los que
+  empiezan por `http`, `https` o `ftp`, y se entregan al navegador sin pasar
+  por un intérprete de órdenes. Aun así, mira a dónde lleva un enlace antes
+  de abrirlo (aparece al pasar el ratón).
+- Un túnel del gestor marcado para iniciarse solo abre una conexión SSH cada
+  vez que arrancas GodRemote: márcalo solo en equipos de confianza.
 
 ## Limitaciones conocidas
 
@@ -393,8 +439,17 @@ recuperar; el resto de la configuración sigue intacta.
 - Escritorios remotos: la tecla Windows y Ctrl+Alt+Supr solo desde los
   botones; Ctrl+Alt a la vez se trata como AltGr.
 - X11: hace falta un servidor X local; GodRemote no trae uno propio.
-- Los túneles van ligados al terminal de la sesión: no hay un gestor de
-  túneles independiente.
+- **Gestor de túneles**: un túnel por conexión (dos túneles al mismo equipo
+  abren dos conexiones SSH); no cuenta las conexiones ni el tráfico que
+  pasan por cada túnel.
+- **Enlaces**: solo direcciones web escritas tal cual; no se reconocen los
+  hiperenlaces con texto propio (OSC 8) ni rutas de ficheros. Si la línea
+  empieza más arriba de lo que se ve en pantalla, el trozo visible no se
+  reconoce como enlace.
+- **Palabras resaltadas**: las reglas son listas de palabras o frases, no
+  expresiones regulares, y son las mismas para todos los terminales.
+- **Aviso de actividad**: solo en pestañas de terminal; un programa que
+  escribe sin parar (`top`, `tail -f`) mantiene su pestaña siempre marcada.
 - Barra de información: solo en terminales SSH (no en Telnet, serie ni en el
   terminal local) y pensada para servidores Linux; en Windows no da datos.
   Un servidor que limite a una las sesiones por conexión (`MaxSessions 1`)
@@ -428,7 +483,7 @@ la edición «SSH reforzada», es decir, contra russh 0.65.4.
   terminal (búsqueda, reinicio, carpeta de trabajo), registro de sesiones,
   temas, tipos de letra, fondos, barra de información, snippets (atajos y
   variables), difusión, vista dividida, importadores, copia de seguridad,
-  Telnet, X11, túneles, VNC y RDP.
+  enlaces y palabras resaltadas, Telnet, X11, túneles, VNC y RDP.
 - `tests/auth_methods.rs`: contraseña y keyboard-interactive contra un
   servidor SSH en el propio proceso.
 - `tests/ssh_integration.rs`: clave con passphrase, verificación de host,
@@ -436,6 +491,9 @@ la edición «SSH reforzada», es decir, contra russh 0.65.4.
 - `tests/ssh_features.rs`: uno y varios saltos encadenados (tres `sshd`
   reales), túneles `-L`/`-R`/`-D` y X11; Telnet contra un `telnetd` real,
   directo y a través de dos saltos.
+- `tests/tunnel_manager.rs`: gestor de túneles contra un `sshd` real: local,
+  SOCKS a través de un salto y remoto, sin terminal; parar y volver a
+  iniciar, puerto ocupado, caída de la conexión y servidor apagado.
 - `tests/monitor_integration.rs`: barra de información contra un `sshd`
   real (datos coherentes con los del equipo, y la consulta deja de
   ejecutarse en el servidor al cerrarla).
@@ -458,6 +516,7 @@ src/
   keys.rs         claves SSH
   ssh.rs          conexión, saltos, autenticación y shell
   tunnels.rs      reenvío de puertos y SOCKS5
+  tunnel_manager.rs  túneles guardados, con su propia conexión
   x11.rs          reenvío X11
   sftp.rs         cliente SFTP y transferencias
   telnet.rs       cliente Telnet
@@ -473,6 +532,7 @@ src/
   backdrop.rs     fondo del terminal (texto, ASCII, imagen)
   monitor.rs      consulta del estado del servidor
   session_log.rs  registro de sesiones en ficheros
+  highlight.rs    enlaces y palabras resaltadas del terminal
   macros.rs       snippets de terminal, atajos y variables
   import.rs       importación de OpenSSH, PuTTY y MobaXterm
   backup.rs       copia de seguridad de la configuración

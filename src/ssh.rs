@@ -92,6 +92,11 @@ impl Prompter {
         (self.waker)();
     }
 
+    /// La función que despierta la interfaz, para quien avise por su cuenta.
+    pub fn waker(&self) -> Waker {
+        self.waker.clone()
+    }
+
     /// Pregunta si se confía en la clave (o certificado) de un servidor
     /// desconocido. `algorithm` describe el tipo de clave o certificado.
     pub async fn confirm_host_key(

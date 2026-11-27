@@ -88,6 +88,10 @@ path = "../tests/monitor_integration.rs"
 name = "vnc_integration"
 path = "../tests/vnc_integration.rs"
 
+[[test]]
+name = "tunnel_manager"
+path = "../tests/tunnel_manager.rs"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

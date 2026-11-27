@@ -1,6 +1,7 @@
 //! Ventana general de ajustes.
 
-use crate::theme::Settings;
+use crate::highlight::{Highlight, HlColor, MAX_RULES, Rule};
+use crate::theme::{Rgb, Settings};
 
 /// Lo que la ventana pide a la aplicación.
 #[derive(Default)]
@@ -33,11 +34,17 @@ impl SettingsWindow {
             .resizable(false)
             .default_pos([280.0, 60.0])
             .show(ctx, |ui| {
-                ui.set_width(520.0);
-                rdp_section(ui, settings);
-                ui.separator();
-                ui.strong("Conexión");
-                ui.horizontal(|ui| {
+                ui.set_width(540.0);
+                let max_height = (ctx.content_rect().height() - 140.0).max(240.0);
+                egui::ScrollArea::vertical()
+                    .max_height(max_height)
+                    .min_scrolled_height(max_height)
+                    .show(ui, |ui| {
+                        ui.set_width(520.0);
+                        rdp_section(ui, settings);
+                        ui.separator();
+                        ui.strong("Conexión");
+                        ui.horizontal(|ui| {
                     ui.checkbox(
                         &mut settings.reconnect,
                         "Reconectar los terminales que pierdan la conexión, hasta",
@@ -54,15 +61,23 @@ impl SettingsWindow {
                     "Con esperas cada vez más largas. No se reintenta si lo que falla es la \
                      contraseña o la clave, ni si cierras tú la sesión",
                 );
-                ui.checkbox(
-                    &mut settings.restore_tabs,
-                    "Al arrancar, reabrir las pestañas que había al cerrar",
-                );
-                ui.separator();
-                ui.strong("SFTP");
-                ui.horizontal(|ui| {
-                    ui.label("Editor de los ficheros remotos");
-                    ui.add(
+                        ui.checkbox(
+                            &mut settings.restore_tabs,
+                            "Al arrancar, reabrir las pestañas que había al cerrar",
+                        );
+                        ui.checkbox(
+                            &mut settings.activity_notice,
+                            "Destacar las pestañas de terminal con salida nueva sin ver",
+                        )
+                        .on_hover_text(
+                            "La pestaña se resalta cuando su terminal recibe algo mientras miras \
+                     otra, y lleva una campana si la ha hecho sonar",
+                        );
+                        ui.separator();
+                        ui.strong("SFTP");
+                        ui.horizontal(|ui| {
+                            ui.label("Editor de los ficheros remotos");
+                            ui.add(
                         egui::TextEdit::singleline(&mut settings.editor)
                             .desired_width(250.0)
                             .hint_text("el del sistema"),
@@ -72,12 +87,12 @@ impl SettingsWindow {
                          en SFTP: por ejemplo «notepad», «code -w» o la ruta de un programa. \
                          Vacío, se usa el que el sistema tenga asociado a cada tipo de fichero",
                     );
-                });
-                ui.separator();
-                log_section(ui, settings, &mut request);
-                ui.separator();
-                ui.strong("Importar y copias de seguridad");
-                if ui
+                        });
+                        ui.separator();
+                        log_section(ui, settings, &mut request);
+                        ui.separator();
+                        ui.strong("Importar y copias de seguridad");
+                        if ui
                     .button("Importar equipos o hacer una copia…")
                     .on_hover_text(
                         "Importar de OpenSSH, PuTTY o MobaXterm, y guardar o restaurar toda la \
@@ -87,20 +102,104 @@ impl SettingsWindow {
                 {
                     request.open_transfer = true;
                 }
-                ui.separator();
-                ui.strong("Barra de información del servidor");
-                ui.horizontal(|ui| {
-                    ui.checkbox(
-                        &mut settings.server_bar.enabled,
-                        "Mostrarla bajo los terminales SSH",
-                    );
-                    if ui.button("Elegir qué muestra…").clicked() {
-                        request.open_server_bar = true;
-                    }
-                });
+                        ui.separator();
+                        ui.strong("Barra de información del servidor");
+                        ui.horizontal(|ui| {
+                            ui.checkbox(
+                                &mut settings.server_bar.enabled,
+                                "Mostrarla bajo los terminales SSH",
+                            );
+                            if ui.button("Elegir qué muestra…").clicked() {
+                                request.open_server_bar = true;
+                            }
+                        });
+                        ui.separator();
+                        highlight_section(ui, &mut settings.highlight);
+                    });
             });
         (open, *settings != before, request)
     }
+}
+
+/// Palabras resaltadas y enlaces del terminal.
+fn highlight_section(ui: &mut egui::Ui, highlight: &mut Highlight) {
+    ui.strong("Terminal: enlaces y palabras resaltadas");
+    ui.checkbox(
+        &mut highlight.links,
+        "Reconocer las direcciones web (se abren con Ctrl+clic o con el botón derecho)",
+    );
+    ui.checkbox(
+        &mut highlight.enabled,
+        "Resaltar estas palabras con su color",
+    )
+    .on_hover_text(
+        "Solo palabras enteras, sin distinguir mayúsculas, y solo en el texto que el servidor \
+         no haya coloreado ya",
+    );
+    let mut remove = None;
+    ui.add_enabled_ui(highlight.enabled, |ui| {
+        for (index, rule) in highlight.rules.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt(("highlight_color", index))
+                    .selected_text(rule.color.label())
+                    .width(86.0)
+                    .show_ui(ui, |ui| {
+                        for (color, label) in HlColor::THEMED {
+                            ui.selectable_value(&mut rule.color, color, label);
+                        }
+                        let custom = matches!(rule.color, HlColor::Custom(_));
+                        if ui.selectable_label(custom, "Propio").clicked() && !custom {
+                            rule.color = HlColor::Custom(Rgb::hex(0xff8800));
+                        }
+                    });
+                // Muestra del color: los del tema, tal como se verán.
+                match &mut rule.color {
+                    HlColor::Custom(rgb) => {
+                        ui.color_edit_button_srgb(&mut rgb.0);
+                    }
+                    themed => {
+                        let color = themed.resolve(&crate::theme::terminal_palette());
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                        ui.painter().rect_filled(rect.shrink(2.0), 3.0, color);
+                    }
+                }
+                ui.add(
+                    egui::TextEdit::singleline(&mut rule.words)
+                        .desired_width(330.0)
+                        .hint_text("palabras o frases separadas por comas"),
+                );
+                if ui.button("🗑").on_hover_text("Quitar esta regla").clicked() {
+                    remove = Some(index);
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    highlight.rules.len() < MAX_RULES,
+                    egui::Button::new("➕ Añadir regla"),
+                )
+                .clicked()
+            {
+                highlight.rules.push(Rule::new("", HlColor::Cyan));
+            }
+            if ui
+                .button("Restablecer")
+                .on_hover_text("Vuelve a las reglas de fábrica: errores, avisos y aciertos")
+                .clicked()
+            {
+                highlight.rules = Highlight::default_rules();
+            }
+        });
+    });
+    if let Some(index) = remove {
+        highlight.rules.remove(index);
+    }
+    ui.weak(
+        "Si dos reglas chocan gana la que va antes. Los colores con nombre salen de la paleta \
+         ANSI del tema, así que cambian con él.",
+    );
 }
 
 /// Registro de las sesiones de terminal en ficheros.

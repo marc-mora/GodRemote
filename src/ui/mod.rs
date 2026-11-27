@@ -11,9 +11,10 @@ pub mod settings_view;
 pub mod sftp_view;
 pub mod themes_view;
 pub mod transfer_view;
+pub mod tunnels_view;
 pub mod util;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -32,6 +33,7 @@ use crate::terminal::{
 };
 use crate::theme::{Settings, ThemeStore};
 use crate::theme::{ok_color, warn_color};
+use crate::tunnel_manager::{RunState, RunningTunnel, TunnelStore};
 use crate::tunnels::TunnelStatus;
 use crate::vault::Vault;
 use desktop_view::{DesktopState, DesktopView};
@@ -44,6 +46,7 @@ use settings_view::SettingsWindow;
 use sftp_view::{SftpState, SftpView};
 use themes_view::ThemesWindow;
 use transfer_view::{TransferRequest, TransferWindow};
+use tunnels_view::{TunnelRequest, TunnelView, TunnelsWindow};
 
 enum TabKind {
     Terminal(Box<TerminalView>),
@@ -63,6 +66,23 @@ struct Tab {
     /// Pestaña de terminal de la que procede (una vista SFTP abierta
     /// sobre su conexión), para seguir su carpeta.
     follows: Option<u64>,
+    /// Ha recibido salida mientras no se veía.
+    unseen: bool,
+    /// Ha sonado la campana mientras no se veía.
+    rang: bool,
+    /// El usuario le ha puesto nombre: se conserva al reabrirla.
+    renamed: bool,
+}
+
+/// Acción pedida desde el menú contextual de una pestaña.
+enum TabAction {
+    Rename(usize),
+    Duplicate(usize),
+    MoveFirst(usize),
+    MoveLast(usize),
+    Close(usize),
+    CloseOthers(usize),
+    CloseRight(usize),
 }
 
 /// Reconexión automática de un terminal cuya conexión se cayó.
@@ -71,6 +91,12 @@ struct Reconnect {
     attempt: u32,
     /// Cuándo toca el siguiente intento; `None` si hay uno en curso.
     next: Option<Instant>,
+}
+
+/// Un túnel del gestor en marcha y, si su conexión se cayó, sus reintentos.
+struct TunnelRun {
+    running: RunningTunnel,
+    retry: Option<Reconnect>,
 }
 
 /// Espera antes de cada intento de reconexión, en segundos.
@@ -116,6 +142,9 @@ struct SavedTab {
     /// `terminal`, `sftp` o `escritorio`.
     #[serde(rename = "tipo")]
     kind: String,
+    /// Nombre que le puso el usuario, si la renombró.
+    #[serde(default, rename = "titulo", skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
 }
 
 enum VaultDialog {
@@ -226,10 +255,21 @@ pub struct App {
     quick_connect: String,
     broadcast: Broadcast,
     split: SplitView,
+    /// Pestaña cuyo título se está editando: identificador, texto y si el
+    /// campo ya tiene el foco.
+    tab_rename: Option<(u64, String, bool)>,
+    /// Pestaña que se está arrastrando para cambiarla de sitio.
+    tab_drag: Option<u64>,
     /// Pestañas guardadas en disco la última vez.
     saved_tabs: SavedTabs,
     /// Pestañas por reabrir al arrancar (cuando el baúl ya esté resuelto).
     pending_restore: Option<SavedTabs>,
+    /// Túneles guardados del gestor y los que están en marcha.
+    tunnel_store: TunnelStore,
+    tunnel_runs: HashMap<Uuid, TunnelRun>,
+    tunnels_window: Option<TunnelsWindow>,
+    /// Faltan por iniciar los túneles marcados para arrancar solos.
+    pending_autostart: bool,
 }
 
 /// Vista dividida: varios terminales a la vez, en mosaico.
@@ -327,6 +367,7 @@ impl App {
         if let Some(theme) = themes.get(&settings.theme) {
             theme.apply(&cc.egui_ctx);
         }
+        crate::highlight::set(&settings.highlight);
         let ctx = cc.egui_ctx.clone();
         let waker: Waker = Arc::new(move || ctx.request_repaint());
         let (prompt_tx, prompt_rx) = std::sync::mpsc::channel();
@@ -399,8 +440,14 @@ impl App {
             quick_connect: String::new(),
             broadcast: Broadcast::default(),
             split: SplitView::default(),
+            tab_rename: None,
+            tab_drag: None,
             pending_restore: restore_tabs.then(|| saved_tabs.clone()),
             saved_tabs,
+            tunnel_store: TunnelStore::load(&crate::paths::tunnels_file()),
+            tunnel_runs: HashMap::new(),
+            tunnels_window: None,
+            pending_autostart: true,
         }
     }
 
@@ -453,6 +500,9 @@ impl App {
             kind,
             reconnect: None,
             follows: None,
+            unseen: false,
+            rang: false,
+            renamed: false,
         });
         self.active = self.tabs.len() - 1;
     }
@@ -520,6 +570,197 @@ impl App {
             term.restart(backend, message);
         }
         Ok(())
+    }
+
+    /// Inicia un túnel del gestor sobre una conexión SSH propia.
+    fn start_tunnel(&mut self, id: Uuid) -> Result<(), String> {
+        let saved = self
+            .tunnel_store
+            .get(id)
+            .cloned()
+            .ok_or("El túnel ya no existe")?;
+        saved.validate()?;
+        let session = saved
+            .session
+            .and_then(|session| self.tree.resolved_session(session))
+            .filter(|session| session.protocol.is_ssh())
+            .ok_or("El equipo SSH del túnel ya no existe")?;
+        let endpoint = self.endpoint_for(&session)?;
+        let running = crate::tunnel_manager::spawn(
+            self.rt.handle(),
+            endpoint,
+            saved.tunnel,
+            self.prompter.clone(),
+        );
+        self.tunnel_runs.insert(
+            id,
+            TunnelRun {
+                running,
+                retry: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// Atiende a los túneles del gestor: su estado, los secretos que haya
+    /// que guardar, el arranque automático y la reconexión tras una caída.
+    fn poll_tunnels(&mut self, ctx: &egui::Context, secrets: &mut Vec<(String, String)>) {
+        // Con el baúl aún sin abrir se pedirían contraseñas guardadas.
+        if self.pending_autostart && self.vault_dialog.is_none() {
+            self.pending_autostart = false;
+            let ids: Vec<Uuid> = self
+                .tunnel_store
+                .tunnels
+                .iter()
+                .filter(|t| t.autostart)
+                .map(|t| t.id)
+                .collect();
+            for id in ids {
+                if let Err(e) = self.start_tunnel(id) {
+                    let name = self
+                        .tunnel_store
+                        .get(id)
+                        .map(|t| t.display_name())
+                        .unwrap_or_default();
+                    self.notify(format!("Túnel «{name}»: {e}"), true);
+                }
+            }
+        }
+        let now = Instant::now();
+        let enabled = self.settings.reconnect;
+        let max = self.settings.reconnect_attempts;
+        let mut due = vec![];
+        for (id, run) in &mut self.tunnel_runs {
+            run.running.poll();
+            secrets.append(&mut run.running.secrets_to_save);
+            match &run.running.state {
+                RunState::Connecting(_) => {}
+                RunState::Active => run.retry = None,
+                RunState::Failed(error) if enabled && worth_retrying(error) => {
+                    match &mut run.retry {
+                        // Solo se reintenta lo que llegó a funcionar.
+                        None if run.running.was_active => {
+                            run.retry = Some(Reconnect {
+                                attempt: 0,
+                                next: Some(now + reconnect_delay(0)),
+                            });
+                        }
+                        None => {}
+                        Some(r) => match r.next {
+                            Some(at) if now >= at => due.push((*id, r.attempt + 1)),
+                            Some(_) => ctx.request_repaint_after(Duration::from_millis(500)),
+                            None if r.attempt >= max => {}
+                            None => r.next = Some(now + reconnect_delay(r.attempt)),
+                        },
+                    }
+                }
+                RunState::Failed(_) | RunState::Stopped => run.retry = None,
+            }
+        }
+        for (id, attempt) in due {
+            match self.start_tunnel(id) {
+                Ok(()) => {
+                    if let Some(run) = self.tunnel_runs.get_mut(&id) {
+                        run.retry = Some(Reconnect {
+                            attempt,
+                            next: None,
+                        });
+                    }
+                }
+                Err(_) => {
+                    if let Some(run) = self.tunnel_runs.get_mut(&id) {
+                        run.retry = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Estado de cada túnel del gestor, para su ventana.
+    fn tunnel_views(&self) -> HashMap<Uuid, TunnelView> {
+        let now = Instant::now();
+        let max = self.settings.reconnect_attempts;
+        self.tunnel_runs
+            .iter()
+            .map(|(id, run)| {
+                let retry = run.retry.as_ref().and_then(|r| match r.next {
+                    Some(at) => Some(format!(
+                        "Conexión perdida. Reintento {} de {max} en {} s…",
+                        r.attempt + 1,
+                        at.saturating_duration_since(now).as_secs() + 1
+                    )),
+                    None if matches!(run.running.state, RunState::Connecting(_)) => {
+                        Some(format!("Reconectando… intento {} de {max}", r.attempt))
+                    }
+                    None => None,
+                });
+                (
+                    *id,
+                    TunnelView {
+                        state: run.running.state.clone(),
+                        retry,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn tunnels_window_ui(&mut self, ctx: &egui::Context) {
+        let Some(mut window) = self.tunnels_window.take() else {
+            return;
+        };
+        let sessions = self.tree.ssh_sessions();
+        let views = self.tunnel_views();
+        let (open, requests) = window.show(ctx, &mut self.tunnel_store, &sessions, &views);
+        for request in requests {
+            match request {
+                TunnelRequest::Start(id) => {
+                    if let Err(e) = self.start_tunnel(id) {
+                        self.notify(e, true);
+                    }
+                }
+                TunnelRequest::Stop(id) => {
+                    if let Some(run) = self.tunnel_runs.get_mut(&id) {
+                        run.running.stop();
+                        run.retry = None;
+                        // Un reintento pendiente no deja nada que parar.
+                        if !run.running.is_running() {
+                            run.running.state = RunState::Stopped;
+                        }
+                    }
+                }
+                TunnelRequest::Removed(id) => {
+                    self.tunnel_runs.remove(&id);
+                }
+            }
+        }
+        if open {
+            self.tunnels_window = Some(window);
+        } else {
+            self.focus_active_terminal();
+        }
+    }
+
+    /// Marca las pestañas de terminal que han recibido salida (o en las
+    /// que ha sonado la campana) mientras no se veían.
+    fn note_background_activity(&mut self) {
+        let tiles = self.split_tiles();
+        let split_visible = tiles.len() >= 2 && tiles.contains(&self.active);
+        let notify = self.settings.activity_notice;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let TabKind::Terminal(term) = &mut tab.kind else {
+                continue;
+            };
+            let (output, bell) = term.take_activity();
+            let visible = index == self.active || (split_visible && tiles.contains(&index));
+            if visible || !notify {
+                tab.unseen = false;
+                tab.rang = false;
+            } else {
+                tab.unseen |= output;
+                tab.rang |= bell;
+            }
+        }
     }
 
     /// Pasa a las vistas SFTP el editor de los ajustes y, a las abiertas
@@ -627,6 +868,7 @@ impl App {
             tabs.push(SavedTab {
                 session,
                 kind: kind.to_string(),
+                title: tab.renamed.then(|| tab.title.clone()),
             });
         }
         SavedTabs { tabs, active }
@@ -642,6 +884,7 @@ impl App {
                 return;
             }
             for tab in &saved.tabs {
+                let before = self.tabs.len();
                 match (
                     tab.session.and_then(|id| self.tree.resolved_session(id)),
                     tab.kind.as_str(),
@@ -651,6 +894,13 @@ impl App {
                     (Some(session), "sftp") => self.open_sftp(session, None),
                     (Some(session), "escritorio") => self.connect(session, None),
                     _ => {}
+                }
+                // La pestaña recupera el nombre que se le hubiera puesto.
+                if self.tabs.len() > before
+                    && let (Some(title), Some(opened)) = (&tab.title, self.tabs.last_mut())
+                {
+                    opened.title = title.clone();
+                    opened.renamed = true;
                 }
             }
             if !self.tabs.is_empty() {
@@ -879,7 +1129,12 @@ impl App {
         if let Some(theme) = self.themes.get(&self.settings.theme) {
             theme.apply(ctx);
         }
+        crate::highlight::set(&self.settings.highlight);
         self.macros = MacroStore::load(&crate::paths::macros_file()).unwrap_or_default();
+        // Los túneles en marcha eran de la configuración anterior.
+        self.tunnel_runs.clear();
+        self.tunnel_store = TunnelStore::load(&crate::paths::tunnels_file());
+        self.tunnels_window = None;
         self.vault = None;
         self.selected = None;
         self.editor = None;
@@ -1032,6 +1287,31 @@ impl App {
                 self.keys_window = Some(KeysWindow::default());
             }
             self.macros_menu(ui);
+            let active = self
+                .tunnel_runs
+                .values()
+                .filter(|run| run.running.state == RunState::Active)
+                .count();
+            let failed = self
+                .tunnel_runs
+                .values()
+                .any(|run| matches!(run.running.state, RunState::Failed(_)));
+            let mut label = RichText::new(match active {
+                0 => "🔀 Túneles".to_string(),
+                n => format!("🔀 Túneles ({n})"),
+            });
+            if failed {
+                label = label.color(ui.visuals().error_fg_color);
+            } else if active > 0 {
+                label = label.color(ok_color());
+            }
+            if ui
+                .button(label)
+                .on_hover_text("Túneles SSH que se inician y se detienen sin abrir un terminal")
+                .clicked()
+            {
+                self.tunnels_window = Some(TunnelsWindow::new(&self.tunnel_store));
+            }
             if ui
                 .button("🎨 Temas")
                 .on_hover_text("Cambiar o personalizar el aspecto")
@@ -1408,6 +1688,11 @@ impl App {
 
     fn tab_strip(&mut self, ui: &mut egui::Ui, close: &mut Option<usize>) {
         let mut activate = None;
+        let mut action = None;
+        // Fin de la edición de un título: guardar (true) o descartar.
+        let mut rename_end = None;
+        // Posición de cada pestaña en pantalla, para reordenar arrastrando.
+        let mut rects: Vec<egui::Rect> = Vec::with_capacity(self.tabs.len());
         egui::ScrollArea::horizontal()
             .id_salt("tab_bar")
             .auto_shrink([false, true])
@@ -1440,26 +1725,94 @@ impl App {
                                 },
                             ),
                         };
-                        ui.scope(|ui| {
+                        let scope = ui.scope(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             status_dot(ui, color);
+                            // Título en edición: un campo de texto en su sitio.
+                            if let Some((id, text, focused)) = &mut self.tab_rename
+                                && *id == tab.id
+                            {
+                                let mut field = egui::TextEdit::singleline(text)
+                                    .desired_width(150.0)
+                                    .show(ui);
+                                if !*focused {
+                                    // Con todo el nombre seleccionado:
+                                    // escribir lo sustituye.
+                                    field.response.request_focus();
+                                    let end = egui::text::CCursor::new(text.chars().count());
+                                    field.state.cursor.set_char_range(Some(
+                                        egui::text::CCursorRange::two(
+                                            egui::text::CCursor::new(0),
+                                            end,
+                                        ),
+                                    ));
+                                    field.state.store(ui.ctx(), field.response.id);
+                                    *focused = true;
+                                } else if field.response.lost_focus() {
+                                    // Intro o un clic fuera lo guardan;
+                                    // Escape lo deja como estaba.
+                                    rename_end =
+                                        Some(!ui.input(|i| i.key_pressed(egui::Key::Escape)));
+                                }
+                                return;
+                            }
                             let in_group = matches!(tab.kind, TabKind::Terminal(_))
                                 && self.broadcast.includes(tab.id);
-                            let mut label = RichText::new(format!("{icon} {}", tab.title));
+                            let bell = if tab.rang { "🔔 " } else { "" };
+                            let mut label = RichText::new(format!("{bell}{icon} {}", tab.title));
                             if in_group {
                                 label = label.color(warn_color());
+                            } else if tab.unseen || tab.rang {
+                                // Actividad sin ver: destacado.
+                                label = label.strong().color(ui.visuals().hyperlink_color);
                             }
-                            let resp = ui.selectable_label(self.active == i, label);
-                            let resp = if in_group {
-                                resp.on_hover_text(
-                                    "Recibe lo que se escriba con la difusión activa",
-                                )
+                            let resp = ui
+                                .selectable_label(self.active == i, label)
+                                .interact(egui::Sense::click_and_drag());
+                            let hover = if in_group {
+                                "Recibe lo que se escriba con la difusión activa"
+                            } else if tab.rang {
+                                "Ha sonado la campana en este terminal"
+                            } else if tab.unseen {
+                                "Hay salida nueva sin ver"
                             } else {
-                                resp
+                                "Arrastra para cambiarla de sitio; doble clic para renombrarla"
                             };
-                            if resp.clicked() {
+                            let resp = resp.on_hover_text(hover);
+                            if resp.double_clicked() {
+                                action = Some(TabAction::Rename(i));
+                            } else if resp.clicked() {
                                 activate = Some(i);
                             }
+                            if resp.drag_started() {
+                                self.tab_drag = Some(tab.id);
+                            }
+                            resp.context_menu(|ui| {
+                                let last = self.tabs.len() - 1;
+                                let mut item = |ui: &mut egui::Ui, text: &str, a: TabAction| {
+                                    if ui.button(text).clicked() {
+                                        action = Some(a);
+                                        ui.close();
+                                    }
+                                };
+                                item(ui, "✏ Renombrar…", TabAction::Rename(i));
+                                item(ui, "Duplicar", TabAction::Duplicate(i));
+                                ui.separator();
+                                ui.add_enabled_ui(i > 0, |ui| {
+                                    item(ui, "Mover al principio", TabAction::MoveFirst(i));
+                                });
+                                ui.add_enabled_ui(i < last, |ui| {
+                                    item(ui, "Mover al final", TabAction::MoveLast(i));
+                                });
+                                ui.separator();
+                                item(ui, "Cerrar", TabAction::Close(i));
+                                ui.add_enabled_ui(last > 0, |ui| {
+                                    item(ui, "Cerrar las demás", TabAction::CloseOthers(i));
+                                });
+                                ui.add_enabled_ui(i < last, |ui| {
+                                    item(ui, "Cerrar las de la derecha", TabAction::CloseRight(i));
+                                });
+                            });
                             if resp.middle_clicked()
                                 || ui
                                     .small_button("×")
@@ -1469,6 +1822,7 @@ impl App {
                                 *close = Some(i);
                             }
                         });
+                        rects.push(scope.response.rect);
                         ui.separator();
                     }
                 });
@@ -1477,6 +1831,111 @@ impl App {
             self.active = i;
             self.focus_active_terminal();
         }
+        if let Some(keep) = rename_end {
+            self.finish_tab_rename(keep);
+        }
+        self.drag_tab(ui, &rects);
+        if let Some(action) = action {
+            self.apply_tab_action(action);
+        }
+    }
+
+    /// Termina la edición del título de una pestaña, guardándolo o no.
+    fn finish_tab_rename(&mut self, keep: bool) {
+        let Some((id, text, _)) = self.tab_rename.take() else {
+            return;
+        };
+        let title = text.trim();
+        if keep
+            && !title.is_empty()
+            && let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id)
+        {
+            tab.title = title.to_string();
+            tab.renamed = true;
+        }
+        self.focus_active_terminal();
+    }
+
+    /// Reordena las pestañas mientras se arrastra una: cambia de sitio
+    /// cuando el puntero pasa de la mitad de la vecina.
+    fn drag_tab(&mut self, ui: &egui::Ui, rects: &[egui::Rect]) {
+        let Some(id) = self.tab_drag else {
+            return;
+        };
+        if !ui.input(|i| i.pointer.primary_down()) {
+            self.tab_drag = None;
+            return;
+        }
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        let (Some(from), Some(pointer)) = (
+            self.tabs.iter().position(|t| t.id == id),
+            ui.input(|i| i.pointer.latest_pos()),
+        ) else {
+            return;
+        };
+        let target = rects.iter().enumerate().find_map(|(i, rect)| {
+            let passed = if i > from {
+                pointer.x > rect.center().x
+            } else {
+                pointer.x < rect.center().x
+            };
+            (i != from && rect.x_range().contains(pointer.x) && passed).then_some(i)
+        });
+        if let Some(to) = target {
+            self.move_tab(from, to);
+        }
+    }
+
+    /// Mueve una pestaña de posición sin cambiar cuál es la activa.
+    fn move_tab(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        let active = self.tabs.get(self.active).map(|t| t.id);
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        if let Some(index) = active.and_then(|id| self.tabs.iter().position(|t| t.id == id)) {
+            self.active = index;
+        }
+    }
+
+    fn apply_tab_action(&mut self, action: TabAction) {
+        match action {
+            TabAction::Rename(i) => {
+                if let Some(tab) = self.tabs.get(i) {
+                    self.tab_rename = Some((tab.id, tab.title.clone(), false));
+                }
+            }
+            TabAction::Duplicate(i) => {
+                let Some(tab) = self.tabs.get(i) else {
+                    return;
+                };
+                match (tab.session.clone(), &tab.kind) {
+                    (None, _) => self.open_local_terminal(),
+                    (Some(session), TabKind::Terminal(_)) => self.open_terminal(session),
+                    (Some(session), TabKind::Sftp(_)) => self.open_sftp(session, None),
+                    (Some(session), TabKind::Desktop(_)) => self.open_desktop(session),
+                }
+            }
+            TabAction::MoveFirst(i) => self.move_tab(i, 0),
+            TabAction::MoveLast(i) => self.move_tab(i, self.tabs.len().saturating_sub(1)),
+            TabAction::Close(i) => self.close_tab(i),
+            TabAction::CloseOthers(i) => {
+                let Some(keep) = self.tabs.get(i).map(|t| t.id) else {
+                    return;
+                };
+                for index in (0..self.tabs.len()).rev() {
+                    if self.tabs[index].id != keep {
+                        self.close_tab(index);
+                    }
+                }
+            }
+            TabAction::CloseRight(i) => {
+                for index in (i + 1..self.tabs.len()).rev() {
+                    self.close_tab(index);
+                }
+            }
+        }
     }
 
     /// Cierra una pestaña y deja el teclado en la que quede activa.
@@ -1484,9 +1943,26 @@ impl App {
         if index >= self.tabs.len() {
             return;
         }
+        let active = self.tabs.get(self.active).map(|t| t.id);
         let closed = self.tabs.remove(index);
         self.broadcast.chosen.remove(&closed.id);
         self.split.chosen.remove(&closed.id);
+        if self
+            .tab_rename
+            .as_ref()
+            .is_some_and(|(id, ..)| *id == closed.id)
+        {
+            self.tab_rename = None;
+        }
+        // Si se cierra otra, la activa sigue siendo la misma.
+        if let Some(index) = active
+            .filter(|id| *id != closed.id)
+            .and_then(|id| self.tabs.iter().position(|t| t.id == id))
+        {
+            self.active = index;
+            self.focus_active_terminal();
+            return;
+        }
         if self.active >= index && self.active > 0 {
             self.active -= 1;
         }
@@ -2850,11 +3326,13 @@ impl eframe::App for App {
         }
         // Las pestañas en segundo plano también procesan sus eventos.
         let mut secrets = vec![];
+        let mut notices = vec![];
         for tab in &mut self.tabs {
             match &mut tab.kind {
                 TabKind::Terminal(t) => {
                     t.poll();
                     secrets.append(&mut t.secrets_to_save);
+                    notices.append(&mut t.notices);
                     // Consulta del estado del servidor para la barra.
                     let bar = &self.settings.server_bar;
                     let wanted = tab
@@ -2892,6 +3370,10 @@ impl eframe::App for App {
                 }
             }
         }
+        if let Some(notice) = notices.pop() {
+            self.notify(notice, true);
+        }
+        self.poll_tunnels(ui.ctx(), &mut secrets);
         // Solo se guardan secretos de sesiones que existen en el árbol.
         secrets.retain(|(key, _)| {
             key.split('/')
@@ -2900,6 +3382,7 @@ impl eframe::App for App {
                 .is_some_and(|id| self.tree.find(id).is_some())
         });
         self.store_secrets(secrets);
+        self.note_background_activity();
         self.sync_sftp_views();
         self.auto_reconnect(ui.ctx());
         self.sync_saved_tabs();
@@ -2980,6 +3463,10 @@ impl eframe::App for App {
         }
         if let Some(win) = &mut self.settings_window {
             let (open, changed, request) = win.show(&ctx, &mut self.settings);
+            if changed {
+                self.settings.highlight.sanitize();
+                crate::highlight::set(&self.settings.highlight);
+            }
             if changed && let Err(e) = self.settings.save(&crate::paths::settings_file()) {
                 self.notify(
                     format!("No se pudieron guardar las preferencias: {e:#}"),
@@ -3050,6 +3537,7 @@ impl eframe::App for App {
                 self.run_macro(id);
             }
         }
+        self.tunnels_window_ui(&ctx);
         self.recorded_macro_ui(&ctx);
         self.snippet_prompt_ui(&ctx);
         if let Some(editor) = &mut self.folder_editor {

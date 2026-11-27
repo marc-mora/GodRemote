@@ -1194,6 +1194,12 @@ pub struct Settings {
     /// Orden del editor para los ficheros remotos (vacía = el del sistema).
     #[serde(rename = "editor")]
     pub editor: String,
+    /// Marcar las pestañas de terminal con salida nueva sin ver.
+    #[serde(rename = "avisar_actividad")]
+    pub activity_notice: bool,
+    /// Palabras resaltadas y enlaces en los terminales.
+    #[serde(rename = "resaltado")]
+    pub highlight: crate::highlight::Highlight,
 }
 
 impl Default for Settings {
@@ -1207,6 +1213,8 @@ impl Default for Settings {
             reconnect_attempts: 6,
             restore_tabs: false,
             editor: String::new(),
+            activity_notice: true,
+            highlight: Default::default(),
         }
     }
 }
@@ -1218,6 +1226,7 @@ impl Settings {
             .and_then(|data| serde_json::from_slice(&data).ok())
             .unwrap_or_default();
         settings.server_bar.sanitize();
+        settings.highlight.sanitize();
         settings.reconnect_attempts = settings.reconnect_attempts.clamp(1, 50);
         settings
     }
@@ -1427,6 +1436,15 @@ mod tests {
             reconnect_attempts: 3,
             restore_tabs: true,
             editor: "code -w".into(),
+            activity_notice: false,
+            highlight: crate::highlight::Highlight {
+                enabled: false,
+                links: false,
+                rules: vec![crate::highlight::Rule::new(
+                    "grave",
+                    crate::highlight::HlColor::Magenta,
+                )],
+            },
         };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);

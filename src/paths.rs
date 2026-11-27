@@ -60,6 +60,11 @@ pub fn macros_file() -> PathBuf {
     data_dir().join("macros.json")
 }
 
+/// Túneles del gestor de túneles.
+pub fn tunnels_file() -> PathBuf {
+    data_dir().join("tunnels.json")
+}
+
 pub fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
@@ -121,6 +126,39 @@ pub fn open_with_system(path: &Path) -> std::io::Result<()> {
     } else {
         let mut c = std::process::Command::new("xdg-open");
         c.arg(path);
+        c
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
+/// Abre una dirección web con el navegador del sistema. La dirección sale
+/// de lo que el servidor escribe en el terminal, así que solo se admiten
+/// http, https y ftp, y nunca pasa por un intérprete de órdenes.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    if !crate::highlight::is_safe_url(url) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "solo se abren direcciones http, https o ftp",
+        ));
+    }
+    let mut command = if cfg!(windows) {
+        // Sin `cmd /C start`: para él, «&» o «^» en la dirección serían
+        // parte de una orden.
+        let mut c = std::process::Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler").arg(url);
+        c
+    } else if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
         c
     };
     command
