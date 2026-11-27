@@ -18,9 +18,10 @@ permissions:
   contents: read
 
 # Una ejecución completa tarda: la que ya está en marcha termina, y de las
-# que esperan solo se queda la más reciente.
+# que esperan solo se queda la más reciente. Las pedidas a mano van aparte,
+# para que una subida no las descarte.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: false
 
 env:
