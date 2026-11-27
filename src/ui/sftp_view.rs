@@ -83,6 +83,40 @@ pub struct SftpView {
     message: Option<(String, bool)>,
     show_hidden: bool,
     pub secrets_to_save: Vec<(String, String)>,
+    /// Carpeta inicial del usuario en el servidor (para expandir `~`).
+    home: String,
+    /// Ficheros remotos abiertos en un editor local.
+    edited: Vec<Edited>,
+    last_edit_check: std::time::Instant,
+    /// Orden del editor (vacía = el programa asociado en el sistema). La
+    /// fija la aplicación a partir de los ajustes.
+    pub editor: String,
+    /// La vista se abrió desde un terminal y puede seguir su carpeta.
+    pub linked: bool,
+    /// Ir a la carpeta en la que esté el terminal.
+    pub follow: bool,
+    /// Última carpeta del terminal a la que se ha ido.
+    followed: Option<String>,
+}
+
+/// Un fichero remoto que se está editando en local: se descarga a una
+/// carpeta temporal, se abre con el editor y se sube cada vez que cambia.
+struct Edited {
+    name: String,
+    local: PathBuf,
+    remote: String,
+    /// Fecha y tamaño de la copia local la última vez que se subió.
+    seen: Option<(std::time::SystemTime, u64)>,
+    /// Transferencias en curso de este fichero.
+    download: Option<u64>,
+    upload: Option<u64>,
+    status: String,
+    failed: bool,
+}
+
+fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 fn read_local(path: &Path) -> std::io::Result<Vec<LocalEntry>> {
@@ -238,9 +272,174 @@ impl SftpView {
             message: None,
             show_hidden: false,
             secrets_to_save: vec![],
+            home: String::new(),
+            edited: vec![],
+            last_edit_check: std::time::Instant::now(),
+            editor: String::new(),
+            linked: false,
+            follow: true,
+            followed: None,
         };
         view.refresh_local();
         view
+    }
+
+    /// Descarga un fichero remoto a una carpeta temporal para abrirlo con
+    /// el editor local.
+    fn edit_remote(&mut self, name: &str) {
+        let remote = join_remote(&self.remote_path, name);
+        if let Some(existing) = self.edited.iter().find(|e| e.remote == remote) {
+            // Ya está abierto: se vuelve a mostrar en el editor.
+            if existing.download.is_none() {
+                let _ = crate::paths::open_in_editor(&self.editor, &existing.local);
+            }
+            return;
+        }
+        // Una carpeta por fichero: conserva su nombre (y su extensión) sin
+        // chocar con otros que se llamen igual.
+        let dir = crate::paths::edit_dir().join(uuid::Uuid::new_v4().to_string());
+        // El nombre viene del servidor: no debe poder salirse de la carpeta.
+        let safe: String = name
+            .chars()
+            .map(|c| {
+                if matches!(c, '/' | '\\' | ':') {
+                    '_'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let safe = if safe.trim_matches('.').is_empty() {
+            "fichero".to_string()
+        } else {
+            safe
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.message = Some((format!("No se pudo crear {}: {e}", dir.display()), true));
+            return;
+        }
+        let local = dir.join(safe);
+        let id = self.next_id;
+        self.next_id += 1;
+        let _ = self.client.cmd.send(SftpCmd::Download {
+            id,
+            remote: remote.clone(),
+            local: local.clone(),
+        });
+        self.edited.push(Edited {
+            name: name.to_string(),
+            local,
+            remote,
+            seen: None,
+            download: Some(id),
+            upload: None,
+            status: "Descargando…".into(),
+            failed: false,
+        });
+    }
+
+    /// Resultado de una transferencia de un fichero en edición. Devuelve
+    /// `true` si la transferencia era suya.
+    fn edit_transfer_finished(&mut self, id: u64, error: Option<&str>) -> bool {
+        let editor = self.editor.clone();
+        let Some(edited) = self
+            .edited
+            .iter_mut()
+            .find(|e| e.download == Some(id) || e.upload == Some(id))
+        else {
+            return false;
+        };
+        let now = chrono::Local::now().format("%H:%M:%S");
+        if edited.download.take() == Some(id) {
+            match error {
+                None => {
+                    edited.seen = file_stamp(&edited.local);
+                    match crate::paths::open_in_editor(&editor, &edited.local) {
+                        Ok(()) => {
+                            edited.status = "Abierto en el editor: se sube al guardar".into();
+                            edited.failed = false;
+                        }
+                        Err(e) => {
+                            edited.status = format!("No se pudo abrir el editor: {e}");
+                            edited.failed = true;
+                        }
+                    }
+                }
+                Some(e) => {
+                    edited.status = format!("No se pudo descargar: {e}");
+                    edited.failed = true;
+                }
+            }
+        } else {
+            edited.upload = None;
+            match error {
+                None => {
+                    edited.status = format!("Subido a las {now}");
+                    edited.failed = false;
+                }
+                Some(e) => {
+                    edited.status = format!("No se pudo subir: {e}");
+                    edited.failed = true;
+                    // Se reintenta la próxima vez que se guarde.
+                }
+            }
+        }
+        true
+    }
+
+    /// Sube los ficheros en edición cuya copia local ha cambiado.
+    fn upload_edited(&mut self) {
+        if self.edited.is_empty()
+            || self.last_edit_check.elapsed() < std::time::Duration::from_millis(700)
+        {
+            return;
+        }
+        self.last_edit_check = std::time::Instant::now();
+        if self.state != SftpState::Ready {
+            return;
+        }
+        for edited in &mut self.edited {
+            if edited.download.is_some() || edited.upload.is_some() {
+                continue;
+            }
+            let Some(stamp) = file_stamp(&edited.local) else {
+                continue;
+            };
+            if edited.seen == Some(stamp) {
+                continue;
+            }
+            edited.seen = Some(stamp);
+            let id = self.next_id;
+            self.next_id += 1;
+            let _ = self.client.cmd.send(SftpCmd::Upload {
+                id,
+                local: edited.local.clone(),
+                remote: edited.remote.clone(),
+            });
+            edited.upload = Some(id);
+            edited.status = "Subiendo los cambios…".into();
+        }
+    }
+
+    /// Lleva el panel remoto a la carpeta del terminal del que procede,
+    /// si se le ha pedido seguirlo. `dir` puede empezar por `~`.
+    pub fn follow_dir(&mut self, dir: &str) {
+        if !self.linked || !self.follow || self.state != SftpState::Ready || self.home.is_empty() {
+            return;
+        }
+        let path = match dir.strip_prefix('~') {
+            Some(rest) => format!("{}{rest}", self.home.trim_end_matches('/')),
+            None => dir.to_string(),
+        };
+        // Solo cuando el terminal cambia de carpeta: si el usuario navega a
+        // mano por el panel, no se le devuelve a la fuerza.
+        if self.followed.as_deref() == Some(path.as_str()) {
+            return;
+        }
+        self.followed = Some(path.clone());
+        if path != self.remote_path {
+            self.list_remote(path);
+        }
     }
 
     fn refresh_local(&mut self) {
@@ -297,6 +496,7 @@ impl SftpView {
                 }
                 SftpEvent::Ready { home } => {
                     self.state = SftpState::Ready;
+                    self.home = home.clone();
                     self.remote_path = home.clone();
                     self.remote_edit = home.clone();
                     self.list_remote(home);
@@ -333,7 +533,9 @@ impl SftpView {
                     }
                 }
                 SftpEvent::TransferFinished { id, error } => {
-                    if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
+                    if self.edit_transfer_finished(id, error.as_deref()) {
+                        refresh_remote = true;
+                    } else if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
                         if t.upload {
                             refresh_remote = true;
                         } else {
@@ -360,6 +562,7 @@ impl SftpView {
         if refresh_local {
             self.refresh_local();
         }
+        self.upload_edited();
     }
 
     fn start_transfers(&mut self, upload: bool, names: &[String]) {
@@ -444,7 +647,10 @@ impl SftpView {
             SftpState::Ready => {}
         }
 
-        // --- Cola de transferencias (abajo) --------------------------------
+        // --- Ficheros en edición y cola de transferencias (abajo) ----------
+        if !self.edited.is_empty() {
+            egui::Panel::bottom("sftp_edited").show(ui, |ui| self.edited_ui(ui));
+        }
         if !self.transfers.is_empty() {
             egui::Panel::bottom("sftp_transfers")
                 .resizable(true)
@@ -559,6 +765,13 @@ impl SftpView {
                     self.request_transfer(false, names);
                 }
                 ui.checkbox(&mut self.show_hidden, "Ocultos");
+                if self.linked {
+                    ui.checkbox(&mut self.follow, "Seguir al terminal")
+                        .on_hover_text(
+                            "Al cambiar de carpeta en el terminal del que procede esta \
+                             pestaña, el panel va a esa carpeta",
+                        );
+                }
             });
         });
         ui.horizontal(|ui| {
@@ -582,13 +795,29 @@ impl SftpView {
                 .add_enabled(one.is_some(), egui::Button::new("✏"))
                 .on_hover_text("Renombrar")
                 .clicked()
-                && let Some(old) = one
+                && let Some(old) = one.clone()
             {
                 self.dialog = Some(Dialog::Rename {
                     name: old.clone(),
                     old,
                     focused: false,
                 });
+            }
+            let one_file = one.as_ref().filter(|name| {
+                self.remote_entries
+                    .iter()
+                    .any(|e| e.name == **name && !e.is_dir)
+            });
+            if ui
+                .add_enabled(one_file.is_some(), egui::Button::new("📝"))
+                .on_hover_text(
+                    "Editar con el editor de este equipo: se descarga, se abre y se sube solo \
+                     cada vez que lo guardes",
+                )
+                .clicked()
+                && let Some(name) = one_file.cloned()
+            {
+                self.edit_remote(&name);
             }
             if ui
                 .add_enabled(!self.remote_sel.is_empty(), egui::Button::new("🗑"))
@@ -632,6 +861,48 @@ impl SftpView {
             } else {
                 self.request_transfer(false, vec![name]);
             }
+        }
+    }
+
+    /// Ficheros remotos abiertos en el editor local, con su estado.
+    fn edited_ui(&mut self, ui: &mut egui::Ui) {
+        if self.edited.is_empty() {
+            return;
+        }
+        // Mientras haya ficheros en edición se vigila si cambian.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(800));
+        ui.strong("En edición");
+        let mut close = None;
+        let mut reopen = None;
+        for (i, edited) in self.edited.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("📝 {}", edited.name))
+                    .on_hover_text(&edited.remote);
+                let color = if edited.failed {
+                    ui.visuals().error_fg_color
+                } else {
+                    ui.visuals().weak_text_color()
+                };
+                ui.colored_label(color, &edited.status);
+                if edited.download.is_none() && ui.small_button("Abrir").clicked() {
+                    reopen = Some(i);
+                }
+                if ui
+                    .small_button("×")
+                    .on_hover_text("Dejar de vigilarlo y borrar la copia local")
+                    .clicked()
+                {
+                    close = Some(i);
+                }
+            });
+        }
+        if let Some(i) = reopen {
+            let _ = crate::paths::open_in_editor(&self.editor, &self.edited[i].local);
+        }
+        if let Some(i) = close {
+            let edited = self.edited.remove(i);
+            remove_edit_copy(&edited.local);
         }
     }
 
@@ -878,6 +1149,23 @@ impl SftpView {
         }
         if let Some(f) = after {
             f(self);
+        }
+    }
+}
+
+/// Borra la copia local de un fichero en edición (y su carpeta temporal).
+fn remove_edit_copy(local: &Path) {
+    let _ = std::fs::remove_file(local);
+    if let Some(dir) = local.parent() {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
+impl Drop for SftpView {
+    fn drop(&mut self) {
+        // Las copias locales de los ficheros en edición no se dejan atrás.
+        for edited in &self.edited {
+            remove_edit_copy(&edited.local);
         }
     }
 }

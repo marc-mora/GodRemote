@@ -1191,6 +1191,9 @@ pub struct Settings {
     /// Reabrir al arrancar las pestañas que había al cerrar.
     #[serde(rename = "restaurar_pestanas")]
     pub restore_tabs: bool,
+    /// Orden del editor para los ficheros remotos (vacía = el del sistema).
+    #[serde(rename = "editor")]
+    pub editor: String,
 }
 
 impl Default for Settings {
@@ -1203,6 +1206,7 @@ impl Default for Settings {
             reconnect: true,
             reconnect_attempts: 6,
             restore_tabs: false,
+            editor: String::new(),
         }
     }
 }
@@ -1422,6 +1426,7 @@ mod tests {
             reconnect: false,
             reconnect_attempts: 3,
             restore_tabs: true,
+            editor: "code -w".into(),
         };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);

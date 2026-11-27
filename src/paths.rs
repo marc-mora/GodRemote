@@ -40,6 +40,11 @@ pub fn state_file() -> PathBuf {
     data_dir().join("state.json")
 }
 
+/// Copias locales de los ficheros remotos que se están editando.
+pub fn edit_dir() -> PathBuf {
+    data_dir().join("edit")
+}
+
 /// Registros de las sesiones de terminal.
 pub fn logs_dir() -> PathBuf {
     data_dir().join("logs")
@@ -119,6 +124,31 @@ pub fn open_with_system(path: &Path) -> std::io::Result<()> {
         c
     };
     command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
+/// Abre un fichero con el editor indicado en los ajustes (una orden como
+/// `code -w` o la ruta de un programa) o, si no hay, con el del sistema.
+pub fn open_in_editor(editor: &str, path: &Path) -> std::io::Result<()> {
+    let editor = editor.trim();
+    if editor.is_empty() {
+        return open_with_system(path);
+    }
+    // Una ruta con espacios (C:\Program Files\…) es el programa entero;
+    // si no existe como fichero, se separan programa y argumentos.
+    let (program, arguments): (&str, Vec<&str>) = if Path::new(editor).is_file() {
+        (editor, vec![])
+    } else {
+        let mut parts = editor.split_whitespace();
+        (parts.next().unwrap_or(editor), parts.collect())
+    };
+    std::process::Command::new(program)
+        .args(arguments)
+        .arg(path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

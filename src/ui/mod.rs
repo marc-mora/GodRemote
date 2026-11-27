@@ -60,6 +60,9 @@ struct Tab {
     kind: TabKind,
     /// Reconexión automática en marcha (solo terminales).
     reconnect: Option<Reconnect>,
+    /// Pestaña de terminal de la que procede (una vista SFTP abierta
+    /// sobre su conexión), para seguir su carpeta.
+    follows: Option<u64>,
 }
 
 /// Reconexión automática de un terminal cuya conexión se cayó.
@@ -403,6 +406,7 @@ impl App {
             session,
             kind,
             reconnect: None,
+            follows: None,
         });
         self.active = self.tabs.len() - 1;
     }
@@ -470,6 +474,32 @@ impl App {
             term.restart(backend, message);
         }
         Ok(())
+    }
+
+    /// Pasa a las vistas SFTP el editor de los ajustes y, a las abiertas
+    /// desde un terminal, la carpeta en la que está ese terminal.
+    fn sync_sftp_views(&mut self) {
+        let dirs: Vec<(u64, String)> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| match &tab.kind {
+                TabKind::Terminal(t) => t.working_dir().map(|dir| (tab.id, dir)),
+                _ => None,
+            })
+            .collect();
+        for tab in &mut self.tabs {
+            let TabKind::Sftp(view) = &mut tab.kind else {
+                continue;
+            };
+            if view.editor != self.settings.editor {
+                view.editor = self.settings.editor.clone();
+            }
+            if let Some(source) = tab.follows
+                && let Some((_, dir)) = dirs.iter().find(|(id, _)| *id == source)
+            {
+                view.follow_dir(dir);
+            }
+        }
     }
 
     /// Reconexión automática: los terminales que han perdido la conexión se
@@ -636,6 +666,23 @@ impl App {
                 )
             }
             Err(e) => self.notify(format!("No se pudo abrir la shell local: {e:#}"), true),
+        }
+    }
+
+    /// Abre SFTP sobre la conexión de un terminal y enlaza la vista con él
+    /// para que pueda seguir su carpeta.
+    fn open_sftp_for_terminal(&mut self, session: Session, handle: Option<SshHandle>, tab: u64) {
+        let before = self.tabs.len();
+        let linked = handle.is_some();
+        self.open_sftp(session, handle);
+        if linked
+            && self.tabs.len() > before
+            && let Some(new) = self.tabs.last_mut()
+        {
+            new.follows = Some(tab);
+            if let TabKind::Sftp(view) = &mut new.kind {
+                view.linked = true;
+            }
         }
     }
 
@@ -1809,7 +1856,7 @@ impl App {
             });
         }
         if let Some((session, handle)) = open_sftp {
-            self.open_sftp(session, handle);
+            self.open_sftp_for_terminal(session, handle, tab_id);
         }
         if let Some(bytes) = recorded {
             self.finish_recording(bytes);
@@ -2521,6 +2568,7 @@ impl eframe::App for App {
                 .is_some_and(|id| self.tree.find(id).is_some())
         });
         self.store_secrets(secrets);
+        self.sync_sftp_views();
         self.auto_reconnect(ui.ctx());
         self.sync_saved_tabs();
 

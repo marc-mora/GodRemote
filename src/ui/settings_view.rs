@@ -59,6 +59,21 @@ impl SettingsWindow {
                     "Al arrancar, reabrir las pestañas que había al cerrar",
                 );
                 ui.separator();
+                ui.strong("SFTP");
+                ui.horizontal(|ui| {
+                    ui.label("Editor de los ficheros remotos");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut settings.editor)
+                            .desired_width(250.0)
+                            .hint_text("el del sistema"),
+                    )
+                    .on_hover_text(
+                        "Programa con el que se abren los ficheros remotos al pulsar «Editar» \
+                         en SFTP: por ejemplo «notepad», «code -w» o la ruta de un programa. \
+                         Vacío, se usa el que el sistema tenga asociado a cada tipo de fichero",
+                    );
+                });
+                ui.separator();
                 log_section(ui, settings, &mut request);
                 ui.separator();
                 ui.strong("Importar y copias de seguridad");

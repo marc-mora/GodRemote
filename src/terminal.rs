@@ -311,6 +311,59 @@ pub fn mouse_report(
     }
 }
 
+/// Lo que la shell remota cuenta de sí misma con secuencias de control: el
+/// título de la ventana y, si lo anuncia (OSC 7), su carpeta de trabajo.
+#[derive(Debug, Default)]
+struct TermCallbacks {
+    title: String,
+    cwd: Option<String>,
+}
+
+impl vt100::Callbacks for TermCallbacks {
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        self.title = String::from_utf8_lossy(title).chars().take(300).collect();
+    }
+
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        // OSC 7: «file://equipo/ruta».
+        if let [b"7", url] = params {
+            self.cwd = dir_from_url(&String::from_utf8_lossy(url));
+        }
+    }
+}
+
+/// Carpeta de una URL `file://equipo/ruta` (con `%XX` descodificado).
+fn dir_from_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("file://")?;
+    let path = &rest[rest.find('/')?..];
+    let bytes = path.as_bytes();
+    let mut out = vec![];
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(hex) = path.get(i + 1..i + 3)
+            && let Ok(byte) = u8::from_str_radix(hex, 16)
+        {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok().filter(|p| !p.is_empty())
+}
+
+/// Carpeta que aparece en el título habitual de las shells
+/// (`usuario@equipo: ~/proyecto`, `usuario@equipo:/var/log`). Puede empezar
+/// por `~`.
+fn dir_from_title(title: &str) -> Option<String> {
+    let at = title.find('@')?;
+    let after = &title[at..];
+    let dir = after[after.find(':')? + 1..].trim();
+    (dir.starts_with('/') || dir == "~" || dir.starts_with("~/")).then(|| dir.to_string())
+}
+
 /// Búsqueda abierta sobre el contenido del terminal (pantalla e historial).
 #[derive(Default)]
 struct Search {
@@ -342,7 +395,7 @@ fn find_all(line: &[char], needle: &[char]) -> Vec<usize> {
 
 /// Una pestaña de terminal: estado del emulador + conexión con la shell.
 pub struct TerminalView {
-    parser: vt100::Parser,
+    parser: vt100::Parser<TermCallbacks>,
     backend: TermBackend,
     cols: u16,
     rows: u16,
@@ -391,7 +444,12 @@ impl TerminalView {
         let rows = NonZeroU16::new(INITIAL_ROWS).unwrap();
         let cols = NonZeroU16::new(INITIAL_COLS).unwrap();
         Self {
-            parser: vt100::Parser::new(rows, cols, SCROLLBACK),
+            parser: vt100::Parser::new_with_callbacks(
+                rows,
+                cols,
+                SCROLLBACK,
+                TermCallbacks::default(),
+            ),
             backend,
             cols: INITIAL_COLS,
             rows: INITIAL_ROWS,
@@ -449,6 +507,13 @@ impl TerminalView {
             cols: self.cols,
             rows: self.rows,
         });
+    }
+
+    /// Carpeta de trabajo de la shell, si esta la anuncia (con OSC 7 o en
+    /// el título de la ventana). Puede empezar por `~`.
+    pub fn working_dir(&self) -> Option<String> {
+        let told = self.parser.callbacks();
+        told.cwd.clone().or_else(|| dir_from_title(&told.title))
     }
 
     /// Texto visible actualmente (útil para pruebas y para copiar todo).
@@ -1448,6 +1513,32 @@ mod tests {
         b.poll();
         b.apply_input(&TermInput::Bytes(b"perdido".to_vec()));
         assert!(sent_bytes(&mut sent_b).is_empty());
+    }
+
+    #[test]
+    fn working_directory_is_read_from_the_shell() {
+        let (mut view, _sent, remote) = fake_terminal();
+        assert_eq!(view.working_dir(), None);
+        // El título que pone el PS1 habitual de Debian, Ubuntu o Fedora.
+        let feed = |view: &mut TerminalView, bytes: &[u8]| {
+            remote.send(TermEvent::Data(bytes.to_vec())).unwrap();
+            view.poll();
+        };
+        feed(&mut view, b"\x1b]0;root@web: ~\x07root@web:~# ");
+        assert_eq!(view.working_dir().as_deref(), Some("~"));
+        feed(&mut view, b"\x1b]2;deploy@web:/var/www/mi sitio\x07");
+        assert_eq!(view.working_dir().as_deref(), Some("/var/www/mi sitio"));
+        feed(&mut view, b"\x1b]0;root@web: ~/proyecto\x1b\\");
+        assert_eq!(view.working_dir().as_deref(), Some("~/proyecto"));
+        // Un título que no es una carpeta (vim, top…) no cuenta.
+        feed(&mut view, b"\x1b]0;vim notas.txt\x07");
+        assert_eq!(view.working_dir(), None);
+        // OSC 7 manda sobre el título.
+        feed(&mut view, b"\x1b]7;file://web/srv/datos%20nuevos\x07");
+        assert_eq!(view.working_dir().as_deref(), Some("/srv/datos nuevos"));
+        assert_eq!(dir_from_url("http://x/y"), None);
+        assert_eq!(dir_from_title("sin arroba: /tmp"), None);
+        assert_eq!(dir_from_title("u@h: no-es-ruta"), None);
     }
 
     #[test]
