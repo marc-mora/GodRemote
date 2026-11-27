@@ -295,6 +295,7 @@ async fn connect(
     // intento de conexión con el servidor RDP.
     let status = |text: String| emit.status(text);
     let (route, hop_secrets) = Route::establish(via, &emit.prompter, &status).await?;
+    let route = route.without_proxy(session.bypass_proxy);
     if !hop_secrets.is_empty() {
         emit.emit(DesktopEvent::SaveSecrets(hop_secrets));
     }

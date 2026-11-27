@@ -29,6 +29,9 @@ pub struct ConnShared {
     pub remote_forwards: RemoteForwards,
     /// Reenvío X11 activo, si el servidor lo aceptó.
     pub x11: Mutex<Option<Arc<X11Forward>>>,
+    /// El servidor aceptó el reenvío del agente SSH: solo entonces se
+    /// atienden los canales de agente que abra.
+    pub agent_forwarding: std::sync::atomic::AtomicBool,
 }
 
 /// Conexión SSH autenticada. Mantiene vivo el salto (bastión) por el que
@@ -260,6 +263,8 @@ impl tokio::io::AsyncWrite for NetStream {
 /// través de una cadena de saltos SSH que se mantiene abierta mientras viva.
 pub struct Route {
     last_hop: Option<SshHandle>,
+    /// Conectar directamente aunque haya un proxy de salida.
+    bypass_proxy: bool,
 }
 
 impl Route {
@@ -271,7 +276,13 @@ impl Route {
         status: &(dyn Fn(String) + Send + Sync),
     ) -> Result<(Self, Vec<(String, String)>)> {
         match via {
-            None => Ok((Self { last_hop: None }, vec![])),
+            None => Ok((
+                Self {
+                    last_hop: None,
+                    bypass_proxy: false,
+                },
+                vec![],
+            )),
             Some(endpoint) => {
                 let connected = connect_endpoint(endpoint, prompter, status)
                     .await
@@ -279,6 +290,7 @@ impl Route {
                 Ok((
                     Self {
                         last_hop: Some(connected.handle),
+                        bypass_proxy: false,
                     },
                     connected.to_save,
                 ))
@@ -288,6 +300,12 @@ impl Route {
 
     pub fn is_direct(&self) -> bool {
         self.last_hop.is_none()
+    }
+
+    /// Pide que la conexión directa no pase por el proxy de salida.
+    pub fn without_proxy(mut self, bypass: bool) -> Self {
+        self.bypass_proxy = bypass;
+        self
     }
 
     /// Abre una conexión con `host:port`: directa, o desde el último salto.
@@ -307,17 +325,11 @@ impl Route {
     ) -> impl Future<Output = Result<RouteStream>> + Send + 'static {
         let hop = self.last_hop.clone();
         let host = host.to_string();
+        let bypass = self.bypass_proxy;
         async move {
             match hop {
                 None => {
-                    let stream = tokio::time::timeout(
-                        CONNECT_TIMEOUT,
-                        tokio::net::TcpStream::connect((host.as_str(), port)),
-                    )
-                    .await
-                    .map_err(|_| anyhow!("Tiempo de espera agotado conectando a {host}:{port}"))?
-                    .with_context(|| format!("No se pudo conectar a {host}:{port}"))?;
-                    let _ = stream.set_nodelay(true);
+                    let stream = crate::proxy::dial(&host, port, bypass, CONNECT_TIMEOUT).await?;
                     Ok(RouteStream {
                         local_addr: stream.local_addr().ok(),
                         peer_addr: stream.peer_addr().ok(),
@@ -445,6 +457,27 @@ impl client::Handler for ClientHandler {
         Ok(())
     }
 
+    /// El equipo remoto quiere hablar con nuestro agente SSH. Solo se le
+    /// deja si el reenvío se pidió para esta conexión y él lo aceptó.
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        if self
+            .shared
+            .agent_forwarding
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            reply.accept().await;
+            tokio::spawn(async move {
+                let _ = crate::agent::bridge(channel.into_stream()).await;
+            });
+        }
+        Ok(())
+    }
+
     /// Una aplicación gráfica remota abre una conexión X11.
     async fn server_channel_open_x11(
         &mut self,
@@ -463,6 +496,44 @@ impl client::Handler for ClientHandler {
         }
         Ok(())
     }
+}
+
+/// Pide el reenvío del agente en el canal y espera la respuesta.
+async fn request_agent(
+    channel: &mut russh::Channel<client::Msg>,
+    handle: &SshHandle,
+    emit: &Emit,
+) -> Result<()> {
+    if !crate::agent::available() {
+        emit(TermEvent::Status(
+            "Reenvío del agente no disponible: no hay agente SSH en este equipo".into(),
+        ));
+        return Ok(());
+    }
+    channel.agent_forward(true).await?;
+    let accepted = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Success) => break true,
+                Some(ChannelMsg::Failure) | Some(ChannelMsg::Close) | None => break false,
+                Some(_) => {}
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    if accepted {
+        handle
+            .shared
+            .agent_forwarding
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        emit(TermEvent::Status("Reenvío del agente SSH activo".into()));
+    } else {
+        emit(TermEvent::Status(
+            "El servidor rechazó el reenvío del agente (¿AllowAgentForwarding yes?)".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Resultado de una conexión correcta.
@@ -570,19 +641,10 @@ async fn connect_via(
         }
         None => {
             status(format!("Conectando a {}…", describe(session)));
-            let stream = tokio::time::timeout(
-                CONNECT_TIMEOUT,
-                tokio::net::TcpStream::connect((host.as_str(), session.port)),
-            )
-            .await
-            .map_err(|_| {
-                anyhow!(
-                    "Tiempo de espera agotado conectando a {host}:{}",
-                    session.port
-                )
-            })?
-            .with_context(|| format!("No se pudo conectar a {host}:{}", session.port))?;
-            let _ = stream.set_nodelay(true);
+            // Directa o, si lo hay, a través del proxy de salida.
+            let stream =
+                crate::proxy::dial(&host, session.port, session.bypass_proxy, CONNECT_TIMEOUT)
+                    .await?;
             client::connect_stream(config, stream, handler).await?
         }
     };
@@ -951,6 +1013,9 @@ async fn run_shell(
     };
 
     let mut channel = handle.channel_open_session().await?;
+    if session.agent_forwarding {
+        request_agent(&mut channel, &handle, &emit).await?;
+    }
     if session.x11_forwarding {
         request_x11(&mut channel, &handle, &emit).await?;
     }

@@ -1,5 +1,6 @@
 //! GodRemote: gestor de conexiones remotas (SSH, SFTP, RDP).
 
+pub mod agent;
 pub mod backdrop;
 pub mod backup;
 pub mod desktop;

@@ -31,6 +31,7 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 | **Saltos (bastiones)** | Cada equipo tiene su lista ordenada de saltos SSH, como `ProxyJump a,b,c`. Vale para SSH, SFTP, Telnet, VNC y RDP integrado. |
 | **Túneles** | Reenvío local (`-L`), remoto (`-R`) y dinámico SOCKS5 (`-D`). Ligados a una sesión (se abren y se cierran con su terminal) o guardados en el **gestor de túneles**, que los inicia y los detiene sin abrir un terminal. |
 | **X11** | Servidor X propio, escrito en Rust e integrado: las aplicaciones gráficas remotas se ven en una pestaña sin instalar VcXsrv, Xming ni XQuartz. También puede usarse el servidor X del sistema. Reenvío por SSH con cookie de autenticación. |
+| **Agente y proxy** | Reenvío del agente SSH a un equipo (como `ssh -A`) y salida a través de un proxy HTTP o SOCKS5 de empresa. |
 | **Verificación de host** | Usa `~/.ssh/known_hosts`, compartido con OpenSSH. Pregunta la primera vez y **rechaza** la conexión si la clave del servidor cambia. |
 | **Terminal** | Búsqueda en pantalla e historial, registro de la sesión en un fichero, reconexión automática si se cae la red y reapertura de las pestañas al arrancar. Enlaces que se abren con `Ctrl+clic` y palabras resaltadas (errores en rojo, avisos en amarillo…) con reglas propias. |
 | **Pestañas** | Se reordenan arrastrando, se renombran con doble clic, llevan el color de su carpeta (producción en rojo) y avisan cuando hay salida nueva (o suena la campana) en una que no estás mirando. |
@@ -229,6 +230,24 @@ En el editor de una sesión:
 - **Túneles**: tipo, dirección y puerto de escucha, y destino. La cabecera del
   terminal muestra cuántos están activos. Estos túneles viven mientras viva
   el terminal de la sesión.
+- **Reenviar el agente SSH**: como `ssh -A`. Las claves de tu agente
+  (OpenSSH en Linux, macOS y Windows) quedan disponibles en ese equipo para
+  saltar desde él a otros con `ssh` o `git`, sin copiar ninguna clave.
+
+### Proxy de salida
+
+Si la red no deja salir directamente, **⚙ Ajustes → Proxy de salida** hace
+que la primera conexión hacia cada equipo pase por un proxy **HTTP**
+(`CONNECT`) o **SOCKS5**, con usuario y contraseña si los pide (la
+contraseña se guarda en el baúl). Vale para SSH, SFTP, Telnet, VNC y RDP
+integrado, para el primer salto de una cadena y para los túneles del gestor.
+
+- Las direcciones de este mismo equipo (`localhost`, `127.0.0.1`) nunca
+  pasan por el proxy.
+- **Sin proxy para** admite excepciones separadas por comas: un nombre, un
+  final de dominio (`.interno`) o un comienzo de dirección (`10.`).
+- Cada equipo puede pedir conexión directa en su ficha (Avanzado).
+- El nombre del equipo lo resuelve el proxy, no este equipo.
 
 ### Servidor X integrado
 
@@ -537,6 +556,13 @@ recuperar; el resto de la configuración sigue intacta.
   leer el teclado y la pantalla de las demás aplicaciones X): actívalo solo
   con servidores de confianza. Con el servidor integrado ese acceso se queda
   dentro de su pestaña: no alcanza al resto de tu escritorio.
+- **Reenvío del agente**: mientras dure la sesión, quien administre el
+  equipo remoto puede usar tus claves a través del agente (no copiarlas).
+  Actívalo solo en equipos de confianza. Los canales de agente que abra un
+  servidor al que no se le pidió el reenvío se rechazan.
+- **Proxy de salida**: el proxy ve a qué equipos y puertos te conectas (no
+  el contenido, que va cifrado en SSH y RDP; en Telnet y VNC sí lo vería).
+  Con un proxy HTTP el usuario y la contraseña viajan sin cifrar hasta él.
 - El servidor X integrado solo atiende las conexiones que llegan por un
   reenvío SSH y presentan la cookie de esa sesión. Si activas «Aceptar
   también programas de este equipo», escucha además en `127.0.0.1` **sin
@@ -599,6 +625,13 @@ recuperar; el resto de la configuración sigue intacta.
   este servidor falla (necesita XKB). Una aplicación hostil no puede tumbar
   GodRemote ni agotar su memoria, pero sí tener ocupado el servidor X un
   rato.
+- **Reenvío del agente**: solo con el agente de OpenSSH; Pageant (PuTTY) no
+  se puede reenviar. En Windows no se ha probado.
+- **Proxy de salida**: HTTP `CONNECT` con autenticación básica y SOCKS5 sin
+  autenticación o con usuario y contraseña; sin NTLM ni Kerberos, sin
+  proxies encadenados y sin fichero de configuración automática (PAC). El
+  cliente RDP externo no lo usa. En Telnet no hay «conexión directa» por
+  equipo.
 - **Paleta y atajos**: los atajos son fijos (se pueden desactivar, no
   cambiar). En un escritorio remoto también los captura GodRemote: no
   llegan al equipo remoto.
@@ -673,6 +706,9 @@ la edición «SSH reforzada», es decir, contra russh 0.65.4.
   reales (`xterm`, `xclock`, `xeyes`, `xcalc`, `xlogo`, `xmessage`, `xev`,
   `xprop`, `xwininfo`…): dibujo, teclado, ratón, portapapeles, gestor de
   ventanas y autenticación por cookie.
+- `tests/agent_and_proxy.rs`: el equipo remoto lista las claves del agente
+  local solo cuando se pide el reenvío, y SSH a través de un proxy HTTP con
+  sus excepciones, contra un `sshd` real.
 - `tests/fleet.rs`: una orden en varios equipos contra un `sshd` real:
   salida, códigos, límite en paralelo, tiempo máximo y cancelación.
 - `tests/xserver_ssh.rs`: de extremo a extremo: una aplicación lanzada por
@@ -699,6 +735,7 @@ src/
   vault.rs        baúl cifrado
   keys.rs         claves SSH
   ssh.rs          conexión, saltos, autenticación y shell
+  agent.rs        reenvío del agente SSH
   tunnels.rs      reenvío de puertos y SOCKS5
   tunnel_manager.rs  túneles guardados, con su propia conexión
   x11.rs          reenvío X11

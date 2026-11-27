@@ -47,7 +47,7 @@ use keys_view::KeysWindow;
 use macros_view::{MacroRequest, MacrosWindow};
 use palette_view::{Command, Palette, PaletteAction, PaletteItem, PaletteResult};
 use server_bar::ServerBarWindow;
-use settings_view::SettingsWindow;
+use settings_view::{ProxyVault, SettingsWindow};
 use sftp_view::{SftpState, SftpView};
 use themes_view::ThemesWindow;
 use transfer_view::{TransferRequest, TransferWindow};
@@ -297,6 +297,8 @@ pub struct App {
     vault_window: Option<vault_view::VaultWindow>,
     /// Última vez que el usuario tocó el teclado o el ratón.
     last_activity: Instant,
+    /// Proxy de salida que está en vigor ahora mismo.
+    applied_proxy: Option<crate::proxy::ProxyConfig>,
     pending_close: Option<PendingClose>,
     /// Se ha pedido salir con sesiones vivas; `Some(true)` cuando el botón
     /// «Cancelar» de la pregunta ya tiene el foco.
@@ -498,6 +500,7 @@ impl App {
             fleet_window: None,
             vault_window: None,
             last_activity: Instant::now(),
+            applied_proxy: None,
             pending_close: None,
             pending_quit: None,
             quit_confirmed: false,
@@ -1412,7 +1415,7 @@ impl App {
             let mut chosen = None;
             ui.scope(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                ui.menu_button("▾", |ui| {
+                let menu = ui.menu_button("   ", |ui| {
                     for shell in crate::shells::detect() {
                         if ui
                             .button(&shell.name)
@@ -1423,9 +1426,20 @@ impl App {
                             ui.close();
                         }
                     }
-                })
-                .response
-                .on_hover_text("Abrir un terminal local con otra shell");
+                });
+                // La flecha se dibuja: no todas las fuentes traen el signo.
+                let center = menu.response.rect.center();
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![
+                        center + egui::vec2(-4.0, -2.0),
+                        center + egui::vec2(4.0, -2.0),
+                        center + egui::vec2(0.0, 3.0),
+                    ],
+                    ui.visuals().text_color(),
+                    egui::Stroke::NONE,
+                ));
+                menu.response
+                    .on_hover_text("Abrir un terminal local con otra shell");
             });
             if let Some(shell) = chosen {
                 self.open_local_shell(&shell.name, &shell.command);
@@ -1477,7 +1491,7 @@ impl App {
                 )
                 .clicked()
             {
-                self.settings_window = Some(SettingsWindow);
+                self.settings_window = Some(SettingsWindow::default());
             }
             let vault_exists = Vault::exists(&crate::paths::vault_file());
             ui.menu_button("🔐 Baúl", |ui| {
@@ -2333,7 +2347,7 @@ impl App {
             Command::Themes => {
                 self.themes_window = Some(ThemesWindow::new(&self.settings.theme));
             }
-            Command::Settings => self.settings_window = Some(SettingsWindow),
+            Command::Settings => self.settings_window = Some(SettingsWindow::default()),
             Command::Transfer => self.transfer_window = Some(TransferWindow::default()),
             Command::VaultLock => self.vault = None,
             Command::VaultUnlock => {
@@ -2385,8 +2399,31 @@ impl App {
         }
     }
 
+    /// Pone en vigor el proxy de salida de los ajustes, con la contraseña
+    /// que haya en el baúl. Se llama en cada fotograma: solo actúa si algo
+    /// ha cambiado (los ajustes, o el baúl al abrirse o bloquearse).
+    fn sync_proxy(&mut self) {
+        let wanted = self
+            .settings
+            .proxy
+            .is_active()
+            .then(|| crate::proxy::ProxyConfig {
+                settings: self.settings.proxy.clone(),
+                password: self
+                    .vault
+                    .as_ref()
+                    .and_then(|v| v.get(crate::proxy::PASSWORD_KEY))
+                    .map(str::to_string),
+            });
+        if wanted != self.applied_proxy {
+            crate::proxy::set(wanted.clone());
+            self.applied_proxy = wanted;
+        }
+    }
+
     /// Bloquea el baúl tras un rato sin actividad y muestra su visor.
     fn vault_guard(&mut self, ctx: &egui::Context) {
+        self.sync_proxy();
         let active = ctx.input(|i| {
             !i.events.is_empty() || i.pointer.any_down() || i.pointer.delta() != egui::Vec2::ZERO
         });
@@ -4084,6 +4121,8 @@ impl eframe::App for App {
         // Los atajos de los snippets se miran antes de que el terminal vea
         // las teclas.
         self.dispatch_shortcuts(ui.ctx());
+        // Antes de abrir ninguna conexión en este fotograma.
+        self.sync_proxy();
 
         // --- Eventos de fondo ---------------------------------------------
         while let Ok(req) = self.prompt_rx.try_recv() {
@@ -4286,7 +4325,30 @@ impl eframe::App for App {
             self.focus_active_terminal();
         }
         if let Some(win) = &mut self.settings_window {
-            let (open, changed, request) = win.show(&ctx, &mut self.settings);
+            let proxy_vault = ProxyVault {
+                open: self.vault.is_some(),
+                stored: self
+                    .vault
+                    .as_ref()
+                    .is_some_and(|v| v.contains(crate::proxy::PASSWORD_KEY)),
+            };
+            let (open, changed, request) = win.show(&ctx, &mut self.settings, proxy_vault);
+            if let Some(password) = &request.proxy_password
+                && let Some(vault) = &mut self.vault
+            {
+                let result = if password.is_empty() {
+                    vault.remove(crate::proxy::PASSWORD_KEY)
+                } else {
+                    vault.set(crate::proxy::PASSWORD_KEY, password)
+                };
+                match result {
+                    Ok(()) if password.is_empty() => {
+                        self.notify("Contraseña del proxy borrada del baúl", false)
+                    }
+                    Ok(()) => self.notify("Contraseña del proxy guardada en el baúl", false),
+                    Err(e) => self.notify(format!("No se pudo guardar: {e:#}"), true),
+                }
+            }
             if changed {
                 self.settings.highlight.sanitize();
                 crate::highlight::set(&self.settings.highlight);

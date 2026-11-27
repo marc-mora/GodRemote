@@ -1203,6 +1203,9 @@ pub struct Settings {
     /// Palabras resaltadas y enlaces en los terminales.
     #[serde(rename = "resaltado")]
     pub highlight: crate::highlight::Highlight,
+    /// Proxy por el que salen las conexiones (su contraseña va al baúl).
+    #[serde(rename = "proxy")]
+    pub proxy: crate::proxy::ProxySettings,
     /// Shell de los terminales locales (programa y argumentos); vacía, la
     /// habitual del sistema.
     #[serde(rename = "shell_local")]
@@ -1262,6 +1265,7 @@ impl Default for Settings {
             activity_notice: true,
             highlight: Default::default(),
             x_server: Default::default(),
+            proxy: Default::default(),
             local_shell: String::new(),
             vault_autolock: 15,
             app_shortcuts: true,
@@ -1489,6 +1493,13 @@ mod tests {
             reconnect_attempts: 3,
             restore_tabs: true,
             editor: "code -w".into(),
+            proxy: crate::proxy::ProxySettings {
+                kind: crate::proxy::ProxyKind::Socks5,
+                host: "proxy.empresa".into(),
+                port: 1080,
+                username: "ana".into(),
+                exceptions: ".interno, 10.".into(),
+            },
             local_shell: "pwsh.exe -NoLogo".into(),
             vault_autolock: 0,
             app_shortcuts: false,

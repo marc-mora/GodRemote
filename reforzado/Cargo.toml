@@ -104,6 +104,10 @@ path = "../tests/xserver_ssh.rs"
 name = "fleet"
 path = "../tests/fleet.rs"
 
+[[test]]
+name = "agent_and_proxy"
+path = "../tests/agent_and_proxy.rs"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

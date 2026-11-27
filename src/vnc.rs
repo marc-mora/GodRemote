@@ -358,6 +358,7 @@ async fn connect_and_run(
         move |s: String| emit(DesktopEvent::Status(s))
     };
     let (route, to_save) = Route::establish(via.as_ref(), prompter, &status).await?;
+    let route = route.without_proxy(session.bypass_proxy);
     if !to_save.is_empty() {
         emit(DesktopEvent::SaveSecrets(to_save));
     }

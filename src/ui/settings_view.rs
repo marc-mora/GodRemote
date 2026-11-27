@@ -14,10 +14,24 @@ pub struct SettingsRequest {
     pub open_transfer: bool,
     /// Arrancar el servidor X integrado y mostrar su pestaña.
     pub open_x_server: bool,
+    /// Guardar en el baúl esta contraseña del proxy (vacía: borrarla).
+    pub proxy_password: Option<String>,
+}
+
+/// Lo que la ventana necesita saber del baúl para la contraseña del proxy.
+#[derive(Clone, Copy)]
+pub struct ProxyVault {
+    /// El baúl está abierto.
+    pub open: bool,
+    /// Ya hay una contraseña del proxy guardada.
+    pub stored: bool,
 }
 
 #[derive(Default)]
-pub struct SettingsWindow;
+pub struct SettingsWindow {
+    /// Contraseña del proxy que se está escribiendo.
+    proxy_password: String,
+}
 
 impl SettingsWindow {
     /// Devuelve (sigue abierta, han cambiado los ajustes, peticiones).
@@ -25,6 +39,7 @@ impl SettingsWindow {
         &mut self,
         ctx: &egui::Context,
         settings: &mut Settings,
+        vault: ProxyVault,
     ) -> (bool, bool, SettingsRequest) {
         let mut open = true;
         let before = settings.clone();
@@ -75,6 +90,8 @@ impl SettingsWindow {
                             "La pestaña se resalta cuando su terminal recibe algo mientras miras \
                      otra, y lleva una campana si la ha hecho sonar",
                         );
+                        ui.separator();
+                        proxy_section(ui, settings, vault, &mut self.proxy_password, &mut request);
                         ui.separator();
                         local_shell_section(ui, settings);
                         ui.separator();
@@ -176,6 +193,96 @@ impl SettingsWindow {
             });
         (open, *settings != before, request)
     }
+}
+
+/// Proxy por el que salen las conexiones.
+fn proxy_section(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    vault: ProxyVault,
+    password: &mut String,
+    request: &mut SettingsRequest,
+) {
+    use crate::proxy::ProxyKind;
+    ui.strong("Proxy de salida");
+    let proxy = &mut settings.proxy;
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt("proxy_kind")
+            .selected_text(proxy.kind.label())
+            .width(130.0)
+            .show_ui(ui, |ui| {
+                for kind in ProxyKind::ALL {
+                    ui.selectable_value(&mut proxy.kind, kind, kind.label());
+                }
+            });
+        ui.add_enabled_ui(proxy.kind != ProxyKind::None, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut proxy.host)
+                    .desired_width(200.0)
+                    .hint_text("servidor del proxy"),
+            );
+            ui.add(egui::DragValue::new(&mut proxy.port).range(1..=65535));
+        });
+    });
+    if proxy.kind != ProxyKind::None {
+        ui.horizontal(|ui| {
+            ui.label("Usuario");
+            ui.add(
+                egui::TextEdit::singleline(&mut proxy.username)
+                    .desired_width(120.0)
+                    .hint_text("opcional"),
+            );
+            ui.label("Contraseña");
+            ui.add_enabled(
+                vault.open,
+                egui::TextEdit::singleline(password)
+                    .password(true)
+                    .desired_width(120.0)
+                    .hint_text(if vault.stored {
+                        "guardada"
+                    } else {
+                        "sin guardar"
+                    }),
+            )
+            .on_disabled_hover_text("Se guarda en el baúl: desbloquéalo para cambiarla");
+            if ui
+                .add_enabled(
+                    vault.open && !password.is_empty(),
+                    egui::Button::new("Guardar"),
+                )
+                .clicked()
+            {
+                request.proxy_password = Some(std::mem::take(password));
+            }
+            if vault.open && vault.stored && ui.button("Quitar").clicked() {
+                request.proxy_password = Some(String::new());
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Sin proxy para");
+            ui.add(
+                egui::TextEdit::singleline(&mut proxy.exceptions)
+                    .desired_width(330.0)
+                    .hint_text("por ejemplo: .interno, 10., 192.168."),
+            )
+            .on_hover_text(
+                "Separados por comas: un nombre exacto, un final de dominio (.interno) o un \
+                 comienzo de dirección (10.)",
+            );
+        });
+        if !proxy.username.trim().is_empty() && !vault.open {
+            ui.colored_label(
+                crate::theme::warn_color(),
+                "Con el baúl bloqueado no se puede entregar la contraseña al proxy.",
+            );
+        }
+    }
+    ui.weak(
+        "Por él pasa la primera conexión hacia cada equipo (SSH, SFTP, Telnet, VNC y RDP \
+         integrado; también el primer salto y los túneles del gestor). Las direcciones de \
+         este mismo equipo nunca pasan por el proxy, y cada equipo puede pedir conexión \
+         directa en su ficha.",
+    );
 }
 
 /// Shell que abren los terminales locales.
