@@ -1,13 +1,11 @@
 //! Cliente Telnet: negociación mínima de opciones (tipo de terminal, tamaño
 //! de ventana, eco) sobre una conexión TCP **sin cifrar**.
 
-use std::time::Duration;
-
-use anyhow::{Context, Result, anyhow};
+use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-use crate::ssh::Waker;
+use crate::ssh::{Endpoint, Prompter, Route, Waker};
 use crate::terminal::{TermBackend, TermCmd, TermEvent};
 
 const IAC: u8 = 255;
@@ -211,7 +209,7 @@ impl TelnetCodec {
     }
 }
 
-/// Abre una sesión Telnet en segundo plano.
+/// Abre una sesión Telnet directa en segundo plano.
 pub fn spawn(
     rt: &tokio::runtime::Handle,
     host: String,
@@ -220,14 +218,33 @@ pub fn spawn(
     cols: u16,
     rows: u16,
 ) -> TermBackend {
+    // Sin saltos no hay nada que preguntar al usuario.
+    let (tx, _rx) = std::sync::mpsc::channel();
+    spawn_via(rt, host, port, None, Prompter::new(tx, waker), cols, rows)
+}
+
+/// Abre una sesión Telnet, opcionalmente a través de saltos SSH (`via` es
+/// el último salto de la cadena).
+pub fn spawn_via(
+    rt: &tokio::runtime::Handle,
+    host: String,
+    port: u16,
+    via: Option<Endpoint>,
+    prompter: Prompter,
+    cols: u16,
+    rows: u16,
+) -> TermBackend {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (ev_tx, ev_rx) = std::sync::mpsc::channel();
     rt.spawn(async move {
-        let emit = move |ev: TermEvent| {
-            let _ = ev_tx.send(ev);
-            waker();
+        let emit = {
+            let prompter = prompter.clone();
+            move |ev: TermEvent| {
+                let _ = ev_tx.send(ev);
+                prompter.wake();
+            }
         };
-        let result = run(&host, port, cmd_rx, cols, rows, &emit).await;
+        let result = run(&host, port, via, &prompter, cmd_rx, cols, rows, &emit).await;
         emit(TermEvent::Closed(result.err().map(|e| format!("{e:#}"))));
     });
     TermBackend {
@@ -236,25 +253,32 @@ pub fn spawn(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     host: &str,
     port: u16,
+    via: Option<Endpoint>,
+    prompter: &Prompter,
     mut cmd_rx: mpsc::UnboundedReceiver<TermCmd>,
     cols: u16,
     rows: u16,
     emit: &(dyn Fn(TermEvent) + Send + Sync),
 ) -> Result<()> {
+    // La cadena de saltos (si la hay) vive mientras dure la sesión.
+    let status = |s: String| emit(TermEvent::Status(s));
+    let (route, to_save) = Route::establish(via.as_ref(), prompter, &status).await?;
+    if !to_save.is_empty() {
+        emit(TermEvent::SaveSecrets(to_save));
+    }
     emit(TermEvent::Status(format!(
-        "Conectando a {host}:{port} por Telnet (sin cifrar)…"
+        "Conectando a {host}:{port} por Telnet (sin cifrar{})…",
+        if route.is_direct() {
+            ""
+        } else {
+            " tras el último salto"
+        }
     )));
-    let mut stream = tokio::time::timeout(
-        Duration::from_secs(15),
-        tokio::net::TcpStream::connect((host, port)),
-    )
-    .await
-    .map_err(|_| anyhow!("Tiempo de espera agotado conectando a {host}:{port}"))?
-    .with_context(|| format!("No se pudo conectar a {host}:{port}"))?;
-    let _ = stream.set_nodelay(true);
+    let mut stream = route.connect(host, port).await?;
     emit(TermEvent::Connected(None));
 
     let mut codec = TelnetCodec::new(cols, rows);

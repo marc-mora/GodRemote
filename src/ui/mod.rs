@@ -292,51 +292,35 @@ impl App {
         self.active = self.tabs.len() - 1;
     }
 
+    /// Cadena de saltos SSH de una sesión, con los secretos de cada salto.
+    /// `None` si la conexión es directa.
+    fn route_for(&self, session: &Session) -> Result<Option<Endpoint>, String> {
+        let hops = self.tree.jump_path(session)?;
+        Ok(Endpoint::route(hops.into_iter().map(|hop| {
+            let creds = self.creds_for(&hop);
+            (hop, creds)
+        })))
+    }
+
     /// Reúne lo necesario para conectar por SSH: secretos de la sesión y de
     /// cada salto (bastión) de su cadena.
     fn endpoint_for(&self, session: &Session) -> Result<Endpoint, String> {
-        let mut chain = vec![session.clone()];
-        let mut next = session.jump;
-        while let Some(id) = next {
-            if chain.iter().any(|s| s.id == id) {
-                return Err("La cadena de saltos forma un bucle".into());
-            }
-            if chain.len() > crate::ssh::MAX_JUMPS {
-                return Err("Demasiados saltos encadenados".into());
-            }
-            let jump = self
-                .tree
-                .session(id)
-                .ok_or("La sesión de salto ya no existe; edita la sesión")?;
-            if !jump.protocol.is_ssh() {
-                return Err(format!(
-                    "El salto «{}» no es una sesión SSH",
-                    jump.display_name()
-                ));
-            }
-            next = jump.jump;
-            chain.push(jump.clone());
-        }
-        // El último de la cadena es el más cercano a nosotros.
-        let mut endpoint: Option<Endpoint> = None;
-        for hop in chain.into_iter().rev() {
-            endpoint = Some(Endpoint {
-                creds: self.creds_for(&hop),
-                session: hop,
-                via: endpoint.map(Box::new),
-            });
-        }
-        endpoint.ok_or_else(|| "Sesión no válida".to_string())
+        Ok(Endpoint {
+            session: session.clone(),
+            creds: self.creds_for(session),
+            via: self.route_for(session)?.map(Box::new),
+        })
     }
 
     /// Crea el terminal de una sesión según su protocolo.
     fn new_terminal(&self, session: &Session) -> Result<TerminalView, String> {
         let backend = match session.protocol {
-            Protocol::Telnet => crate::telnet::spawn(
+            Protocol::Telnet => crate::telnet::spawn_via(
                 self.rt.handle(),
                 session.host.trim().to_string(),
                 session.port,
-                self.waker.clone(),
+                self.route_for(session)?,
+                self.prompter.clone(),
                 INITIAL_COLS,
                 INITIAL_ROWS,
             ),
@@ -407,40 +391,52 @@ impl App {
     }
 
     /// Crea la vista de un escritorio remoto integrado (RDP o VNC).
-    fn new_desktop(&self, session: &Session) -> DesktopView {
+    fn new_desktop(&self, session: &Session) -> Result<DesktopView, String> {
         let password = self
             .vault
             .as_ref()
             .and_then(|v| v.get(&session.password_key()).map(str::to_string));
+        let via = self.route_for(session)?;
         let backend: DesktopBackend = match session.protocol {
-            Protocol::Vnc => crate::vnc::spawn(
+            Protocol::Vnc => crate::vnc::spawn_via(
                 self.rt.handle(),
                 session.clone(),
                 password,
+                via,
                 self.prompter.clone(),
             ),
-            _ => spawn_embedded_rdp(
+            _ => crate::rdp_client::spawn_via(
                 self.rt.handle(),
                 session.clone(),
                 password,
                 self.desktop_size(session),
+                via,
                 self.prompter.clone(),
             ),
         };
         let clipboard = session.protocol == Protocol::Vnc || session.rdp.clipboard;
-        DesktopView::new(backend, clipboard)
+        Ok(DesktopView::new(backend, clipboard))
     }
 
     fn open_desktop(&mut self, session: Session) {
-        let view = self.new_desktop(&session);
-        self.push_tab(
-            session.display_name(),
-            Some(session),
-            TabKind::Desktop(Box::new(view)),
-        );
+        match self.new_desktop(&session) {
+            Ok(view) => self.push_tab(
+                session.display_name(),
+                Some(session),
+                TabKind::Desktop(Box::new(view)),
+            ),
+            Err(e) => self.notify(e, true),
+        }
     }
 
     fn open_rdp(&mut self, session: Session) {
+        if !session.jumps.is_empty() {
+            return self.notify(
+                "Los saltos solo funcionan con el cliente RDP integrado: \
+                 ábrelo integrado o quita los saltos de la sesión",
+                true,
+            );
+        }
         let stored = self
             .vault
             .as_ref()
@@ -1148,8 +1144,10 @@ impl App {
 
         if reconnect && let Some(session) = self.tabs[self.active].session.clone() {
             if matches!(self.tabs[self.active].kind, TabKind::Desktop(_)) {
-                let view = self.new_desktop(&session);
-                self.tabs[self.active].kind = TabKind::Desktop(Box::new(view));
+                match self.new_desktop(&session) {
+                    Ok(view) => self.tabs[self.active].kind = TabKind::Desktop(Box::new(view)),
+                    Err(e) => self.notify(e, true),
+                }
             } else {
                 match self.new_terminal(&session) {
                     Ok(view) => self.tabs[self.active].kind = TabKind::Terminal(Box::new(view)),
@@ -1643,17 +1641,6 @@ fn rdp_error_summary(log: &str) -> String {
         }
     }
     out.join(" · ")
-}
-
-/// Arranca el cliente RDP integrado.
-fn spawn_embedded_rdp(
-    rt: &tokio::runtime::Handle,
-    session: Session,
-    password: Option<String>,
-    size: (u16, u16),
-    prompter: Prompter,
-) -> DesktopBackend {
-    crate::rdp_client::spawn(rt, session, password, size, prompter)
 }
 
 /// Punto de estado (verde / ámbar / rojo).

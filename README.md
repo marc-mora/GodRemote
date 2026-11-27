@@ -15,7 +15,7 @@ claves, macros, temas personalizables y un baúl cifrado para las credenciales.
 |------|---------------|
 | **Equipos** | Árbol de carpetas y subcarpetas, búsqueda, mover, duplicar, renombrar y eliminar. Conexión rápida `usuario@host[:puerto]`. |
 | **SSH** | Terminal integrado (xterm-256color, historial de 10 000 líneas, selección y copiar/pegar, ratón para `htop`, `mc`, `vim`…). Autenticación por contraseña, keyboard-interactive (PAM, códigos OTP), clave privada (OpenSSH, PEM, PuTTY `.ppk`) y agente SSH / Pageant. |
-| **Salto por bastión** | Una sesión SSH puede pasar por otra del árbol (y esa por otra), como `ProxyJump`. |
+| **Saltos (bastiones)** | Cada equipo tiene su lista ordenada de saltos SSH, como `ProxyJump a,b,c`. Vale para SSH, SFTP, Telnet, VNC y RDP integrado. |
 | **Túneles** | Reenvío local (`-L`), remoto (`-R`) y dinámico SOCKS5 (`-D`), por sesión. Se abren con el terminal y se cierran con él. |
 | **X11** | Reenvío de aplicaciones gráficas al servidor X local, con cookie de autenticación sustituida. |
 | **Verificación de host** | Usa `~/.ssh/known_hosts`, compartido con OpenSSH. Pregunta la primera vez y **rechaza** la conexión si la clave del servidor cambia. |
@@ -77,9 +77,13 @@ El resultado es un único `godremote.exe` que solo depende de DLL del sistema.
 
 ### Túneles, salto y X11
 
-En el editor de una sesión SSH, sección **Avanzado**:
+En el editor de una sesión:
 
-- **Saltar por**: elige otra sesión SSH del árbol como bastión.
+- **Saltos (bastiones SSH)**: añade, en orden, las sesiones SSH del árbol por
+  las que hay que pasar. Se conecta a la primera, desde ella a la segunda, y
+  así hasta el destino; el editor muestra el camino resultante. Si un salto
+  necesita a su vez otros, se intercalan solos. Está disponible para SSH,
+  SFTP, Telnet, VNC y RDP integrado (no con el cliente RDP externo).
 - **X11**: necesita un servidor X local (el propio escritorio en Linux;
   VcXsrv, Xming o WSLg en Windows; XQuartz en macOS).
 - **Túneles**: tipo, dirección y puerto de escucha, y destino. La cabecera del
@@ -170,6 +174,8 @@ recuperar; el resto de la configuración sigue intacta.
 - X11: hace falta un servidor X local; GodRemote no trae uno propio.
 - Los túneles van ligados al terminal de la sesión: no hay un gestor de
   túneles independiente.
+- Saltos: como máximo ocho encadenados; cada salto se autentica con su
+  propia sesión (no hay reenvío del agente SSH entre saltos).
 - Sin Mosh, FTP ni editor de texto remoto.
 - Solo se ha probado en Linux (X11). El ejecutable de Windows se compila
   desde Linux y no se ha podido ejecutar en el entorno de desarrollo.
@@ -186,12 +192,14 @@ cargo test
   servidor SSH en el propio proceso.
 - `tests/ssh_integration.rs`: clave con passphrase, verificación de host,
   shell y SFTP contra un `sshd` real.
-- `tests/ssh_features.rs`: salto por bastión, túneles `-L`/`-R`/`-D` y X11
-  contra un `sshd` real; Telnet contra un `telnetd` real.
-- `tests/vnc_integration.rs`: cliente VNC contra `x11vnc`.
+- `tests/ssh_features.rs`: uno y varios saltos encadenados (tres `sshd`
+  reales), túneles `-L`/`-R`/`-D` y X11; Telnet contra un `telnetd` real,
+  directo y a través de dos saltos.
+- `tests/vnc_integration.rs`: cliente VNC contra `x11vnc`, directo y a
+  través de un salto SSH.
 - `tests/rdp_integration.rs`: cliente RDP integrado contra
   `freerdp-shadow-cli3` (NLA y solo TLS, confianza en el certificado,
-  contraseñas, ratón y teclado).
+  contraseñas, ratón y teclado; directo y a través de un salto SSH).
 
 Las pruebas contra servidores reales se omiten solas si falta el programa
 necesario (`sshd`, `telnetd`, `socat`, `Xvfb`, `x11vnc`…) o no se ejecutan

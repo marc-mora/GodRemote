@@ -84,7 +84,10 @@ fn start_xvfb(xvfb: &Path) -> (Proc, String) {
     let mut child = Command::new(xvfb)
         .args(["-displayfd", "1", "-screen", "0"])
         .arg(format!("{}x{}x24", SCREEN.0, SCREEN.1))
-        .args(["-nolisten", "tcp"])
+        // `-noreset`: sin él, el servidor se reinicia al irse su último
+        // cliente (p. ej. un `xdotool` de comprobación) y expulsa al xterm
+        // que esté arrancando en ese instante.
+        .args(["-nolisten", "tcp", "-noreset"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -326,35 +329,34 @@ fn rdp_embedded_client_end_to_end() {
 
     let dir = tempfile::tempdir().unwrap();
     // SAFETY: único test de este binario; aún no hay otros hilos.
-    unsafe { std::env::set_var("GODREMOTE_HOME", dir.path().join("godremote")) };
+    unsafe {
+        std::env::set_var("GODREMOTE_HOME", dir.path().join("godremote"));
+        std::env::set_var("GODREMOTE_KNOWN_HOSTS", dir.path().join("known_hosts"));
+    }
     let known = paths::tls_known_hosts_file();
 
     let (_xvfb, display) = start_xvfb(&xvfb);
     // Un xterm que ocupa casi toda la pantalla, con un fondo reconocible y
     // que guarda en un fichero todo lo que se le teclea.
     let typed = dir.path().join("tecleado.txt");
-    let xterm_log = dir.path().join("xterm.log");
-    let mut xterm = Proc(
-        Command::new("xterm")
-            .args(["-bg", "#2060c0", "-fg", "white", "-b", "0", "-bw", "0"])
-            .args(["-geometry", "160x55+0+0", "-e"])
-            .arg(format!("cat > {}", typed.display()))
-            .env("DISPLAY", &display)
-            .stdout(Stdio::null())
-            .stderr(std::fs::File::create(&xterm_log).unwrap())
-            .spawn()
-            .unwrap(),
+    let _xterm = common::start_xterm(
+        &display,
+        &[
+            "-bg",
+            "#2060c0",
+            "-fg",
+            "white",
+            "-b",
+            "0",
+            "-bw",
+            "0",
+            "-geometry",
+            "160x55+0+0",
+            "-e",
+            &format!("cat > {}", typed.display()),
+        ],
+        &dir.path().join("xterm.log"),
     );
-    let deadline = Instant::now() + PATIENCE;
-    while xdotool(&display, &["search", "--class", "xterm"]).is_empty() {
-        assert!(
-            Instant::now() < deadline,
-            "el xterm no abrió su ventana en {display} (estado: {:?}): {}",
-            xterm.0.try_wait(),
-            std::fs::read_to_string(&xterm_log).unwrap_or_default()
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
 
     let port = free_port();
     let _server = start_shadow(
@@ -844,4 +846,65 @@ fn rdp_embedded_client_end_to_end() {
         .flatten()
         .expect("debe fallar");
     assert!(error.contains("No se pudo conectar"), "{error}");
+
+    // 17. A través de un salto SSH: el certificado y la contraseña siguen
+    //     asociados al servidor RDP real, y la conexión sale del bastión.
+    if common::find_program("sshd").is_some() && common::is_root() {
+        use godremote::keys::{self, KeyAlgorithm};
+        use godremote::model::AuthMethod;
+        use godremote::ssh::{Credentials, Endpoint};
+        let ssh_dir = dir.path().join("ssh");
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+        let key = keys::generate(&ssh_dir, "id", KeyAlgorithm::Ed25519, "", None).unwrap();
+        let authorized = ssh_dir.join("authorized_keys");
+        std::fs::write(&authorized, format!("{}\n", key.public_openssh)).unwrap();
+        let (_sshd, ssh_port, sshd_log) = common::start_sshd(
+            &ssh_dir,
+            &authorized,
+            "LogLevel DEBUG1\nAllowTcpForwarding yes\n",
+        );
+        let user = String::from_utf8_lossy(&Command::new("id").arg("-un").output().unwrap().stdout)
+            .trim()
+            .to_string();
+        let bastion = Session {
+            name: "bastion".into(),
+            host: "127.0.0.1".into(),
+            port: ssh_port,
+            username: user,
+            auth: AuthMethod::Key,
+            key_path: key.path.display().to_string(),
+            ..Default::default()
+        };
+        // El certificado del servidor RDP ya es de confianza (pasos previos):
+        // solo debe preguntarse la clave SSH del bastión.
+        let a = answers(true, &[]);
+        let backend = rdp_client::spawn_via(
+            rig.rt.handle(),
+            rig.session.clone(),
+            Some(PASSWORD.into()),
+            (800, 600),
+            Endpoint::route([(bastion, Credentials::default())]),
+            prompter(a.clone()),
+        );
+        let seen = wait_outcome(&backend);
+        assert!(
+            seen.connected,
+            "RDP por salto: {:?} {:?}",
+            seen.status, seen.closed
+        );
+        assert_eq!((a.hosts(), a.secrets_asked()), (1, 0));
+        eventually("la imagen llega a través del salto", || {
+            share_of(&backend, BACKGROUND) > 0.5
+        });
+        close(&backend);
+        let log = std::fs::read_to_string(&sshd_log).unwrap();
+        assert!(
+            log.lines()
+                .any(|l| l.contains("direct") && l.contains(&format!("port {port}"))),
+            "el bastión no abrió la conexión RDP:\n{log}"
+        );
+        eprintln!("RDP a través de un salto SSH: sesión e imagen correctas");
+    } else {
+        eprintln!("RDP por salto: OMITIDO (hace falta sshd y root)");
+    }
 }

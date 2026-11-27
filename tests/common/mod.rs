@@ -154,3 +154,117 @@ pub fn start_sshd(
     wait_port(port);
     (guard, port, log_path)
 }
+
+/// Servidor X virtual (`Xvfb`) de usar y tirar. Al soltarlo se detiene y se
+/// borran su socket y su fichero de bloqueo, para no ir agotando números de
+/// pantalla entre ejecuciones.
+#[cfg(unix)]
+pub struct XDisplay {
+    pub number: u32,
+    _process: Killed,
+}
+
+#[cfg(unix)]
+impl XDisplay {
+    /// Valor para la variable `DISPLAY`.
+    pub fn name(&self) -> String {
+        format!(":{}", self.number)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for XDisplay {
+    fn drop(&mut self) {
+        let _ = self._process.0.kill();
+        let _ = self._process.0.wait();
+        let _ = std::fs::remove_file(format!("/tmp/.X11-unix/X{}", self.number));
+        let _ = std::fs::remove_file(format!("/tmp/.X{}-lock", self.number));
+    }
+}
+
+/// Número de pantalla X libre (ni socket ni fichero de bloqueo).
+#[cfg(unix)]
+pub fn free_display() -> u32 {
+    (60..100)
+        .find(|n| {
+            !std::path::Path::new(&format!("/tmp/.X11-unix/X{n}")).exists()
+                && !std::path::Path::new(&format!("/tmp/.X{n}-lock")).exists()
+        })
+        .expect("no queda ningún número de pantalla libre")
+}
+
+/// Arranca un `Xvfb` en la pantalla indicada y espera a que acepte
+/// conexiones. `extra` son argumentos adicionales (p. ej. `-auth fichero`).
+#[cfg(unix)]
+pub fn start_xvfb(number: u32, size: &str, extra: &[&str]) -> XDisplay {
+    let child = std::process::Command::new("Xvfb")
+        .arg(format!(":{number}"))
+        // `-noreset`: sin él, el servidor se reinicia al irse su último
+        // cliente y expulsa a los que estén conectándose en ese instante.
+        .args(["-screen", "0", size, "-nolisten", "tcp", "-noreset"])
+        .args(extra)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("Xvfb");
+    let display = XDisplay {
+        number,
+        _process: Killed(child),
+    };
+    let socket = format!("/tmp/.X11-unix/X{number}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+        assert!(std::time::Instant::now() < deadline, "Xvfb no arrancó");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    display
+}
+
+/// Lanza un `xterm` en la pantalla indicada y espera a que tenga ventana.
+///
+/// En entornos de pruebas muy cargados el xterm a veces muere al arrancar;
+/// se reintenta unas pocas veces dejando constancia en la salida, y si no
+/// hay manera se falla con todo el detalle disponible.
+#[cfg(unix)]
+pub fn start_xterm(display: &str, args: &[&str], log: &std::path::Path) -> Killed {
+    let search = |display: &str| {
+        std::process::Command::new("xdotool")
+            .env("DISPLAY", display)
+            .args(["search", "--class", "xterm"])
+            .output()
+            .map(|o| !o.stdout.is_empty())
+            .unwrap_or(false)
+    };
+    let mut last = String::new();
+    for attempt in 1..=4 {
+        let mut child = Killed(
+            std::process::Command::new("xterm")
+                .env("DISPLAY", display)
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::fs::File::create(log).expect("registro del xterm"))
+                .spawn()
+                .expect("xterm"),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if search(display) {
+                return child;
+            }
+            let exited = child.0.try_wait().ok().flatten();
+            if exited.is_some() || std::time::Instant::now() > deadline {
+                last = format!(
+                    "intento {attempt}: estado {exited:?}: {}",
+                    std::fs::read_to_string(log).unwrap_or_default().trim()
+                );
+                eprintln!(
+                    "AVISO: el xterm de pruebas no arrancó en {display} ({last}); se reintenta"
+                );
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    panic!("el xterm no llegó a abrir su ventana en {display}: {last}");
+}

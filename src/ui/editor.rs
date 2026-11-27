@@ -98,8 +98,11 @@ impl SessionEditor {
                     .max_height(max_height)
                     .show(ui, |ui| {
                         self.form(ui, tree, vault.as_ref());
-                        if self.session.protocol.is_ssh() {
-                            self.advanced_ssh(ui, tree);
+                        if self.session.protocol.uses_network() {
+                            self.jumps_ui(ui, tree);
+                        }
+                        if self.session.protocol == Protocol::Ssh {
+                            self.advanced_ssh(ui);
                         }
                     });
                 ui.add_space(6.0);
@@ -477,110 +480,190 @@ impl SessionEditor {
             });
     }
 
-    /// Salto por bastión, reenvío X11 y túneles.
-    fn advanced_ssh(&mut self, ui: &mut egui::Ui, tree: &Tree) {
+    /// Lista ordenada de saltos (bastiones SSH) para llegar al equipo.
+    fn jumps_ui(&mut self, ui: &mut egui::Ui, tree: &Tree) {
         let s = &mut self.session;
-        let configured = s.jump.is_some() || s.x11_forwarding || !s.tunnels.is_empty();
-        egui::CollapsingHeader::new("Avanzado: salto, X11 y túneles")
+        let header = if s.jumps.is_empty() {
+            "Saltos (bastiones SSH): conexión directa".to_string()
+        } else {
+            format!("Saltos (bastiones SSH): {}", s.jumps.len())
+        };
+        egui::CollapsingHeader::new(header)
+            .id_salt("session_jumps")
+            .default_open(!s.jumps.is_empty())
+            .show(ui, |ui| {
+                let sessions = tree.ssh_sessions();
+                let name_of = |id: Uuid| {
+                    sessions
+                        .iter()
+                        .find(|(sid, _)| *sid == id)
+                        .map(|(_, name)| name.clone())
+                        .unwrap_or_else(|| "(sesión eliminada)".into())
+                };
+                ui.weak(
+                    "Se conecta al primero, desde él al segundo, y así hasta el destino. \
+                     Cada salto es una sesión SSH del árbol.",
+                );
+
+                // Filas: posición, equipo y botones para ordenar o quitar.
+                let mut move_up = None;
+                let mut move_down = None;
+                let mut remove = None;
+                let count = s.jumps.len();
+                for (i, id) in s.jumps.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}.", i + 1));
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(FIELD_WIDTH, 18.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.set_min_width(FIELD_WIDTH);
+                                ui.add(egui::Label::new(name_of(*id)).truncate());
+                            },
+                        );
+                        if ui
+                            .add_enabled(i > 0, egui::Button::new("⬆").small())
+                            .on_hover_text("Antes en el camino")
+                            .clicked()
+                        {
+                            move_up = Some(i);
+                        }
+                        if ui
+                            .add_enabled(i + 1 < count, egui::Button::new("⬇").small())
+                            .on_hover_text("Después en el camino")
+                            .clicked()
+                        {
+                            move_down = Some(i);
+                        }
+                        if ui.small_button("🗑").on_hover_text("Quitar salto").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = move_up {
+                    s.jumps.swap(i, i - 1);
+                }
+                if let Some(i) = move_down {
+                    s.jumps.swap(i, i + 1);
+                }
+                if let Some(i) = remove {
+                    s.jumps.remove(i);
+                }
+
+                // Añadir: cualquier sesión SSH que no sea esta ni esté ya.
+                let candidates: Vec<&(Uuid, String)> = sessions
+                    .iter()
+                    .filter(|(id, _)| *id != s.id && !s.jumps.contains(id))
+                    .collect();
+                let mut add = None;
+                egui::ComboBox::from_id_salt("jump_add")
+                    .selected_text("➕ Añadir salto…")
+                    .width(FIELD_WIDTH)
+                    .show_ui(ui, |ui| {
+                        if candidates.is_empty() {
+                            ui.weak("No hay más sesiones SSH en el árbol");
+                        }
+                        for (id, name) in candidates {
+                            if ui.selectable_label(false, name).clicked() {
+                                add = Some(*id);
+                            }
+                        }
+                    });
+                if let Some(id) = add {
+                    s.jumps.push(id);
+                }
+
+                // Camino resultante (incluye los saltos que cada salto
+                // necesite a su vez) o el motivo por el que no es válido.
+                if !s.jumps.is_empty() {
+                    match tree.jump_path(s) {
+                        Ok(path) => {
+                            let mut route = vec!["este equipo".to_string()];
+                            route.extend(path.iter().map(|hop| hop.display_name()));
+                            route.push(if s.protocol.uses_network() && !s.host.trim().is_empty() {
+                                s.host.trim().to_string()
+                            } else {
+                                "destino".to_string()
+                            });
+                            ui.label(format!("Camino: {}", route.join("  >  ")));
+                        }
+                        Err(e) => {
+                            ui.colored_label(ui.visuals().error_fg_color, e);
+                        }
+                    }
+                    if s.protocol == Protocol::Rdp && !s.rdp.embedded {
+                        ui.colored_label(
+                            crate::theme::warn_color(),
+                            "Los saltos solo funcionan con el cliente RDP integrado.",
+                        );
+                    }
+                }
+            });
+    }
+
+    /// Reenvío X11 y túneles (solo terminales SSH).
+    fn advanced_ssh(&mut self, ui: &mut egui::Ui) {
+        let s = &mut self.session;
+        let configured = s.x11_forwarding || !s.tunnels.is_empty();
+        egui::CollapsingHeader::new("Avanzado: X11 y túneles")
             .id_salt("ssh_advanced")
             .default_open(configured)
             .show(ui, |ui| {
-                egui::Grid::new("ssh_advanced_grid")
-                    .num_columns(2)
-                    .spacing([12.0, 8.0])
-                    .show(ui, |ui| {
-                        ui.label("Saltar por").on_hover_text(
-                            "Bastión: se conecta primero a esa sesión y desde ella al destino",
-                        );
-                        let candidates: Vec<(Uuid, String)> = tree
-                            .ssh_sessions()
-                            .into_iter()
-                            .filter(|(id, _)| *id != s.id)
-                            .collect();
-                        let current = match s.jump {
-                            None => "(conexión directa)".to_string(),
-                            Some(id) => candidates
-                                .iter()
-                                .find(|(cid, _)| *cid == id)
-                                .map(|(_, name)| name.clone())
-                                .unwrap_or_else(|| "(sesión eliminada)".into()),
-                        };
-                        egui::ComboBox::from_id_salt("jump_picker")
-                            .selected_text(current)
-                            .width(FIELD_WIDTH)
+                ui.checkbox(
+                    &mut s.x11_forwarding,
+                    "Reenviar aplicaciones gráficas (X11)",
+                )
+                .on_hover_text(
+                    "Necesita un servidor X local: el escritorio en Linux, \
+                     VcXsrv/Xming en Windows o XQuartz en macOS",
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.strong("Túneles");
+                    if ui.small_button("➕ Añadir").clicked() {
+                        s.tunnels.push(Tunnel::default());
+                    }
+                });
+                let mut remove = None;
+                for (i, t) in s.tunnels.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt(("tunnel_kind", i))
+                            .selected_text(t.kind.label())
+                            .width(150.0)
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut s.jump, None, "(conexión directa)");
-                                for (id, name) in &candidates {
-                                    ui.selectable_value(&mut s.jump, Some(*id), name);
+                                for kind in TunnelKind::ALL {
+                                    ui.selectable_value(&mut t.kind, kind, kind.label());
                                 }
                             });
-                        ui.end_row();
-
-                        if s.protocol == Protocol::Ssh {
-                            ui.label("X11");
-                            ui.checkbox(
-                                &mut s.x11_forwarding,
-                                "Reenviar aplicaciones gráficas (X11)",
-                            )
-                            .on_hover_text(
-                                "Necesita un servidor X local: el escritorio en Linux, \
-                                     VcXsrv/Xming en Windows o XQuartz en macOS",
-                            );
-                            ui.end_row();
-                        }
-                    });
-
-                if s.protocol == Protocol::Ssh {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.strong("Túneles");
-                        if ui.small_button("➕ Añadir").clicked() {
-                            s.tunnels.push(Tunnel::default());
-                        }
-                    });
-                    let mut remove = None;
-                    for (i, t) in s.tunnels.iter_mut().enumerate() {
-                        ui.horizontal(|ui| {
-                            egui::ComboBox::from_id_salt(("tunnel_kind", i))
-                                .selected_text(t.kind.label())
-                                .width(150.0)
-                                .show_ui(ui, |ui| {
-                                    for kind in TunnelKind::ALL {
-                                        ui.selectable_value(&mut t.kind, kind, kind.label());
-                                    }
-                                });
-                            ui.add(
-                                egui::TextEdit::singleline(&mut t.listen_host)
-                                    .desired_width(90.0)
-                                    .hint_text("escucha"),
-                            )
-                            .on_hover_text(match t.kind {
-                                TunnelKind::Remote => "Dirección de escucha en el servidor",
-                                _ => "Dirección de escucha en este equipo",
-                            });
-                            ui.add(egui::DragValue::new(&mut t.listen_port).range(1..=65535));
-                            if t.kind != TunnelKind::Dynamic {
-                                ui.label("hacia");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut t.target_host)
-                                        .desired_width(110.0)
-                                        .hint_text("destino"),
-                                );
-                                ui.add(egui::DragValue::new(&mut t.target_port).range(1..=65535));
-                            }
-                            if ui.small_button("🗑").on_hover_text("Quitar túnel").clicked() {
-                                remove = Some(i);
-                            }
+                        ui.add(
+                            egui::TextEdit::singleline(&mut t.listen_host)
+                                .desired_width(90.0)
+                                .hint_text("escucha"),
+                        )
+                        .on_hover_text(match t.kind {
+                            TunnelKind::Remote => "Dirección de escucha en el servidor",
+                            _ => "Dirección de escucha en este equipo",
                         });
-                    }
-                    if let Some(i) = remove {
-                        s.tunnels.remove(i);
-                    }
-                    if s.tunnels.is_empty() {
-                        ui.weak(
-                            "Sin túneles. Se abren al conectar el terminal y se cierran con él.",
-                        );
-                    }
+                        ui.add(egui::DragValue::new(&mut t.listen_port).range(1..=65535));
+                        if t.kind != TunnelKind::Dynamic {
+                            ui.label("hacia");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut t.target_host)
+                                    .desired_width(110.0)
+                                    .hint_text("destino"),
+                            );
+                            ui.add(egui::DragValue::new(&mut t.target_port).range(1..=65535));
+                        }
+                        if ui.small_button("🗑").on_hover_text("Quitar túnel").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove {
+                    s.tunnels.remove(i);
+                }
+                if s.tunnels.is_empty() {
+                    ui.weak("Sin túneles. Se abren al conectar el terminal y se cierran con él.");
                 }
             });
     }
@@ -597,13 +680,17 @@ impl SessionEditor {
             t.listen_host = t.listen_host.trim().to_string();
             t.target_host = t.target_host.trim().to_string();
         }
-        if !s.protocol.is_ssh() {
-            // Opciones que solo tienen sentido sobre SSH.
-            s.jump = None;
+        if s.protocol != Protocol::Ssh {
+            // Túneles y X11 solo tienen sentido en un terminal SSH.
             s.tunnels.clear();
             s.x11_forwarding = false;
         }
+        if !s.protocol.uses_network() {
+            s.jumps.clear();
+        }
         s.validate()?;
+        // Los saltos deben formar un camino válido (sin bucles, todos SSH).
+        tree.jump_path(&s)?;
 
         if let Some(vault) = vault {
             let with_password = uses_password(&s);

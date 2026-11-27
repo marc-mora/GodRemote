@@ -1,5 +1,6 @@
 //! Conexión SSH: verificación de host, autenticación y shell interactiva.
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -163,6 +164,189 @@ impl Endpoint {
             via: None,
         }
     }
+
+    /// Encadena una lista de saltos (el primero es el más cercano a
+    /// nosotros). El resultado es el último salto, que lleva dentro a los
+    /// anteriores; `None` si la lista está vacía.
+    pub fn route(hops: impl IntoIterator<Item = (Session, Credentials)>) -> Option<Self> {
+        let mut route: Option<Endpoint> = None;
+        for (session, creds) in hops {
+            route = Some(Endpoint {
+                session,
+                creds,
+                via: route.map(Box::new),
+            });
+        }
+        route
+    }
+
+    /// Destino al que se llega pasando, en orden, por `hops`.
+    pub fn through(
+        hops: impl IntoIterator<Item = (Session, Credentials)>,
+        session: Session,
+        creds: Credentials,
+    ) -> Self {
+        Self {
+            session,
+            creds,
+            via: Self::route(hops).map(Box::new),
+        }
+    }
+}
+
+/// Flujo de bytes hacia un equipo: un socket TCP directo o un canal SSH
+/// abierto desde el último salto.
+///
+/// Es un tipo concreto (y no un objeto `dyn`) a propósito: con un objeto
+/// dinámico el compilador no logra demostrar que los futuros de IronRDP se
+/// pueden mover entre hilos.
+pub enum NetStream {
+    Tcp(tokio::net::TcpStream),
+    Ssh(russh::ChannelStream<client::Msg>),
+}
+
+impl tokio::io::AsyncRead for NetStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            NetStream::Tcp(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            NetStream::Ssh(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for NetStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            NetStream::Tcp(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            NetStream::Ssh(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            NetStream::Tcp(s) => std::pin::Pin::new(s).poll_flush(cx),
+            NetStream::Ssh(s) => std::pin::Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            NetStream::Tcp(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            NetStream::Ssh(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
+/// Camino hasta un equipo que no habla SSH (RDP, VNC, Telnet): directo o a
+/// través de una cadena de saltos SSH que se mantiene abierta mientras viva.
+pub struct Route {
+    last_hop: Option<SshHandle>,
+}
+
+impl Route {
+    /// Abre la cadena de saltos (si la hay). Devuelve también los secretos
+    /// validados que el usuario pidió guardar.
+    pub async fn establish(
+        via: Option<&Endpoint>,
+        prompter: &Prompter,
+        status: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<(Self, Vec<(String, String)>)> {
+        match via {
+            None => Ok((Self { last_hop: None }, vec![])),
+            Some(endpoint) => {
+                let connected = connect_endpoint(endpoint, prompter, status)
+                    .await
+                    .with_context(|| format!("en el salto {}", endpoint.session.display_name()))?;
+                Ok((
+                    Self {
+                        last_hop: Some(connected.handle),
+                    },
+                    connected.to_save,
+                ))
+            }
+        }
+    }
+
+    pub fn is_direct(&self) -> bool {
+        self.last_hop.is_none()
+    }
+
+    /// Abre una conexión con `host:port`: directa, o desde el último salto.
+    pub async fn connect(&self, host: &str, port: u16) -> Result<NetStream> {
+        Ok(self.connect_with_addr(host, port).await?.stream)
+    }
+
+    /// Como [`Route::connect`], devolviendo además las direcciones del
+    /// socket cuando la conexión es directa.
+    ///
+    /// El futuro no toma prestado nada (copia lo que necesita), de modo que
+    /// se puede esperar dentro de tareas que saltan entre hilos.
+    pub fn connect_with_addr(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> impl Future<Output = Result<RouteStream>> + Send + 'static {
+        let hop = self.last_hop.clone();
+        let host = host.to_string();
+        async move {
+            match hop {
+                None => {
+                    let stream = tokio::time::timeout(
+                        CONNECT_TIMEOUT,
+                        tokio::net::TcpStream::connect((host.as_str(), port)),
+                    )
+                    .await
+                    .map_err(|_| anyhow!("Tiempo de espera agotado conectando a {host}:{port}"))?
+                    .with_context(|| format!("No se pudo conectar a {host}:{port}"))?;
+                    let _ = stream.set_nodelay(true);
+                    Ok(RouteStream {
+                        local_addr: stream.local_addr().ok(),
+                        peer_addr: stream.peer_addr().ok(),
+                        stream: NetStream::Tcp(stream),
+                    })
+                }
+                Some(hop) => {
+                    let channel = tokio::time::timeout(
+                        CONNECT_TIMEOUT,
+                        hop.channel_open_direct_tcpip(host.clone(), port as u32, "127.0.0.1", 0),
+                    )
+                    .await
+                    .map_err(|_| anyhow!("Tiempo de espera agotado saltando hacia {host}:{port}"))?
+                    .map_err(|e| {
+                        anyhow!("El último salto no pudo abrir la conexión con {host}:{port}: {e}")
+                    })?;
+                    Ok(RouteStream {
+                        local_addr: None,
+                        peer_addr: None,
+                        stream: NetStream::Ssh(channel.into_stream()),
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// Conexión abierta por una [`Route`].
+pub struct RouteStream {
+    pub stream: NetStream,
+    /// Dirección local del socket (solo en conexiones directas).
+    pub local_addr: Option<std::net::SocketAddr>,
+    /// Dirección del equipo remoto (solo en conexiones directas).
+    pub peer_addr: Option<std::net::SocketAddr>,
 }
 
 pub struct ClientHandler {
@@ -286,9 +470,6 @@ pub struct Connected {
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Máximo de saltos encadenados.
-pub const MAX_JUMPS: usize = 8;
-
 /// Conecta y autentica directamente (sin saltos). `status` recibe mensajes
 /// de progreso.
 pub async fn connect(
@@ -332,6 +513,17 @@ pub fn connect_endpoint<'a>(
     })
 }
 
+/// Nombre de un equipo para los mensajes: «nombre (host:puerto)».
+fn describe(session: &Session) -> String {
+    let address = format!("{}:{}", session.host.trim(), session.port);
+    let name = session.name.trim();
+    if name.is_empty() || name == session.host.trim() {
+        address
+    } else {
+        format!("{name} ({address})")
+    }
+}
+
 async fn connect_via(
     session: &Session,
     creds: Credentials,
@@ -359,7 +551,7 @@ async fn connect_via(
     let mut handle = match &jump {
         // A través del bastión: un canal TCP directo hace de transporte.
         Some(jump) => {
-            status(format!("Saltando hacia {host}:{}…", session.port));
+            status(format!("Saltando hacia {}…", describe(session)));
             let channel = jump
                 .channel_open_direct_tcpip(host.clone(), session.port as u32, "127.0.0.1", 0)
                 .await
@@ -372,7 +564,7 @@ async fn connect_via(
             client::connect_stream(config, channel.into_stream(), handler).await?
         }
         None => {
-            status(format!("Conectando a {host}:{}…", session.port));
+            status(format!("Conectando a {}…", describe(session)));
             let stream = tokio::time::timeout(
                 CONNECT_TIMEOUT,
                 tokio::net::TcpStream::connect((host.as_str(), session.port)),

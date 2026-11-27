@@ -14,7 +14,7 @@ use crate::desktop::{
     DesktopBackend, DesktopEvent, DesktopInput, Framebuffer, MouseButton, SharedFrame, char_keysym,
 };
 use crate::model::Session;
-use crate::ssh::Prompter;
+use crate::ssh::{Endpoint, Prompter, Route};
 
 pub const ENC_RAW: i32 = 0;
 pub const ENC_COPYRECT: i32 = 1;
@@ -267,7 +267,26 @@ pub fn spawn(
     password: Option<String>,
     prompter: Prompter,
 ) -> DesktopBackend {
-    spawn_with_encodings(rt, session, password, prompter, DEFAULT_ENCODINGS.to_vec())
+    spawn_via(rt, session, password, None, prompter)
+}
+
+/// Abre una sesión VNC, opcionalmente a través de saltos SSH (`via` es el
+/// último salto de la cadena).
+pub fn spawn_via(
+    rt: &tokio::runtime::Handle,
+    session: Session,
+    password: Option<String>,
+    via: Option<Endpoint>,
+    prompter: Prompter,
+) -> DesktopBackend {
+    spawn_full(
+        rt,
+        session,
+        password,
+        via,
+        prompter,
+        DEFAULT_ENCODINGS.to_vec(),
+    )
 }
 
 /// Como [`spawn`], eligiendo las codificaciones que se piden al servidor.
@@ -275,6 +294,17 @@ pub fn spawn_with_encodings(
     rt: &tokio::runtime::Handle,
     session: Session,
     password: Option<String>,
+    prompter: Prompter,
+    encodings: Vec<i32>,
+) -> DesktopBackend {
+    spawn_full(rt, session, password, None, prompter, encodings)
+}
+
+fn spawn_full(
+    rt: &tokio::runtime::Handle,
+    session: Session,
+    password: Option<String>,
+    via: Option<Endpoint>,
     prompter: Prompter,
     encodings: Vec<i32>,
 ) -> DesktopBackend {
@@ -293,6 +323,7 @@ pub fn spawn_with_encodings(
         let result = connect_and_run(
             &session,
             password,
+            via,
             &prompter,
             &encodings,
             input_rx,
@@ -309,9 +340,11 @@ pub fn spawn_with_encodings(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connect_and_run(
     session: &Session,
     password: Option<String>,
+    via: Option<Endpoint>,
     prompter: &Prompter,
     encodings: &[i32],
     input_rx: mpsc::UnboundedReceiver<DesktopInput>,
@@ -319,24 +352,26 @@ async fn connect_and_run(
     emit: Emit,
 ) -> Result<()> {
     let host = session.host.trim();
+    // La cadena de saltos (si la hay) vive mientras dure la sesión.
+    let status = {
+        let emit = emit.clone();
+        move |s: String| emit(DesktopEvent::Status(s))
+    };
+    let (route, to_save) = Route::establish(via.as_ref(), prompter, &status).await?;
+    if !to_save.is_empty() {
+        emit(DesktopEvent::SaveSecrets(to_save));
+    }
     emit(DesktopEvent::Status(format!(
-        "Conectando a {host}:{} por VNC (sin cifrar)…",
-        session.port
+        "Conectando a {host}:{} por VNC (sin cifrar{})…",
+        session.port,
+        if route.is_direct() {
+            ""
+        } else {
+            " tras el último salto"
+        }
     )));
-    let stream = tokio::time::timeout(
-        Duration::from_secs(15),
-        tokio::net::TcpStream::connect((host, session.port)),
-    )
-    .await
-    .map_err(|_| {
-        anyhow!(
-            "Tiempo de espera agotado conectando a {host}:{}",
-            session.port
-        )
-    })?
-    .with_context(|| format!("No se pudo conectar a {host}:{}", session.port))?;
-    let _ = stream.set_nodelay(true);
-    let (rd, wr) = stream.into_split();
+    let stream = route.connect(host, session.port).await?;
+    let (rd, wr) = tokio::io::split(stream);
     run(
         BufReader::with_capacity(64 * 1024, rd),
         wr,

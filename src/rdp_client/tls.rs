@@ -10,13 +10,14 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use tokio::io::AsyncWriteExt as _;
-use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls;
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
 use tokio_rustls::rustls::pki_types;
+
+use crate::ssh::NetStream;
 
 /// Acepta cualquier certificado (la confianza se decide después, por huella)
 /// pero SÍ comprueba la firma del intercambio TLS: sin eso un intermediario
@@ -75,10 +76,10 @@ impl ServerCertVerifier for PinnedLater {
 }
 
 pub(super) async fn upgrade(
-    stream: TcpStream,
-    host: &str,
+    stream: NetStream,
+    host: String,
     peer_ip: IpAddr,
-) -> Result<TlsStream<TcpStream>> {
+) -> Result<TlsStream<NetStream>> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let mut config = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
@@ -90,7 +91,7 @@ pub(super) async fn upgrade(
     config.resumption = rustls::client::Resumption::disabled();
 
     // El nombre solo se usa para SNI; si no es válido se usa la IP.
-    let name = pki_types::ServerName::try_from(host.to_string())
+    let name = pki_types::ServerName::try_from(host)
         .unwrap_or_else(|_| pki_types::ServerName::IpAddress(peer_ip.into()));
     let mut tls = tokio_rustls::TlsConnector::from(Arc::new(config))
         .connect(name, stream)

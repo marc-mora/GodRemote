@@ -90,37 +90,27 @@ fn vnc_against_x11vnc() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let display = (60..100)
-        .rev()
-        .find(|n| !std::path::Path::new(&format!("/tmp/.X11-unix/X{n}")).exists())
-        .unwrap();
-    let _xvfb = Killed(
-        Command::new("Xvfb")
-            .arg(format!(":{display}"))
-            .args(["-screen", "0", "640x480x24", "-nolisten", "tcp"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let socket = format!("/tmp/.X11-unix/X{display}");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !std::path::Path::new(&socket).exists() {
-        assert!(Instant::now() < deadline, "Xvfb no arrancó");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    // SAFETY: único test de este binario; aún no hay otros hilos.
+    unsafe { std::env::set_var("GODREMOTE_KNOWN_HOSTS", dir.path().join("known_hosts")) };
+    let xvfb = common::start_xvfb(common::free_display(), "640x480x24", &[]);
+    let display = xvfb.number;
     // Un xterm de color conocido que guarda en un fichero lo que se teclea.
     let typed = dir.path().join("tecleado.txt");
-    let _xterm = Killed(
-        Command::new("xterm")
-            .env("DISPLAY", format!(":{display}"))
-            .args(["-geometry", "80x24+0+0", "-bg", "#204080", "-fg", "white"])
-            .args(["-e", "sh", "-c"])
-            .arg(format!("cat > {}", typed.display()))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
+    let _xterm = common::start_xterm(
+        &format!(":{display}"),
+        &[
+            "-geometry",
+            "80x24+0+0",
+            "-bg",
+            "#204080",
+            "-fg",
+            "white",
+            "-e",
+            "sh",
+            "-c",
+            &format!("cat > {}", typed.display()),
+        ],
+        &dir.path().join("xterm.log"),
     );
     let port = free_port();
     let _vnc = Killed(
@@ -282,6 +272,72 @@ fn vnc_against_x11vnc() {
 
     // --- Cierre limpio ---------------------------------------------------------
     close(backend);
+
+    // --- A través de un salto SSH ------------------------------------------------
+    if find_program("sshd").is_some() && common::is_root() {
+        use godremote::keys::{self, KeyAlgorithm};
+        use godremote::model::AuthMethod;
+        use godremote::ssh::{Credentials, Endpoint};
+        let key = keys::generate(dir.path(), "id", KeyAlgorithm::Ed25519, "", None).unwrap();
+        let authorized = dir.path().join("authorized_keys");
+        std::fs::write(&authorized, format!("{}\n", key.public_openssh)).unwrap();
+        let (_sshd, ssh_port, sshd_log) = common::start_sshd(
+            dir.path(),
+            &authorized,
+            "LogLevel DEBUG1\nAllowTcpForwarding yes\n",
+        );
+        let user = String::from_utf8_lossy(&Command::new("id").arg("-un").output().unwrap().stdout)
+            .trim()
+            .to_string();
+        let bastion = Session {
+            name: "bastion".into(),
+            host: "127.0.0.1".into(),
+            port: ssh_port,
+            username: user,
+            auth: AuthMethod::Key,
+            key_path: key.path.display().to_string(),
+            ..Default::default()
+        };
+        // El primer xterm se cerró con el Ctrl+D de antes: se abre otro, de
+        // otro color, para comprobar que la imagen que llega es la de ahora.
+        const BG_JUMP: [u8; 3] = [0x80, 0x60, 0x20];
+        let _xterm = common::start_xterm(
+            &format!(":{display}"),
+            &[
+                "-geometry",
+                "80x24+0+0",
+                "-bg",
+                "#806020",
+                "-e",
+                "sleep",
+                "600",
+            ],
+            &dir.path().join("xterm2.log"),
+        );
+        let a = answers(true, &[]);
+        let backend = vnc::spawn_via(
+            rt.handle(),
+            session.clone(),
+            Some("secreto1".into()),
+            Endpoint::route([(bastion, Credentials::default())]),
+            prompter(a.clone()),
+        );
+        wait_connected(&backend).expect("VNC a través del salto");
+        // Solo se preguntó por la clave del bastión (host nuevo).
+        assert_eq!((a.hosts(), a.secrets_asked()), (1, 0));
+        wait_pixel(&backend, 300, 200, BG_JUMP);
+        close(backend);
+        // La conexión VNC la abrió el bastión.
+        let log = std::fs::read_to_string(&sshd_log).unwrap();
+        assert!(
+            log.lines()
+                .any(|l| l.contains("direct") && l.contains(&format!("port {port}"))),
+            "el bastión no abrió la conexión VNC:\n{log}"
+        );
+        eprintln!("VNC a través de un salto SSH: imagen correcta");
+    } else {
+        eprintln!("VNC por salto: OMITIDO (hace falta sshd y root)");
+    }
 
     // --- Un servidor que no es VNC da un error claro -----------------------------
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

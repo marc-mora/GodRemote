@@ -255,8 +255,14 @@ pub struct Session {
     pub auth: AuthMethod,
     /// Ruta a la clave privada (si `auth == Key`).
     pub key_path: String,
-    /// Sesión SSH por la que saltar para llegar a esta (bastión).
-    pub jump: Option<Uuid>,
+    /// Saltos (bastiones SSH) por los que pasar para llegar a este equipo,
+    /// en orden: el primero es el más cercano a nosotros.
+    pub jumps: Vec<Uuid>,
+    /// Formato antiguo (un único salto). Solo se lee; al cargar pasa a
+    /// `jumps`.
+    #[doc(hidden)]
+    #[serde(default, rename = "jump", skip_serializing)]
+    pub legacy_jump: Option<Uuid>,
     /// Reenvíos de puertos que se abren al conectar por SSH.
     pub tunnels: Vec<Tunnel>,
     /// Reenviar las aplicaciones gráficas X11 al servidor X local.
@@ -277,7 +283,8 @@ impl Default for Session {
             username: String::new(),
             auth: AuthMethod::Password,
             key_path: String::new(),
-            jump: None,
+            jumps: vec![],
+            legacy_jump: None,
             tunnels: vec![],
             x11_forwarding: false,
             rdp: RdpOptions::default(),
@@ -352,14 +359,29 @@ impl Session {
             if self.auth == AuthMethod::Key && self.key_path.trim().is_empty() {
                 return Err("Indica la ruta de la clave privada".into());
             }
-            if self.jump == Some(self.id) {
-                return Err("Una sesión no puede saltar a través de sí misma".into());
-            }
             for t in &self.tunnels {
                 t.validate()?;
             }
         }
+        if self.jumps.contains(&self.id) {
+            return Err("Un equipo no puede saltar a través de sí mismo".into());
+        }
+        let mut seen = self.jumps.clone();
+        seen.sort();
+        seen.dedup();
+        if seen.len() != self.jumps.len() {
+            return Err("Hay un salto repetido en la lista".into());
+        }
         Ok(())
+    }
+
+    /// Pasa los datos de formatos antiguos al actual.
+    fn migrate(&mut self) {
+        if let Some(jump) = self.legacy_jump.take()
+            && self.jumps.is_empty()
+        {
+            self.jumps.push(jump);
+        }
     }
 }
 
@@ -373,6 +395,8 @@ pub struct Folder {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+// Los árboles son pequeños: no compensa añadir una indirección por sesión.
+#[allow(clippy::large_enum_variant)]
 pub enum Node {
     Folder(Folder),
     Session(Session),
@@ -394,6 +418,9 @@ impl Node {
     }
 }
 
+/// Máximo de saltos encadenados para llegar a un equipo.
+pub const MAX_JUMPS: usize = 8;
+
 /// Árbol completo de equipos. La raíz es una lista de nodos.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Tree {
@@ -404,10 +431,80 @@ pub struct Tree {
 impl Tree {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         match std::fs::read(path) {
-            Ok(data) => Ok(serde_json::from_slice(&data)?),
+            Ok(data) => {
+                let mut tree: Tree = serde_json::from_slice(&data)?;
+                tree.migrate();
+                Ok(tree)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Pasa las sesiones de formatos antiguos al actual.
+    pub fn migrate(&mut self) {
+        fn go(nodes: &mut [Node]) {
+            for n in nodes {
+                match n {
+                    Node::Folder(f) => go(&mut f.children),
+                    Node::Session(s) => s.migrate(),
+                }
+            }
+        }
+        go(&mut self.nodes);
+    }
+
+    /// Camino completo de saltos para llegar a `session`, en orden (el
+    /// primero es el más cercano a nosotros).
+    ///
+    /// Se recorren los saltos de la sesión en el orden indicado y, antes de
+    /// cada uno, los que ese salto necesite a su vez. Un equipo que ya está
+    /// en el camino no se repite.
+    pub fn jump_path(&self, session: &Session) -> Result<Vec<Session>, String> {
+        fn expand(
+            tree: &Tree,
+            session: &Session,
+            stack: &mut Vec<Uuid>,
+            path: &mut Vec<Session>,
+        ) -> Result<(), String> {
+            if stack.contains(&session.id) {
+                return Err(format!(
+                    "Los saltos forman un bucle (pasan dos veces por «{}»)",
+                    session.display_name()
+                ));
+            }
+            stack.push(session.id);
+            for hop_id in &session.jumps {
+                let hop = tree.session(*hop_id).ok_or_else(|| {
+                    format!(
+                        "Un salto de «{}» ya no existe; edita la sesión",
+                        session.display_name()
+                    )
+                })?;
+                if !hop.protocol.is_ssh() {
+                    return Err(format!(
+                        "El salto «{}» no es una sesión SSH",
+                        hop.display_name()
+                    ));
+                }
+                if path.iter().any(|s| s.id == hop.id) {
+                    continue;
+                }
+                // Primero, los saltos que este salto necesita a su vez.
+                expand(tree, hop, stack, path)?;
+                path.push(hop.clone());
+                if path.len() > MAX_JUMPS {
+                    return Err(format!(
+                        "Demasiados saltos encadenados (máximo {MAX_JUMPS})"
+                    ));
+                }
+            }
+            stack.pop();
+            Ok(())
+        }
+        let mut path = vec![];
+        expand(self, session, &mut vec![], &mut path)?;
+        Ok(path)
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
@@ -708,17 +805,142 @@ mod tests {
         };
         assert_eq!(s.rdp.width, 800);
         assert!(s.rdp.embedded);
-        assert!(s.tunnels.is_empty() && s.jump.is_none() && !s.x11_forwarding);
+        assert!(s.tunnels.is_empty() && s.jumps.is_empty() && !s.x11_forwarding);
         assert_eq!(s.serial.baud, 115_200);
+    }
+
+    fn names(path: &[Session]) -> Vec<&str> {
+        path.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    #[test]
+    fn jump_path_with_several_hops() {
+        let mut tree = Tree::default();
+        let (a, b, c) = (session("a"), session("b"), session("c"));
+        let mut target = session("destino");
+        target.jumps = vec![a.id, b.id, c.id];
+        for s in [&a, &b, &c, &target] {
+            tree.upsert_session(None, s.clone());
+        }
+        // Tres saltos, en el orden indicado.
+        assert_eq!(names(&tree.jump_path(&target).unwrap()), ["a", "b", "c"]);
+        // Sin saltos: conexión directa.
+        assert!(tree.jump_path(&a).unwrap().is_empty());
+
+        // Un salto que a su vez necesita otro: se intercala delante.
+        let mut inner = session("interno");
+        let outer = session("externo");
+        inner.jumps = vec![outer.id];
+        let mut via_inner = session("via-interno");
+        via_inner.jumps = vec![inner.id];
+        for s in [&inner, &outer, &via_inner] {
+            tree.upsert_session(None, s.clone());
+        }
+        assert_eq!(
+            names(&tree.jump_path(&via_inner).unwrap()),
+            ["externo", "interno"]
+        );
+        // Si ya figura en la lista, no se repite.
+        via_inner.jumps = vec![outer.id, inner.id];
+        assert_eq!(
+            names(&tree.jump_path(&via_inner).unwrap()),
+            ["externo", "interno"]
+        );
+        via_inner.jumps = vec![a.id, inner.id, b.id];
+        assert_eq!(
+            names(&tree.jump_path(&via_inner).unwrap()),
+            ["a", "externo", "interno", "b"]
+        );
+    }
+
+    #[test]
+    fn jump_path_errors() {
+        let mut tree = Tree::default();
+        let mut a = session("a");
+        let mut b = session("b");
+        // Bucle: a salta por b y b por a.
+        a.jumps = vec![b.id];
+        b.jumps = vec![a.id];
+        tree.upsert_session(None, a.clone());
+        tree.upsert_session(None, b.clone());
+        let err = tree.jump_path(&a).unwrap_err();
+        assert!(err.contains("bucle"), "{err}");
+
+        // Salto eliminado.
+        let mut orphan = session("huerfano");
+        orphan.jumps = vec![Uuid::new_v4()];
+        let err = tree.jump_path(&orphan).unwrap_err();
+        assert!(err.contains("ya no existe"), "{err}");
+
+        // Un salto tiene que ser SSH.
+        let rdp = Session {
+            name: "win".into(),
+            protocol: Protocol::Rdp,
+            host: "w".into(),
+            ..Default::default()
+        };
+        tree.upsert_session(None, rdp.clone());
+        let mut bad = session("mal");
+        bad.jumps = vec![rdp.id];
+        let err = tree.jump_path(&bad).unwrap_err();
+        assert!(err.contains("no es una sesión SSH"), "{err}");
+
+        // Demasiados saltos.
+        let mut long = session("largo");
+        for i in 0..=MAX_JUMPS {
+            let hop = session(&format!("h{i}"));
+            long.jumps.push(hop.id);
+            tree.upsert_session(None, hop);
+        }
+        let err = tree.jump_path(&long).unwrap_err();
+        assert!(err.contains("Demasiados saltos"), "{err}");
+        // Justo en el límite sí vale.
+        long.jumps.pop();
+        assert_eq!(tree.jump_path(&long).unwrap().len(), MAX_JUMPS);
+    }
+
+    #[test]
+    fn single_jump_from_old_files_is_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        // Formato 0.2.0: campo `jump` con un único salto.
+        std::fs::write(
+            &path,
+            r#"{"nodes":[
+              {"type":"session","id":"11111111-1111-4111-8111-111111111111","name":"bastion",
+               "protocol":"Ssh","host":"b","port":22,"username":"u","auth":"Agent","key_path":"","notes":""},
+              {"type":"session","id":"22222222-2222-4222-8222-222222222222","name":"destino",
+               "protocol":"Ssh","host":"d","port":22,"username":"u","auth":"Agent","key_path":"",
+               "jump":"11111111-1111-4111-8111-111111111111","notes":""}]}"#,
+        )
+        .unwrap();
+        let tree = Tree::load(&path).unwrap();
+        let target = tree
+            .session(Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap())
+            .unwrap();
+        assert_eq!(target.jumps.len(), 1);
+        assert_eq!(names(&tree.jump_path(target).unwrap()), ["bastion"]);
+        // Al guardar ya solo queda el formato nuevo.
+        tree.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("\"jumps\"") && !text.contains("\"jump\""),
+            "{text}"
+        );
     }
 
     #[test]
     fn validation_per_protocol() {
         let mut s = session("x");
         assert!(s.validate().is_ok());
-        s.jump = Some(s.id);
+        s.jumps = vec![s.id];
         assert!(s.validate().is_err());
-        s.jump = None;
+        let other = Uuid::new_v4();
+        s.jumps = vec![other, other];
+        assert!(s.validate().is_err());
+        s.jumps = vec![other, Uuid::new_v4()];
+        assert!(s.validate().is_ok());
+        s.jumps.clear();
         s.tunnels.push(Tunnel {
             listen_port: 0,
             ..Default::default()

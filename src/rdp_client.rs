@@ -37,13 +37,12 @@ use ironrdp_session::{
     ActiveStageBuilder, ActiveStageOutput, GracefulDisconnectReason, SessionError,
 };
 use ironrdp_tokio::{FramedWrite as _, TokioFramed, single_sequence_step_read, split_tokio_framed};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_rustls::client::TlsStream;
 
 use crate::desktop::{DesktopBackend, DesktopEvent, DesktopInput, Framebuffer, SharedFrame};
 use crate::model::Session;
-use crate::ssh::Prompter;
+use crate::ssh::{Endpoint, NetStream, Prompter, Route};
 use crate::trust::{self, TrustStatus};
 
 mod clipboard;
@@ -53,7 +52,6 @@ mod tls;
 use self::clipboard::{ClipSignal, Clipboard, TextClipboard, with_cliprdr};
 use self::input::InputEncoder;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Límite de cada fase posterior a la conexión TCP (negociación, TLS,
 /// autenticación, reactivación).
 const PHASE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -68,7 +66,7 @@ const MAX_INPUT_BATCH: usize = 128;
 /// Identificador de la distribución de teclado «inglés (EE. UU.)».
 const KEYBOARD_LAYOUT_EN_US: u32 = 0x0409;
 
-type TlsFramed = TokioFramed<TlsStream<TcpStream>>;
+type TlsFramed = TokioFramed<TlsStream<NetStream>>;
 
 /// Envía avisos a la interfaz y la despierta.
 #[derive(Clone)]
@@ -102,6 +100,20 @@ pub fn spawn(
     size: (u16, u16),
     prompter: Prompter,
 ) -> DesktopBackend {
+    spawn_via(rt, session, password, size, None, prompter)
+}
+
+/// Como [`spawn`], llegando al servidor a través de saltos SSH (`via` es el
+/// último salto de la cadena). El certificado y las credenciales se siguen
+/// asociando al nombre y puerto reales del servidor RDP.
+pub fn spawn_via(
+    rt: &tokio::runtime::Handle,
+    session: Session,
+    password: Option<String>,
+    size: (u16, u16),
+    via: Option<Endpoint>,
+    prompter: Prompter,
+) -> DesktopBackend {
     let (input_tx, input_rx) = mpsc::unbounded_channel();
     let (ev_tx, ev_rx) = std::sync::mpsc::channel();
     let size = clamp_size(size);
@@ -119,6 +131,7 @@ pub fn spawn(
             session,
             password,
             size,
+            via,
             emit.clone(),
             input_rx,
             task_frame,
@@ -164,6 +177,7 @@ async fn run(
     session: Session,
     password: Option<String>,
     size: (u16, u16),
+    via: Option<Endpoint>,
     emit: Emitter,
     mut input_rx: mpsc::UnboundedReceiver<DesktopInput>,
     frame: SharedFrame,
@@ -175,7 +189,7 @@ async fn run(
     // Mientras se conecta se atiende ya la entrada: cerrar la pestaña cancela
     // la conexión y el portapapeles local se recuerda para anunciarlo luego.
     let established = tokio::select! {
-        result = connect(&session, password, size, &emit, clip_tx) => result?,
+        result = connect(&session, password, size, via.as_ref(), &emit, clip_tx) => result?,
         () = wait_close(&mut input_rx, &mut clipboard) => return Ok(()),
     };
 
@@ -233,6 +247,8 @@ struct Established {
     result: ConnectionResult,
     /// Secretos validados que el usuario pidió guardar.
     to_save: Vec<(String, String)>,
+    /// Cadena de saltos SSH (si la hay): debe vivir mientras dure la sesión.
+    _route: Option<Route>,
 }
 
 /// Resultado de un intento de conexión.
@@ -255,6 +271,8 @@ struct Target<'a> {
     size: (u16, u16),
     emit: &'a Emitter,
     clip_tx: Option<mpsc::UnboundedSender<ClipSignal>>,
+    /// Camino hasta el servidor: directo o por una cadena de saltos SSH.
+    route: Route,
 }
 
 /// Contraseña en uso y si el usuario pidió guardarla.
@@ -269,9 +287,17 @@ async fn connect(
     session: &Session,
     password: Option<String>,
     size: (u16, u16),
+    via: Option<&Endpoint>,
     emit: &Emitter,
     clip_tx: Option<mpsc::UnboundedSender<ClipSignal>>,
 ) -> Result<Established> {
+    // Primero la cadena de saltos SSH (si la hay); se reutiliza en cada
+    // intento de conexión con el servidor RDP.
+    let status = |text: String| emit.status(text);
+    let (route, hop_secrets) = Route::establish(via, &emit.prompter, &status).await?;
+    if !hop_secrets.is_empty() {
+        emit.emit(DesktopEvent::SaveSecrets(hop_secrets));
+    }
     let target = Target {
         session,
         host: session.host.trim().to_string(),
@@ -283,6 +309,7 @@ async fn connect(
         size,
         emit,
         clip_tx,
+        route,
     };
     let mut secret = Secret {
         password,
@@ -293,7 +320,10 @@ async fn connect(
     // contraseña rechazada. El tope es solo una salvaguarda.
     for _ in 0..(MAX_PASSWORD_ATTEMPTS + 2) {
         match attempt(&target, &mut secret).await? {
-            Attempt::Connected(established) => return Ok(*established),
+            Attempt::Connected(mut established) => {
+                established._route = Some(target.route);
+                return Ok(*established);
+            }
             Attempt::Retry => {}
             Attempt::AuthRejected(detail) => {
                 secret.rejected += 1;
@@ -332,7 +362,7 @@ async fn ask_password(target: &Target<'_>, secret: &mut Secret) -> Result<()> {
 }
 
 /// Aplica el límite de tiempo de una fase de la conexión.
-async fn phase<T>(what: &str, fut: impl Future<Output = T>) -> Result<T> {
+async fn phase<T>(what: &'static str, fut: impl Future<Output = T>) -> Result<T> {
     tokio::time::timeout(PHASE_TIMEOUT, fut)
         .await
         .map_err(|_| anyhow!("Tiempo de espera agotado {what}"))
@@ -345,18 +375,17 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
     let port = *port;
 
     emit.status(format!("Conectando a {host}:{port}…"));
-    let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect((host.as_str(), port)))
-        .await
-        .map_err(|_| anyhow!("Tiempo de espera agotado conectando a {host}:{port}"))?
-        .with_context(|| format!("No se pudo conectar a {host}:{port}"))?;
-    let _ = stream.set_nodelay(true);
-    let client_addr = stream
-        .local_addr()
-        .context("No se pudo obtener la dirección local")?;
-    let peer_ip = stream
-        .peer_addr()
-        .context("No se pudo obtener la dirección del servidor")?
-        .ip();
+    let connection = target.route.connect_with_addr(host, port).await?;
+    let stream = connection.stream;
+    // A través de un salto no hay socket propio: se usan direcciones neutras.
+    let client_addr = connection
+        .local_addr
+        .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
+    let peer_ip = connection
+        .peer_addr
+        .map_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), |a| {
+            a.ip()
+        });
 
     emit.status("Negociando seguridad…");
     // La negociación va en claro y antes de saber con quién se habla: el
@@ -385,7 +414,11 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
         bail!("El servidor envió datos inesperados antes de la negociación TLS");
     }
 
-    let tls = phase("negociando TLS", tls::upgrade(stream, host, peer_ip)).await??;
+    let tls = phase(
+        "negociando TLS",
+        tls::upgrade(stream, host.clone(), peer_ip),
+    )
+    .await??;
     let certificate = tls
         .get_ref()
         .1
@@ -518,6 +551,7 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
         framed,
         result,
         to_save,
+        _route: None,
     })))
 }
 

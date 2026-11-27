@@ -18,6 +18,10 @@ use godremote::ssh::{self, Credentials, Endpoint};
 use godremote::terminal::{TermBackend, TermCmd, TermEvent};
 use godremote::tunnels::TunnelStatus;
 
+/// Las pruebas de este fichero reservan puertos libres y arrancan
+/// servidores; en paralelo podrían recibir el mismo puerto.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Servidor de eco: responde `eco:` + lo recibido.
 fn echo_server() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -72,6 +76,7 @@ fn wait_output(backend: &TermBackend, output: &mut String, needle: &str) {
 
 #[test]
 fn jump_tunnels_and_x11() {
+    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     if find_program("sshd").is_none() || !is_root() {
         eprintln!("OMITIDA: hace falta sshd y ejecutar como root");
         return;
@@ -86,9 +91,7 @@ fn jump_tunnels_and_x11() {
         .all(|p| find_program(p).is_some());
     let mut _xvfb = None;
     if x11_tools {
-        let display = (60..100)
-            .find(|n| !std::path::Path::new(&format!("/tmp/.X11-unix/X{n}")).exists())
-            .unwrap();
+        let display = common::free_display();
         let xauthority = dir.path().join("Xauthority");
         let cookie = "0123456789abcdef0123456789abcdef";
         let ok = Command::new("xauth")
@@ -98,21 +101,11 @@ fn jump_tunnels_and_x11() {
             .unwrap()
             .success();
         assert!(ok, "xauth add");
-        let child = Command::new("Xvfb")
-            .arg(format!(":{display}"))
-            .args(["-auth", xauthority.to_str().unwrap(), "-nolisten", "tcp"])
-            .args(["-screen", "0", "640x480x24"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        _xvfb = Some(Killed(child));
-        let socket = format!("/tmp/.X11-unix/X{display}");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !std::path::Path::new(&socket).exists() {
-            assert!(Instant::now() < deadline, "Xvfb no arrancó");
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        _xvfb = Some(common::start_xvfb(
+            display,
+            "640x480x24",
+            &["-auth", xauthority.to_str().unwrap()],
+        ));
         // Sin la cookie, el servidor X rechaza la conexión.
         let denied = Command::new("xdpyinfo")
             .env("DISPLAY", format!(":{display}"))
@@ -219,6 +212,146 @@ fn jump_tunnels_and_x11() {
         format!("{err:#}").contains("en el salto bastion"),
         "{err:#}"
     );
+
+    // --- 1b. Varios saltos encadenados -------------------------------------
+    // Tres servidores distintos: se entra por A, de A se salta a B y de B al
+    // destino C. Cada uno registra a quién le abre conexión.
+    let (dir_b, dir_c) = (dir.path().join("b"), dir.path().join("c"));
+    std::fs::create_dir_all(&dir_b).unwrap();
+    std::fs::create_dir_all(&dir_c).unwrap();
+    let forwarding = "LogLevel DEBUG1\nAllowTcpForwarding yes\n";
+    let (_sshd_b, port_b, log_b) = start_sshd(&dir_b, &authorized, forwarding);
+    let (_sshd_c, port_c, log_c) = start_sshd(&dir_c, &authorized, forwarding);
+    let hop = |name: &str, port: u16| Session {
+        name: name.into(),
+        port,
+        id: uuid::Uuid::new_v4(),
+        ..session.clone()
+    };
+    let opened_to = |log: &std::path::Path, port: u16| {
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .any(|l| l.contains("direct") && l.contains(&format!("port {port}")))
+    };
+    let endpoint = Endpoint::through(
+        [
+            (hop("a", port), Credentials::default()),
+            (hop("b", port_b), Credentials::default()),
+        ],
+        hop("c", port_c),
+        Credentials::default(),
+    );
+    let a = answers(true, &[]);
+    let connected = rt
+        .block_on(ssh::connect_endpoint(
+            &endpoint,
+            &prompter(a.clone()),
+            &quiet,
+        ))
+        .expect("conexión a través de dos saltos");
+    // A ya era conocido; B y C se preguntan (una vez cada uno).
+    assert_eq!(a.hosts(), 2);
+    let out = rt.block_on(async {
+        let mut channel = connected.handle.channel_open_session().await.unwrap();
+        channel
+            .exec(true, "echo dos-saltos-$((7*6))")
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        while let Some(msg) = channel.wait().await {
+            if let russh::ChannelMsg::Data { data } = msg {
+                out.extend_from_slice(&data);
+            }
+        }
+        String::from_utf8_lossy(&out).to_string()
+    });
+    assert_eq!(out.trim(), "dos-saltos-42");
+    drop(connected);
+    // El camino fue A -> B -> C, y no otro.
+    assert!(opened_to(&sshd_log, port_b), "A debe abrir conexión con B");
+    assert!(opened_to(&log_b, port_c), "B debe abrir conexión con C");
+    assert!(!opened_to(&sshd_log, port_c), "A no debe ir directo a C");
+    assert!(!opened_to(&log_c, port) && !opened_to(&log_c, port_b));
+
+    // Un salto intermedio que falla se nombra en el error.
+    let mut broken = hop("b-roto", port_b);
+    broken.key_path = dir.path().join("no-existe").display().to_string();
+    let endpoint = Endpoint::through(
+        [
+            (hop("a", port), Credentials::default()),
+            (broken, Credentials::default()),
+        ],
+        hop("c", port_c),
+        Credentials::default(),
+    );
+    let err = rt
+        .block_on(ssh::connect_endpoint(
+            &endpoint,
+            &prompter(answers(true, &[])),
+            &quiet,
+        ))
+        .err()
+        .expect("debe fallar");
+    assert!(format!("{err:#}").contains("en el salto b-roto"), "{err:#}");
+
+    // --- 1c. Un equipo que no es SSH (Telnet) a través de dos saltos --------
+    if let (Some(telnetd), Some(socat)) = (find_program("telnetd"), find_program("socat")) {
+        let telnet_port = free_port();
+        let _telnet = Killed(
+            Command::new(socat)
+                .arg(format!(
+                    "TCP-LISTEN:{telnet_port},bind=127.0.0.1,reuseaddr,fork"
+                ))
+                .arg(format!("EXEC:{} -h -E /bin/sh,nofork", telnetd.display()))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        wait_port(telnet_port);
+        let route = Endpoint::route([
+            (hop("a", port), Credentials::default()),
+            (hop("b", port_b), Credentials::default()),
+        ]);
+        let a = answers(false, &[]);
+        let backend = godremote::telnet::spawn_via(
+            rt.handle(),
+            "127.0.0.1".into(),
+            telnet_port,
+            route,
+            prompter(a.clone()),
+            100,
+            30,
+        );
+        let mut output = String::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match backend
+                .events
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(TermEvent::Connected(None)) => break,
+                Ok(TermEvent::Status(s)) => output.push_str(&format!("[{s}]\n")),
+                Ok(TermEvent::Closed(e)) => panic!("cerrada: {e:?}\n{output}"),
+                Ok(_) => {}
+                Err(_) => panic!("Telnet por saltos no conectó: {output}"),
+            }
+        }
+        backend
+            .cmd
+            .send(TermCmd::Input(b"echo telnet-salto-$((5+5))\r".to_vec()))
+            .unwrap();
+        wait_output(&backend, &mut output, "telnet-salto-10");
+        // Los saltos ya eran conocidos: no se preguntó nada.
+        assert_eq!((a.hosts(), a.secrets_asked()), (0, 0));
+        // La conexión Telnet salió del último salto (B), no de aquí ni de A.
+        assert!(opened_to(&log_b, telnet_port), "B debe abrir el Telnet");
+        assert!(!opened_to(&sshd_log, telnet_port));
+        backend.cmd.send(TermCmd::Close).unwrap();
+    } else {
+        eprintln!("Telnet por saltos: OMITIDO (faltan telnetd o socat)");
+    }
 
     // --- 2. Túneles ----------------------------------------------------------
     let echo = echo_server();
@@ -385,6 +518,7 @@ fn jump_tunnels_and_x11() {
 
 #[test]
 fn telnet_against_real_server() {
+    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let (Some(telnetd), Some(socat)) = (find_program("telnetd"), find_program("socat")) else {
         eprintln!("OMITIDA: hace falta telnetd y socat");
         return;
