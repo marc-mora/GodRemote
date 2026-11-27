@@ -353,6 +353,10 @@ impl App {
             Protocol::Ssh => self.open_terminal(session),
             Protocol::Sftp => self.open_sftp(session, None),
             Protocol::Rdp => self.open_rdp(session),
+            // Pendiente de integrar.
+            Protocol::Vnc | Protocol::Telnet | Protocol::Serial => {
+                self.notify("Protocolo aún no disponible", true)
+            }
         }
     }
 
@@ -1315,7 +1319,7 @@ fn session_row(
                     ui.close();
                 }
             }
-            Protocol::Rdp => {}
+            Protocol::Rdp | Protocol::Vnc | Protocol::Telnet | Protocol::Serial => {}
         }
         ui.separator();
         if ui.button("✏ Editar…").clicked() {

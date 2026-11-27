@@ -25,6 +25,16 @@ pub fn keys_dir() -> PathBuf {
     data_dir().join("keys")
 }
 
+/// Huellas de certificados TLS aceptados (RDP).
+pub fn tls_known_hosts_file() -> PathBuf {
+    data_dir().join("tls_known_hosts.json")
+}
+
+/// Macros de terminal.
+pub fn macros_file() -> PathBuf {
+    data_dir().join("macros.json")
+}
+
 pub fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }

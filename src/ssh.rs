@@ -64,7 +64,9 @@ impl Prompter {
         (self.waker)();
     }
 
-    async fn confirm_host_key(
+    /// Pregunta si se confía en la clave (o certificado) de un servidor
+    /// desconocido. `algorithm` describe el tipo de clave o certificado.
+    pub async fn confirm_host_key(
         &self,
         host: &str,
         port: u16,
@@ -86,7 +88,8 @@ impl Prompter {
         rx.await.unwrap_or(false)
     }
 
-    async fn secret(
+    /// Pide un secreto al usuario. `None` si cancela.
+    pub async fn secret(
         &self,
         title: &str,
         message: &str,

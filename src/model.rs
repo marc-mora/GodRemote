@@ -10,16 +10,29 @@ pub enum Protocol {
     Ssh,
     Sftp,
     Rdp,
+    Vnc,
+    Telnet,
+    Serial,
 }
 
 impl Protocol {
-    pub const ALL: [Protocol; 3] = [Protocol::Ssh, Protocol::Sftp, Protocol::Rdp];
+    pub const ALL: [Protocol; 6] = [
+        Protocol::Ssh,
+        Protocol::Sftp,
+        Protocol::Rdp,
+        Protocol::Vnc,
+        Protocol::Telnet,
+        Protocol::Serial,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Protocol::Ssh => "SSH",
             Protocol::Sftp => "SFTP",
             Protocol::Rdp => "RDP",
+            Protocol::Vnc => "VNC",
+            Protocol::Telnet => "Telnet",
+            Protocol::Serial => "Serie",
         }
     }
 
@@ -27,6 +40,10 @@ impl Protocol {
         match self {
             Protocol::Ssh | Protocol::Sftp => 22,
             Protocol::Rdp => 3389,
+            Protocol::Vnc => 5900,
+            Protocol::Telnet => 23,
+            // El puerto serie no usa puerto TCP.
+            Protocol::Serial => 0,
         }
     }
 
@@ -35,7 +52,20 @@ impl Protocol {
             Protocol::Ssh => "💻",
             Protocol::Sftp => "📂",
             Protocol::Rdp => "🖥",
+            Protocol::Vnc => "📺",
+            Protocol::Telnet => "📞",
+            Protocol::Serial => "🔌",
         }
+    }
+
+    /// Protocolos que viajan sobre SSH (usan usuario, clave, salto…).
+    pub fn is_ssh(self) -> bool {
+        matches!(self, Protocol::Ssh | Protocol::Sftp)
+    }
+
+    /// Protocolos que se conectan a un host y puerto TCP.
+    pub fn uses_network(self) -> bool {
+        self != Protocol::Serial
     }
 }
 
@@ -70,6 +100,10 @@ pub struct RdpOptions {
     pub height: u32,
     /// Redirigir el portapapeles.
     pub clipboard: bool,
+    /// Usar el cliente integrado (en una pestaña) en vez del externo.
+    pub embedded: bool,
+    /// Con el cliente integrado: usar el tamaño de la pestaña al conectar.
+    pub fit_window: bool,
 }
 
 impl Default for RdpOptions {
@@ -80,6 +114,131 @@ impl Default for RdpOptions {
             width: 1600,
             height: 900,
             clipboard: true,
+            embedded: true,
+            fit_window: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TunnelKind {
+    /// `-L`: un puerto local lleva a un destino visto desde el servidor.
+    Local,
+    /// `-R`: un puerto del servidor lleva a un destino visto desde aquí.
+    Remote,
+    /// `-D`: proxy SOCKS5 local que sale por el servidor.
+    Dynamic,
+}
+
+impl TunnelKind {
+    pub const ALL: [TunnelKind; 3] = [TunnelKind::Local, TunnelKind::Remote, TunnelKind::Dynamic];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TunnelKind::Local => "Local (-L)",
+            TunnelKind::Remote => "Remoto (-R)",
+            TunnelKind::Dynamic => "Dinámico SOCKS (-D)",
+        }
+    }
+}
+
+/// Reenvío de puertos asociado a una sesión SSH.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tunnel {
+    pub kind: TunnelKind,
+    /// Dirección de escucha (local para `-L`/`-D`, del servidor para `-R`).
+    pub listen_host: String,
+    pub listen_port: u16,
+    /// Destino (no se usa en túneles dinámicos).
+    pub target_host: String,
+    pub target_port: u16,
+}
+
+impl Default for Tunnel {
+    fn default() -> Self {
+        Self {
+            kind: TunnelKind::Local,
+            listen_host: "127.0.0.1".into(),
+            listen_port: 8080,
+            target_host: "127.0.0.1".into(),
+            target_port: 80,
+        }
+    }
+}
+
+impl Tunnel {
+    /// Descripción corta, al estilo de OpenSSH.
+    pub fn describe(&self) -> String {
+        match self.kind {
+            TunnelKind::Local => format!(
+                "-L {}:{} → {}:{}",
+                self.listen_host, self.listen_port, self.target_host, self.target_port
+            ),
+            TunnelKind::Remote => format!(
+                "-R {}:{} → {}:{}",
+                self.listen_host, self.listen_port, self.target_host, self.target_port
+            ),
+            TunnelKind::Dynamic => {
+                format!("-D {}:{} (SOCKS5)", self.listen_host, self.listen_port)
+            }
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.listen_host.trim().is_empty() {
+            return Err("Túnel: falta la dirección de escucha".into());
+        }
+        if self.listen_port == 0 {
+            return Err("Túnel: el puerto de escucha no es válido".into());
+        }
+        if self.kind != TunnelKind::Dynamic {
+            if self.target_host.trim().is_empty() {
+                return Err("Túnel: falta el host de destino".into());
+            }
+            if self.target_port == 0 {
+                return Err("Túnel: el puerto de destino no es válido".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SerialParity {
+    None,
+    Odd,
+    Even,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SerialFlow {
+    None,
+    Software,
+    Hardware,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SerialOptions {
+    /// Dispositivo: `COM3`, `/dev/ttyUSB0`…
+    pub device: String,
+    pub baud: u32,
+    pub data_bits: u8,
+    pub parity: SerialParity,
+    pub stop_bits: u8,
+    pub flow: SerialFlow,
+}
+
+impl Default for SerialOptions {
+    fn default() -> Self {
+        Self {
+            device: String::new(),
+            baud: 115_200,
+            data_bits: 8,
+            parity: SerialParity::None,
+            stop_bits: 1,
+            flow: SerialFlow::None,
         }
     }
 }
@@ -96,7 +255,14 @@ pub struct Session {
     pub auth: AuthMethod,
     /// Ruta a la clave privada (si `auth == Key`).
     pub key_path: String,
+    /// Sesión SSH por la que saltar para llegar a esta (bastión).
+    pub jump: Option<Uuid>,
+    /// Reenvíos de puertos que se abren al conectar por SSH.
+    pub tunnels: Vec<Tunnel>,
+    /// Reenviar las aplicaciones gráficas X11 al servidor X local.
+    pub x11_forwarding: bool,
     pub rdp: RdpOptions,
+    pub serial: SerialOptions,
     pub notes: String,
 }
 
@@ -111,7 +277,11 @@ impl Default for Session {
             username: String::new(),
             auth: AuthMethod::Password,
             key_path: String::new(),
+            jump: None,
+            tunnels: vec![],
+            x11_forwarding: false,
             rdp: RdpOptions::default(),
+            serial: SerialOptions::default(),
             notes: String::new(),
         }
     }
@@ -120,7 +290,9 @@ impl Default for Session {
 impl Session {
     pub fn display_name(&self) -> String {
         if self.name.trim().is_empty() {
-            if self.username.is_empty() {
+            if self.protocol == Protocol::Serial {
+                self.serial.device.clone()
+            } else if self.username.is_empty() || !self.protocol.is_ssh() {
                 self.host.clone()
             } else {
                 format!("{}@{}", self.username, self.host)
@@ -140,21 +312,52 @@ impl Session {
         format!("{}/passphrase", self.id)
     }
 
+    /// Destino legible: `usuario@host:puerto` o el dispositivo serie.
+    pub fn target(&self) -> String {
+        match self.protocol {
+            Protocol::Serial => format!("{} · {} baudios", self.serial.device, self.serial.baud),
+            p if p.is_ssh() || (p == Protocol::Rdp && !self.username.is_empty()) => {
+                format!("{}@{}:{}", self.username, self.host, self.port)
+            }
+            _ => format!("{}:{}", self.host, self.port),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        if self.protocol == Protocol::Serial {
+            if self.serial.device.trim().is_empty() {
+                return Err("Indica el dispositivo serie (COM3, /dev/ttyUSB0…)".into());
+            }
+            if self.serial.baud == 0 {
+                return Err("La velocidad no es válida".into());
+            }
+            if !(5..=8).contains(&self.serial.data_bits) {
+                return Err("Los bits de datos deben estar entre 5 y 8".into());
+            }
+            if !(1..=2).contains(&self.serial.stop_bits) {
+                return Err("Los bits de parada deben ser 1 o 2".into());
+            }
+            return Ok(());
+        }
         if self.host.trim().is_empty() {
             return Err("El host no puede estar vacío".into());
         }
         if self.port == 0 {
             return Err("El puerto no es válido".into());
         }
-        if self.protocol != Protocol::Rdp && self.username.trim().is_empty() {
-            return Err("El usuario no puede estar vacío".into());
-        }
-        if self.protocol != Protocol::Rdp
-            && self.auth == AuthMethod::Key
-            && self.key_path.trim().is_empty()
-        {
-            return Err("Indica la ruta de la clave privada".into());
+        if self.protocol.is_ssh() {
+            if self.username.trim().is_empty() {
+                return Err("El usuario no puede estar vacío".into());
+            }
+            if self.auth == AuthMethod::Key && self.key_path.trim().is_empty() {
+                return Err("Indica la ruta de la clave privada".into());
+            }
+            if self.jump == Some(self.id) {
+                return Err("Una sesión no puede saltar a través de sí misma".into());
+            }
+            for t in &self.tunnels {
+                t.validate()?;
+            }
         }
         Ok(())
     }
@@ -471,6 +674,65 @@ mod tests {
         tree.upsert_session(None, s.clone());
         assert_eq!(tree.nodes.len(), 1);
         assert_eq!(tree.session(s.id).unwrap().name, "dos");
+    }
+
+    #[test]
+    fn old_files_still_load() {
+        // Fichero de la versión 0.1: sin túneles, salto ni opciones nuevas.
+        let json = r#"{"nodes":[{"type":"session",
+            "id":"cad9943e-cd96-428c-a085-db0329898fd8","name":"viejo",
+            "protocol":"Rdp","host":"h","port":3389,"username":"u","auth":"Password",
+            "key_path":"","rdp":{"domain":"D","fullscreen":false,"width":800,
+            "height":600,"clipboard":true},"notes":""}]}"#;
+        let tree: Tree = serde_json::from_str(json).unwrap();
+        let Node::Session(s) = &tree.nodes[0] else {
+            panic!("no es una sesión")
+        };
+        assert_eq!(s.rdp.width, 800);
+        assert!(s.rdp.embedded);
+        assert!(s.tunnels.is_empty() && s.jump.is_none() && !s.x11_forwarding);
+        assert_eq!(s.serial.baud, 115_200);
+    }
+
+    #[test]
+    fn validation_per_protocol() {
+        let mut s = session("x");
+        assert!(s.validate().is_ok());
+        s.jump = Some(s.id);
+        assert!(s.validate().is_err());
+        s.jump = None;
+        s.tunnels.push(Tunnel {
+            listen_port: 0,
+            ..Default::default()
+        });
+        assert!(s.validate().is_err());
+        s.tunnels[0] = Tunnel {
+            kind: TunnelKind::Dynamic,
+            listen_port: 1080,
+            target_host: String::new(),
+            target_port: 0,
+            ..Default::default()
+        };
+        assert!(s.validate().is_ok());
+        assert_eq!(s.tunnels[0].describe(), "-D 127.0.0.1:1080 (SOCKS5)");
+
+        let mut serial = Session {
+            protocol: Protocol::Serial,
+            ..Default::default()
+        };
+        assert!(serial.validate().is_err());
+        serial.serial.device = "/dev/ttyUSB0".into();
+        assert!(serial.validate().is_ok());
+        assert_eq!(serial.display_name(), "/dev/ttyUSB0");
+
+        let vnc = Session {
+            protocol: Protocol::Vnc,
+            host: "pc".into(),
+            port: 5900,
+            ..Default::default()
+        };
+        assert!(vnc.validate().is_ok());
+        assert_eq!(vnc.target(), "pc:5900");
     }
 
     #[test]
