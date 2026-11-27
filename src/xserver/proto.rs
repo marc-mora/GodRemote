@@ -69,7 +69,6 @@ pub const M_POINTER_MOTION: u32 = 1 << 6;
 pub const M_POINTER_MOTION_HINT: u32 = 1 << 7;
 pub const M_BUTTON1_MOTION: u32 = 1 << 8;
 pub const M_BUTTON_MOTION: u32 = 1 << 13;
-pub const M_KEYMAP_STATE: u32 = 1 << 14;
 pub const M_EXPOSURE: u32 = 1 << 15;
 pub const M_VISIBILITY_CHANGE: u32 = 1 << 16;
 pub const M_STRUCTURE_NOTIFY: u32 = 1 << 17;
@@ -78,14 +77,12 @@ pub const M_SUBSTRUCTURE_NOTIFY: u32 = 1 << 19;
 pub const M_SUBSTRUCTURE_REDIRECT: u32 = 1 << 20;
 pub const M_FOCUS_CHANGE: u32 = 1 << 21;
 pub const M_PROPERTY_CHANGE: u32 = 1 << 22;
-pub const M_COLORMAP_CHANGE: u32 = 1 << 23;
 pub const M_OWNER_GRAB_BUTTON: u32 = 1 << 24;
 /// Bits válidos de una máscara de eventos.
 pub const M_ALL: u32 = 0x01ff_ffff;
 
 // --- Máscaras de estado (modificadores y botones) ---------------------------
 pub const S_SHIFT: u16 = 1 << 0;
-pub const S_LOCK: u16 = 1 << 1;
 pub const S_CONTROL: u16 = 1 << 2;
 pub const S_MOD1: u16 = 1 << 3;
 pub const S_MOD4: u16 = 1 << 6;
@@ -151,14 +148,6 @@ impl<'a> Reader<'a> {
         self.bytes(n).map(|_| ())
     }
 
-    /// Lee `n` bytes y salta su relleno hasta múltiplo de 4.
-    pub fn padded(&mut self, n: usize) -> XResult<&'a [u8]> {
-        let out = self.bytes(n)?;
-        let pad = pad4(n).min(self.remaining());
-        self.pos += pad;
-        Ok(out)
-    }
-
     pub fn u8(&mut self) -> XResult<u8> {
         Ok(self.bytes(1)?[0])
     }
@@ -185,10 +174,6 @@ impl<'a> Reader<'a> {
         } else {
             u32::from_le_bytes(b)
         })
-    }
-
-    pub fn i32(&mut self) -> XResult<i32> {
-        self.u32().map(|v| v as i32)
     }
 }
 
@@ -330,11 +315,6 @@ impl Ev {
         self
     }
 
-    pub fn skip(mut self, n: usize) -> Self {
-        self.pos += n;
-        self
-    }
-
     pub fn done(self) -> Event {
         Event(self.data)
     }
@@ -442,9 +422,9 @@ mod tests {
         let mut be = Reader::new(&data, true);
         assert_eq!(be.u16().unwrap(), 0x1234);
         assert_eq!(be.u32().unwrap(), 0x5678_9abc);
-        assert_eq!(be.padded(1).unwrap(), &[1]);
-        // Solo quedaban 2 bytes de relleno: no se pasa del final.
-        assert_eq!(be.remaining(), 0);
+        assert_eq!(be.bytes(1).unwrap(), &[1]);
+        assert_eq!(be.remaining(), 2);
+        assert_eq!(be.rest(), &[2, 3]);
         assert_eq!(be.u8().unwrap_err().code, BAD_LENGTH);
         let mut short = Reader::new(&data[..3], false);
         assert_eq!(short.u32().unwrap_err().code, BAD_LENGTH);

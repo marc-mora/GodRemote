@@ -316,13 +316,15 @@ pub fn lookup(name: &str) -> Option<(u16, u16, u16)> {
         }
         return Some(wide(v, v, v));
     }
-    // Variantes numeradas: red1 … red4.
-    let (base, digit) = key.split_at(key.len().saturating_sub(1));
+    // Variantes numeradas: red1 … red4. (El nombre puede traer cualquier
+    // cosa: se parte por caracteres, no por bytes.)
+    let digit = key.chars().next_back()?;
+    let base = &key[..key.len() - digit.len_utf8()];
     let factor = match digit {
-        "1" => 1.0,
-        "2" => 0.932,
-        "3" => 0.804,
-        "4" => 0.545,
+        '1' => 1.0,
+        '2' => 0.932,
+        '3' => 0.804,
+        '4' => 0.545,
         _ => return None,
     };
     let (_, r, g, b) = NUMBERED.iter().find(|(n, ..)| *n == base)?;
@@ -360,6 +362,12 @@ mod tests {
         assert_eq!(lookup("red4"), Some((139 * 257, 0, 0)));
         assert_eq!(lookup("snow2"), Some((238 * 257, 233 * 257, 233 * 257)));
         assert_eq!(lookup("red5"), None);
+        // Nombres raros de un cliente: ni pánico ni color.
+        assert_eq!(lookup(""), None);
+        assert_eq!(lookup("ñ"), None);
+        assert_eq!(lookup("gray\u{ff}"), None);
+        assert_eq!(lookup("#\u{e9}\u{e9}\u{e9}"), None);
+        assert_eq!(lookup("rgb:\u{e9}/1/1"), None);
     }
 
     #[test]

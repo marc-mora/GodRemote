@@ -206,6 +206,7 @@ impl Keymap {
     }
 
     /// Número de códigos que quedan para reasignar.
+    #[cfg(test)]
     pub fn spare_count(&self) -> usize {
         (MAX_KEYCODE - self.spare_first) as usize + 1
     }
@@ -308,7 +309,7 @@ mod tests {
             map.keycode_or_assign(0x0100_4e00 + i);
         }
         assert_eq!(map.keycode(euro), None);
-        assert_eq!(map.keycode_or_assign(0x0100_4e00).1, false);
+        assert!(!map.keycode_or_assign(0x0100_4e00).1);
         // Lo fijo no se toca.
         assert_eq!(
             map.keysyms(map.keycode(b'a' as u32).unwrap())[0],

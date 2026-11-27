@@ -76,6 +76,8 @@ impl SettingsWindow {
                      otra, y lleva una campana si la ha hecho sonar",
                         );
                         ui.separator();
+                        local_shell_section(ui, settings);
+                        ui.separator();
                         ui.strong("Teclado");
                         ui.checkbox(
                             &mut settings.app_shortcuts,
@@ -105,6 +107,27 @@ impl SettingsWindow {
                             "También al salir de GodRemote con sesiones conectadas o túneles \
                              en marcha",
                         );
+                        ui.horizontal(|ui| {
+                            let mut auto = settings.vault_autolock > 0;
+                            if ui
+                                .checkbox(&mut auto, "Bloquear el baúl tras")
+                                .on_hover_text(
+                                    "Sin teclado ni ratón en GodRemote durante ese tiempo, el \
+                                     baúl se bloquea. Las sesiones abiertas siguen; para \
+                                     conectar o reconectar con una contraseña guardada habrá \
+                                     que desbloquearlo",
+                                )
+                                .changed()
+                            {
+                                settings.vault_autolock = if auto { 15 } else { 0 };
+                            }
+                            ui.add_enabled(
+                                auto,
+                                egui::DragValue::new(&mut settings.vault_autolock)
+                                    .range(1..=1440)
+                                    .suffix(" min sin actividad"),
+                            );
+                        });
                         ui.separator();
                         ui.strong("SFTP");
                         ui.horizontal(|ui| {
@@ -153,6 +176,43 @@ impl SettingsWindow {
             });
         (open, *settings != before, request)
     }
+}
+
+/// Shell que abren los terminales locales.
+fn local_shell_section(ui: &mut egui::Ui, settings: &mut Settings) {
+    ui.strong("Terminal local");
+    ui.horizontal(|ui| {
+        ui.label("Shell");
+        ui.add(
+            egui::TextEdit::singleline(&mut settings.local_shell)
+                .desired_width(280.0)
+                .hint_text("la habitual del sistema"),
+        )
+        .on_hover_text(
+            "Programa y argumentos, por ejemplo «pwsh.exe -NoLogo» o «wsl.exe -d Ubuntu». \
+             Una ruta con espacios va entre comillas",
+        );
+        ui.menu_button("Elegir…", |ui| {
+            if ui.button("La habitual del sistema").clicked() {
+                settings.local_shell.clear();
+                ui.close();
+            }
+            for shell in crate::shells::detect() {
+                if ui
+                    .button(&shell.name)
+                    .on_hover_text(&shell.command)
+                    .clicked()
+                {
+                    settings.local_shell = shell.command;
+                    ui.close();
+                }
+            }
+        });
+    });
+    ui.weak(
+        "Es la que abre el botón «Terminal local»; su flecha permite abrir cualquiera de las \
+         otras para una sola pestaña.",
+    );
 }
 
 /// Dónde se muestran las aplicaciones gráficas (X11).

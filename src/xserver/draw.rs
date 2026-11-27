@@ -4,6 +4,7 @@
 //! al recorte del contexto gráfico (rectángulos o máscara de un bit).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::font::FontCore;
 
@@ -107,32 +108,137 @@ impl Rect {
 
 /// Lado máximo y número máximo de píxeles de un búfer: un cliente puede
 /// pedir ventanas de 32767×32767 y no se le van a dar 4 GB.
-const MAX_SIDE: u32 = 16_384;
-const MAX_PIXELS: u64 = 48 * 1024 * 1024;
+pub const MAX_SIDE: u32 = 16_384;
+pub const MAX_PIXELS: u64 = 48 * 1024 * 1024;
+/// Tope de la suma de píxeles de todas las ventanas y pixmaps (≈ 1 GiB).
+pub const MAX_TOTAL_PIXELS: u64 = 256 * 1024 * 1024;
+
+/// Presupuesto global de memoria de imagen. Cada búfer que crea un cliente
+/// (ventana, pixmap o una copia de estos) se anota aquí al reservarse y se
+/// descuenta al liberarse; cuando no cabe, la petición recibe `BadAlloc`.
+#[derive(Debug)]
+pub struct Budget {
+    used: AtomicU64,
+    limit: u64,
+}
+
+impl Budget {
+    pub fn new(limit: u64) -> Arc<Self> {
+        Arc::new(Budget {
+            used: AtomicU64::new(0),
+            limit,
+        })
+    }
+
+    /// Píxeles reservados ahora mismo.
+    pub fn used(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    /// Hay sitio para `pixels` más.
+    pub fn has_room(&self, pixels: u64) -> bool {
+        self.used().saturating_add(pixels) <= self.limit
+    }
+
+    fn try_reserve(&self, pixels: u64) -> bool {
+        self.used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(pixels)
+                    .filter(|total| *total <= self.limit)
+            })
+            .is_ok()
+    }
+}
 
 /// Búfer de píxeles de un *drawable*. Cada píxel ocupa un `u32`: 0xRRGGBB
 /// con profundidad 24, 0 o 1 con profundidad 1.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Image {
     pub w: i32,
     pub h: i32,
     pub depth: u8,
+    /// `w * h` píxeles, fila a fila.
     pub data: Vec<u32>,
+    /// Presupuesto al que se cargaron sus píxeles (los búferes internos del
+    /// servidor no cuentan).
+    budget: Option<Arc<Budget>>,
+}
+
+impl Clone for Image {
+    fn clone(&self) -> Self {
+        // Una copia ocupa lo mismo que el original y también cuenta.
+        if let Some(budget) = &self.budget {
+            budget
+                .used
+                .fetch_add(self.data.len() as u64, Ordering::Relaxed);
+        }
+        Image {
+            w: self.w,
+            h: self.h,
+            depth: self.depth,
+            data: self.data.clone(),
+            budget: self.budget.clone(),
+        }
+    }
+}
+
+impl Drop for Image {
+    fn drop(&mut self) {
+        if let Some(budget) = &self.budget {
+            let pixels = (self.w.max(0) as u64) * (self.h.max(0) as u64);
+            // Nunca por debajo de cero, pase lo que pase.
+            let _ = budget
+                .used
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                    Some(used.saturating_sub(pixels))
+                });
+        }
+    }
+}
+
+impl PartialEq for Image {
+    fn eq(&self, other: &Self) -> bool {
+        (self.w, self.h, self.depth) == (other.w, other.h, other.depth) && self.data == other.data
+    }
 }
 
 impl Image {
-    pub fn new(w: u32, h: u32, depth: u8) -> Self {
+    /// Tamaño real del búfer para un tamaño pedido (recortado a los topes).
+    fn capped(w: u32, h: u32) -> (u32, u32) {
         let w = w.min(MAX_SIDE);
         let mut h = h.min(MAX_SIDE);
         if w as u64 * h as u64 > MAX_PIXELS {
             h = (MAX_PIXELS / w.max(1) as u64) as u32;
         }
+        (w, h)
+    }
+
+    /// Búfer interno del servidor: no se carga a ningún presupuesto.
+    pub fn new(w: u32, h: u32, depth: u8) -> Self {
+        let (w, h) = Self::capped(w, h);
         Image {
             w: w as i32,
             h: h as i32,
             depth,
             data: vec![0; w as usize * h as usize],
+            budget: None,
         }
+    }
+
+    /// Búfer de un cliente, cargado al presupuesto global. `None` si no cabe.
+    pub fn budgeted(budget: &Arc<Budget>, w: u32, h: u32, depth: u8) -> Option<Self> {
+        let (w, h) = Self::capped(w, h);
+        if !budget.try_reserve(w as u64 * h as u64) {
+            return None;
+        }
+        let mut img = Image::new(w, h, depth);
+        img.budget = Some(budget.clone());
+        Some(img)
+    }
+
+    /// Píxeles que ocupa.
+    pub fn pixels(&self) -> u64 {
+        self.data.len() as u64
     }
 
     pub fn bounds(&self) -> Rect {
@@ -202,26 +308,33 @@ impl Image {
     }
 
     /// Nueva imagen de otro tamaño que conserva el contenido desplazado.
-    pub fn resized(&self, w: u32, h: u32, dx: i32, dy: i32) -> Image {
-        let mut out = Image::new(w, h, self.depth);
+    /// `None` si no cabe en el presupuesto de memoria.
+    pub fn resized(&self, w: u32, h: u32, dx: i32, dy: i32) -> Option<Image> {
+        let mut out = match &self.budget {
+            Some(budget) => Image::budgeted(budget, w, h, self.depth)?,
+            None => Image::new(w, h, self.depth),
+        };
         let dst = self.bounds().translate(dx, dy).intersect(&out.bounds());
         for y in dst.y0..dst.y1 {
             let src = self.row(y - dy, dst.x0 - dx, dst.x1 - dx);
             out.row_mut(y, dst.x0, dst.x1).copy_from_slice(src);
         }
-        out
+        Some(out)
     }
 }
 
+/// Tope de trabajo (filas × vértices) al rellenar un polígono.
+const MAX_POLYGON_WORK: u64 = 200_000_000;
+
 // Valores de los atributos del GC.
 pub const GX_COPY: u8 = 3;
+#[cfg(test)]
 pub const GX_XOR: u8 = 6;
 pub const FILL_SOLID: u8 = 0;
 pub const FILL_TILED: u8 = 1;
 pub const FILL_STIPPLED: u8 = 2;
 pub const FILL_OPAQUE_STIPPLED: u8 = 3;
 pub const CAP_NOT_LAST: u8 = 0;
-pub const CAP_PROJECTING: u8 = 3;
 
 /// Recorte de un contexto gráfico.
 #[derive(Debug, Clone, PartialEq)]
@@ -633,6 +746,12 @@ impl<'a> Painter<'a> {
         let ymax = pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
         let y_start = (ymin.ceil() as i32).max(cy0);
         let y_end = (ymax.ceil() as i32).min(cy1);
+        // Un polígono de millones de vértices sobre miles de filas tendría
+        // al servidor ocupado minutos: no es un dibujo, es un abuso.
+        let rows = (y_end as i64 - y_start as i64).max(0) as u64;
+        if rows * pts.len() as u64 > MAX_POLYGON_WORK {
+            return;
+        }
         let mut crossings: Vec<(f64, i32)> = Vec::with_capacity(8);
         for y in y_start..y_end {
             let fy = y as f64;
@@ -728,6 +847,9 @@ impl<'a> Painter<'a> {
             rel <= extent
         };
         let (cy0, cy1) = self.clip_rows();
+        // (Los bucles por píxel se limitan a las columnas que se ven: un
+        // arco de radio enorme no debe costar más que la zona visible.)
+        let (cx0, cx1) = self.clip_cols();
         if fill {
             // Relleno: celdas de píxel dentro de la elipse de w×h.
             let (rx, ry) = (w as f64 / 2.0, h as f64 / 2.0);
@@ -753,8 +875,8 @@ impl<'a> Painter<'a> {
                     continue;
                 }
                 let half = rx * t.sqrt();
-                let xl = (cx - half - 0.5).ceil() as i32;
-                let xr = (cx + half - 0.5).floor() as i32;
+                let xl = ((cx - half - 0.5).ceil() as i32).max(cx0);
+                let xr = ((cx + half - 0.5).floor() as i32).min(cx1);
                 if full {
                     self.span(py, xl, xr + 1);
                     continue;
@@ -825,8 +947,8 @@ impl<'a> Painter<'a> {
             } else {
                 None
             };
-            let xl = (cx - outer).ceil() as i32;
-            let xr = (cx + outer).floor() as i32;
+            let xl = ((cx - outer).ceil() as i32).max(cx0);
+            let xr = ((cx + outer).floor() as i32).min(cx1);
             let mut run: Option<i32> = None;
             for px in xl..=xr + 1 {
                 let dx = px as f64 - cx;
@@ -856,7 +978,7 @@ impl<'a> Painter<'a> {
                 continue;
             }
             if let Some(glyph) = font.glyph(*code) {
-                let (gx, gy) = (pen + glyph.left, y - glyph.top);
+                let (gx, gy) = (pen.saturating_add(glyph.left), y - glyph.top);
                 let cell = Rect::new(gx, gy, glyph.width as i32, glyph.height as i32);
                 for i in 0..self.clips.len() {
                     let r = self.clips[i].intersect(&cell);
@@ -893,9 +1015,9 @@ impl<'a> Painter<'a> {
                     }
                 }
             }
-            pen += info.width as i32;
+            pen = pen.saturating_add(info.width as i32);
         }
-        pen - x
+        pen.saturating_sub(x)
     }
 }
 
@@ -1262,12 +1384,39 @@ mod tests {
         assert_eq!(img.get(1, 1), 0xaabbcc);
         let block = img.extract(Rect::new(-1, 0, 3, 2));
         assert_eq!(block, vec![0, 0, 0, 0, 0, 0xaabbcc]);
-        let bigger = img.resized(6, 6, 1, 1);
+        let bigger = img.resized(6, 6, 1, 1).unwrap();
         assert_eq!((bigger.w, bigger.h), (6, 6));
         assert_eq!(bigger.get(2, 2), 0xaabbcc);
         assert_eq!(bigger.get(1, 1), 0);
-        let smaller = img.resized(2, 2, 0, 0);
+        let smaller = img.resized(2, 2, 0, 0).unwrap();
         assert_eq!(smaller.data, vec![0, 0, 0, 0xaabbcc]);
+    }
+
+    #[test]
+    fn budget_counts_every_buffer() {
+        let budget = Budget::new(100);
+        let a = Image::budgeted(&budget, 5, 10, 24).unwrap();
+        assert_eq!(budget.used(), 50);
+        // La copia también cuenta (aunque se pase del tope: ya está hecha).
+        let b = a.clone();
+        assert_eq!(budget.used(), 100);
+        assert!(Image::budgeted(&budget, 1, 1, 24).is_none());
+        assert!(a.resized(6, 10, 0, 0).is_none(), "no cabe otra más");
+        drop(b);
+        assert_eq!(budget.used(), 50);
+        assert!(budget.has_room(50) && !budget.has_room(51));
+        let c = a.resized(5, 4, 0, 0).unwrap();
+        assert_eq!(budget.used(), 70);
+        drop((a, c));
+        assert_eq!(budget.used(), 0);
+        // Los búferes internos no cuentan, y los tamaños se recortan antes
+        // de cargarlos.
+        let _internal = Image::new(100, 100, 24);
+        assert_eq!(budget.used(), 0);
+        let big = Budget::new(u64::MAX);
+        let huge = Image::budgeted(&big, 65_535, 65_535, 24).unwrap();
+        assert_eq!(big.used(), huge.pixels());
+        assert!(huge.pixels() <= MAX_PIXELS);
     }
 
     #[test]

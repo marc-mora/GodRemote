@@ -33,7 +33,10 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 | **X11** | Servidor X propio, escrito en Rust e integrado: las aplicaciones gráficas remotas se ven en una pestaña sin instalar VcXsrv, Xming ni XQuartz. También puede usarse el servidor X del sistema. Reenvío por SSH con cookie de autenticación. |
 | **Verificación de host** | Usa `~/.ssh/known_hosts`, compartido con OpenSSH. Pregunta la primera vez y **rechaza** la conexión si la clave del servidor cambia. |
 | **Terminal** | Búsqueda en pantalla e historial, registro de la sesión en un fichero, reconexión automática si se cae la red y reapertura de las pestañas al arrancar. Enlaces que se abren con `Ctrl+clic` y palabras resaltadas (errores en rojo, avisos en amarillo…) con reglas propias. |
-| **Pestañas** | Se reordenan arrastrando, se renombran con doble clic y avisan cuando hay salida nueva (o suena la campana) en una que no estás mirando. |
+| **Pestañas** | Se reordenan arrastrando, se renombran con doble clic, llevan el color de su carpeta (producción en rojo) y avisan cuando hay salida nueva (o suena la campana) en una que no estás mirando. |
+| **Paleta de órdenes** | `Ctrl+Mayús+P` y escribir: salta a un equipo, una pestaña, un snippet, un túnel o una acción. Atajos para cambiar, abrir y cerrar pestañas. |
+| **Protecciones** | Pregunta antes de pegar varias líneas y antes de cerrar pestañas (o la aplicación) con sesiones conectadas. |
+| **Automatización** | Órdenes que se envían solas al conectar a un equipo, y ejecutar una orden en todos los equipos de una carpeta recogiendo la salida y el código de cada uno. |
 | **Vista dividida** | Varios terminales a la vez en mosaico, combinable con la difusión. |
 | **SFTP** | Dos paneles (local / remoto), subida y descarga recursivas con progreso y cancelación, crear carpeta, renombrar y eliminar. Se puede abrir sobre la conexión SSH de un terminal, seguir su carpeta y editar ficheros remotos con el editor local. Fechas en hora local. |
 | **RDP** | Cliente integrado en una pestaña, o el cliente externo del sistema (FreeRDP / `mstsc`). |
@@ -45,7 +48,8 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 | **Temas** | Cinco temas integrados y editor en vivo de colores, tipos y tamaños de letra, interlineados, separaciones y bordes. Importar y exportar en JSON. |
 | **Fondo del terminal** | Un texto, un dibujo ASCII o una imagen detrás del texto, con la opacidad que se quiera. Por tema o por equipo. |
 | **Claves** | Lista las claves de `~/.ssh` y las propias, genera pares Ed25519 / ECDSA (con passphrase opcional), importa claves y copia la pública. |
-| **Credenciales** | Baúl cifrado con contraseña maestra (Argon2id + XChaCha20-Poly1305). Las contraseñas solo se guardan tras una autenticación correcta. |
+| **Credenciales** | Baúl cifrado con contraseña maestra (Argon2id + XChaCha20-Poly1305). Las contraseñas solo se guardan tras una autenticación correcta. Se bloquea solo tras un rato sin actividad y tiene un visor para revisar y borrar lo guardado. |
+| **Terminal local** | Con la shell que elijas: PowerShell, cmd, WSL o Git Bash en Windows; bash, zsh, fish… en Linux y macOS. |
 
 ## Compilar y ejecutar
 
@@ -62,6 +66,21 @@ Debian/Ubuntu:
 ```bash
 sudo apt install build-essential cmake libxkbcommon-x11-0 libgl1 libegl1
 ```
+
+### Compilación y pruebas automáticas
+
+Cada cambio que se sube pasa por GitHub Actions (`.github/workflows/ci.yml`):
+
+- **Linux**: formato, todas las pruebas de las dos ediciones —incluidas las
+  que necesitan servidores reales (`sshd`, `telnetd`, `x11vnc`, FreeRDP,
+  clientes X)— y `clippy` sin avisos.
+- **Windows y macOS**: compilación nativa y las pruebas que no dependen de
+  servidores de Unix.
+
+Al empujar una etiqueta `vX.Y.Z` se compilan además los ejecutables nativos
+de las dos ediciones para Windows, Linux y macOS, y se publican como
+**Release** en GitHub. Los mismos ejecutables se pueden pedir a mano desde la
+pestaña *Actions* (se descargan como artefactos de la ejecución).
 
 ### Ejecutable de Windows desde Linux
 
@@ -129,6 +148,56 @@ segunda edición.
   botones **Ctrl+Alt+Supr** y **Win** envían esas teclas, que el sistema local
   no deja capturar.
 
+### Paleta de órdenes y atajos
+
+**Ctrl+Mayús+P** abre una caja de búsqueda sobre todo lo que se puede abrir:
+pestañas abiertas, equipos del árbol (por nombre, carpeta, usuario o
+dirección), snippets, túneles y acciones (terminal local, vista dividida,
+difusión, ajustes…). Se escribe parte del nombre —varias palabras, sin
+acentos, o sus iniciales salteadas: «prd» encuentra «producción»—, se elige
+con las flechas e Intro lo abre.
+
+| Atajo | Hace |
+|-------|------|
+| `Ctrl+Mayús+P` | Paleta de órdenes |
+| `Ctrl+Tab` · `Ctrl+AvPág` | Pestaña siguiente |
+| `Ctrl+Mayús+Tab` · `Ctrl+RePág` | Pestaña anterior |
+| `Ctrl+Mayús+T` | Terminal local nuevo |
+| `Ctrl+Mayús+W` | Cerrar la pestaña |
+| `Ctrl+Mayús+F` | Buscar en el terminal |
+
+Todos llevan Mayús o una tecla que la shell no usa con Ctrl: `Ctrl+W`,
+`Ctrl+T` y las demás combinaciones de la shell siguen llegando al terminal.
+Se pueden desactivar en **⚙ Ajustes**, y un snippet no puede usar ninguno.
+
+### Protecciones
+
+- **Pegar varias líneas**: antes de enviarlas, el terminal enseña lo que hay
+  en el portapapeles y pregunta (Intro pega, Esc cancela). En una shell cada
+  línea se ejecuta según llega, así que un pegado equivocado puede ser caro.
+- **Cerrar con sesiones vivas**: al cerrar una pestaña conectada —o varias
+  de golpe, o la propia aplicación con sesiones o túneles en marcha— se
+  pregunta antes. El foco va a «Cancelar»: una tecla de más no cierra nada.
+- **Color por carpeta**: en la ficha de una carpeta (o de un equipo) se
+  elige un color; sus pestañas lo llevan debajo del título y en una franja
+  sobre el terminal. Rojo para producción, por ejemplo.
+
+Las dos preguntas se pueden quitar en **⚙ Ajustes**.
+
+### Órdenes al conectar y ejecutar en varios equipos
+
+- **Órdenes al conectar**: en la ficha de un equipo SSH (Avanzado) se
+  escriben las órdenes que deben teclearse solas en cuanto la shell termina
+  de saludar, también al reconectar. Admiten las variables de los snippets
+  (`{{host}}`, `{{usuario}}`, `{{nombre}}`, `{{fecha}}`…).
+- **Ejecutar en varios equipos**: clic derecho sobre una carpeta →
+  **Ejecutar una orden en sus equipos…** (o desde la paleta). Se eligen los
+  equipos SSH, se escribe la orden (o se parte de un snippet) y GodRemote la
+  lanza en todos, unos pocos a la vez, mostrando de cada uno su salida, su
+  código y lo que tardó. Se puede cancelar, copiar la salida de uno o de
+  todos y guardarla en un fichero. Con más de un equipo se pide una
+  confirmación más.
+
 ### Carpetas que dan valores a sus equipos
 
 Clic derecho sobre una carpeta → **Editar carpeta…** permite definir, para
@@ -139,7 +208,8 @@ los equipos que contiene (y los de sus subcarpetas):
 - la **autenticación** (con su contraseña o passphrase en el baúl) y los
   **saltos**, que usan los equipos que marcan «la de la carpeta» en su ficha
   (los equipos nuevos lo marcan solos);
-- desactivar la **barra de información** en todos ellos.
+- desactivar la **barra de información** en todos ellos;
+- el **color** con el que se marcan sus pestañas.
 
 La ficha de cada equipo indica qué hereda y de qué carpeta. Si una
 subcarpeta define un valor, manda sobre el de la carpeta de arriba.
@@ -174,9 +244,10 @@ Con el integrado:
   aplicación gráfica desde su terminal (`xterm &`, `xclock &`…). El servidor
   arranca con la primera aplicación y se abre la pestaña **Servidor X**, con
   todas las ventanas dentro.
-- Cada ventana lleva su barra de título: se mueve arrastrándola, se trae al
-  frente con un clic y se cierra con su aspa. El teclado va a la ventana que
-  tiene el foco; el ratón, a la que está debajo.
+- Cada ventana lleva su barra de título: se mueve arrastrándola, se
+  redimensiona por la esquina, se trae al frente con un clic y se cierra con
+  su aspa. El teclado va a la ventana que tiene el foco; el ratón, a la que
+  está debajo.
 - La pantalla se ajusta sola al tamaño de la pestaña.
 - El portapapeles va en los dos sentidos: lo que selecciones en una
   aplicación llega al portapapeles local, y el portapapeles local se
@@ -189,11 +260,16 @@ Con el integrado:
   desde WSL o desde un terminal local).
 
 El servidor entiende el protocolo X11 básico (*core*): ventanas, dibujo,
-fuentes, colores, teclado, ratón y selecciones. Es suficiente para `xterm`,
-`xclock`, `xcalc`, `xeyes`, `xmessage`, editores y herramientas clásicas
-(Xlib, Xt, Athena, Motif, Tk). Las aplicaciones que exigen extensiones
-modernas (RENDER, XKB, GLX: GTK 3/4, Qt 5/6, navegadores) necesitan el
-servidor X del sistema.
+fuentes, colores, teclado, ratón y selecciones. Está probado con `xterm`,
+`xclock`, `xcalc`, `xeyes`, `xlogo`, `xmessage`, `xfontsel` y `xev`, y con las
+utilidades `xdpyinfo`, `xprop`, `xwininfo` y `xlsfonts`. Las aplicaciones que
+exigen extensiones modernas (RENDER, XKB, GLX: GTK 3/4, Qt 5/6, navegadores)
+necesitan, por ahora, el servidor X del sistema.
+
+Las aplicaciones remotas no son de fiar, y el servidor está hecho contando
+con ello: una petición mal formada no puede tumbar GodRemote (como mucho se
+expulsa a la aplicación que la envía) y la memoria que puede hacerle
+reservar está acotada.
 
 ### Gestor de túneles
 
@@ -327,6 +403,28 @@ responde cada uno.
 - **Actividad**: una pestaña de terminal que recibe salida mientras miras
   otra se destaca; si además ha sonado la campana, lleva un 🔔. Se quita al
   abrirla, y se puede desactivar en **⚙ Ajustes**.
+
+### Baúl de credenciales
+
+**🔐 Baúl** guarda contraseñas y passphrases cifradas con una contraseña
+maestra. Además de crear, desbloquear, bloquear y cambiar la contraseña:
+
+- **Ver lo guardado…** lista cada secreto con su dueño (el equipo o la
+  carpeta) y permite borrarlo. Para ver o copiar un valor hay que repetir la
+  contraseña maestra. Los secretos de equipos que ya no existen se marcan y
+  se pueden borrar de una vez.
+- **Bloqueo automático**: tras 15 minutos sin teclado ni ratón en GodRemote
+  el baúl se bloquea solo. El tiempo se cambia (o se desactiva) en
+  **⚙ Ajustes**.
+
+### Terminal local
+
+**💻 Terminal local** abre la shell elegida en **⚙ Ajustes → Terminal
+local** (por defecto, la del sistema). La flecha de al lado ofrece las demás
+shells encontradas en el equipo —PowerShell, cmd, WSL y Git Bash en Windows;
+bash, zsh, fish… en Linux y macOS— para abrir una en una sola pestaña. En
+los ajustes también se puede escribir cualquier orden, por ejemplo
+`wsl.exe -d Ubuntu`.
 
 ### SFTP: editar y seguir al terminal
 
@@ -485,16 +583,37 @@ recuperar; el resto de la configuración sigue intacta.
 - Escritorios remotos: la tecla Windows y Ctrl+Alt+Supr solo desde los
   botones; Ctrl+Alt a la vez se trata como AltGr.
 - **Servidor X integrado**: solo el protocolo básico de X11 y BIG-REQUESTS.
-  Sin RENDER, XKB, SHAPE, MIT-SHM, XInput, RANDR ni GLX, de modo que las
-  aplicaciones GTK 3/4, Qt 5/6, los navegadores y todo lo que use OpenGL no
-  arrancan o se ven mal: para ellas, el servidor X del sistema. Trabaja en
-  una sola pantalla dentro de su pestaña (las ventanas no salen al
-  escritorio como ventanas nativas), con un gestor de ventanas mínimo: mover,
-  traer al frente y cerrar, sin redimensionar ni minimizar desde la barra.
-  El texto se dibuja con las fuentes integradas de GodRemote, sea cual sea
-  la fuente X que pida la aplicación, así que las medidas no coinciden al
-  píxel con las de un servidor X tradicional. Probado con las aplicaciones
-  clásicas de X.Org en Linux; no con Motif, Tk ni Java.
+  Sin RENDER (ni Xft: nada de `xterm -fa`), XKB, SHAPE (`xeyes` y `xclock`
+  salen rectangulares), MIT-SHM, XInput, RANDR, XFIXES, XTEST ni GLX, de
+  modo que las aplicaciones GTK 3/4, Qt 5/6, los navegadores y todo lo que
+  use OpenGL no arrancan o se ven mal: para ellas, el servidor X del
+  sistema. No se han probado Motif, Tk ni Java. Trabaja en una sola pantalla
+  dentro de su pestaña (las ventanas no salen al escritorio como ventanas
+  nativas), con un gestor de ventanas mínimo: mover, redimensionar por la
+  esquina, traer al frente y cerrar; sin maximizar ni minimizar. Los
+  cursores que piden las aplicaciones no se dibujan (se ve el del sistema).
+  El texto se dibuja con dos fuentes integradas (una de ancho fijo y otra
+  proporcional), sea cual sea la fuente X que pida la aplicación, así que
+  las medidas no coinciden al píxel con las de un servidor X tradicional.
+  Las selecciones grandes (más de 1 MB) no se transfieren. `xdotool` contra
+  este servidor falla (necesita XKB). Una aplicación hostil no puede tumbar
+  GodRemote ni agotar su memoria, pero sí tener ocupado el servidor X un
+  rato.
+- **Paleta y atajos**: los atajos son fijos (se pueden desactivar, no
+  cambiar). En un escritorio remoto también los captura GodRemote: no
+  llegan al equipo remoto.
+- **Pegar varias líneas**: la pregunta sale aunque la shell remota admita el
+  pegado entre corchetes (que ya evita la ejecución inmediata).
+- **Órdenes al conectar**: solo en SSH; se escriben en el terminal como si
+  se teclearan, así que dependen de que la shell esté lista (se espera a que
+  deje de saludar, o cuatro segundos).
+- **Ejecutar en varios equipos**: sin terminal (como `ssh equipo 'orden'`),
+  de modo que no sirve para órdenes que preguntan algo; guarda hasta 512 KB
+  de salida por equipo; si se agota el tiempo o se cancela, la orden puede
+  seguir ejecutándose en el servidor.
+- **Baúl**: el bloqueo por inactividad mira el teclado y el ratón dentro de
+  GodRemote, no la sesión del sistema. Las sesiones ya abiertas siguen; una
+  reconexión que necesite una contraseña guardada la pedirá.
 - **Gestor de túneles**: un túnel por conexión (dos túneles al mismo equipo
   abren dos conexiones SSH); no cuenta las conexiones ni el tráfico que
   pasan por cada túnel.
@@ -550,6 +669,12 @@ la edición «SSH reforzada», es decir, contra russh 0.65.4.
 - `tests/tunnel_manager.rs`: gestor de túneles contra un `sshd` real: local,
   SOCKS a través de un salto y remoto, sin terminal; parar y volver a
   iniciar, puerto ocupado, caída de la conexión y servidor apagado.
+- `tests/xserver_integration.rs`: el servidor X integrado contra clientes X
+  reales (`xterm`, `xclock`, `xeyes`, `xcalc`, `xlogo`, `xmessage`, `xev`,
+  `xprop`, `xwininfo`…): dibujo, teclado, ratón, portapapeles, gestor de
+  ventanas y autenticación por cookie.
+- `tests/fleet.rs`: una orden en varios equipos contra un `sshd` real:
+  salida, códigos, límite en paralelo, tiempo máximo y cancelación.
 - `tests/xserver_ssh.rs`: de extremo a extremo: una aplicación lanzada por
   SSH con reenvío X11 (contra un `sshd` real) acaba dibujada en el servidor
   X integrado; cambio de tamaño, parada y rearranque.
@@ -595,6 +720,10 @@ src/
   session_log.rs  registro de sesiones en ficheros
   highlight.rs    enlaces y palabras resaltadas del terminal
   macros.rs       snippets de terminal, atajos y variables
+  palette.rs      búsqueda de la paleta de órdenes
+  fleet.rs        una orden en varios equipos a la vez
+  shells.rs       shells locales disponibles
+  proxy.rs        proxy de salida HTTP y SOCKS5
   import.rs       importación de OpenSSH, PuTTY y MobaXterm
   backup.rs       copia de seguridad de la configuración
   ui/             interfaz (egui)

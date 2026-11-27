@@ -15,6 +15,7 @@ pub mod themes_view;
 pub mod transfer_view;
 pub mod tunnels_view;
 pub mod util;
+pub mod vault_view;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -292,6 +293,10 @@ pub struct App {
     palette: Option<Palette>,
     /// Ventana para ejecutar una orden en varios equipos.
     fleet_window: Option<FleetWindow>,
+    /// Visor de lo guardado en el baúl.
+    vault_window: Option<vault_view::VaultWindow>,
+    /// Última vez que el usuario tocó el teclado o el ratón.
+    last_activity: Instant,
     pending_close: Option<PendingClose>,
     /// Se ha pedido salir con sesiones vivas; `Some(true)` cuando el botón
     /// «Cancelar» de la pregunta ya tiene el foco.
@@ -491,6 +496,8 @@ impl App {
             pending_autostart: true,
             palette: None,
             fleet_window: None,
+            vault_window: None,
+            last_activity: Instant::now(),
             pending_close: None,
             pending_quit: None,
             quit_confirmed: false,
@@ -1053,18 +1060,29 @@ impl App {
         }
     }
 
+    /// Abre un terminal local con la shell de los ajustes.
     fn open_local_terminal(&mut self) {
-        match crate::terminal::spawn_local_shell(self.waker.clone(), INITIAL_COLS, INITIAL_ROWS) {
+        let command = self.settings.local_shell.clone();
+        self.open_local_shell("Terminal local", &command);
+    }
+
+    /// Abre un terminal local con la shell indicada (vacía: la habitual).
+    fn open_local_shell(&mut self, title: &str, command: &str) {
+        match crate::terminal::spawn_local_command(
+            command,
+            self.waker.clone(),
+            INITIAL_COLS,
+            INITIAL_ROWS,
+        ) {
             Ok(backend) => {
                 let mut view = TerminalView::new(backend);
-                view.log = self.automatic_log("Terminal local", "");
-                self.push_tab(
-                    "Terminal local".into(),
-                    None,
-                    TabKind::Terminal(Box::new(view)),
-                )
+                view.log = self.automatic_log(title, "");
+                self.push_tab(title.into(), None, TabKind::Terminal(Box::new(view)))
             }
-            Err(e) => self.notify(format!("No se pudo abrir la shell local: {e:#}"), true),
+            Err(e) => self.notify(
+                format!("No se pudo abrir la shell local «{command}»: {e:#}"),
+                true,
+            ),
         }
     }
 
@@ -1390,6 +1408,28 @@ impl App {
             if ui.button("💻 Terminal local").clicked() {
                 self.open_local_terminal();
             }
+            // Las demás shells del equipo, para una sola pestaña.
+            let mut chosen = None;
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.menu_button("▾", |ui| {
+                    for shell in crate::shells::detect() {
+                        if ui
+                            .button(&shell.name)
+                            .on_hover_text(&shell.command)
+                            .clicked()
+                        {
+                            chosen = Some(shell);
+                            ui.close();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Abrir un terminal local con otra shell");
+            });
+            if let Some(shell) = chosen {
+                self.open_local_shell(&shell.name, &shell.command);
+            }
             if ui
                 .button("🔑 Claves")
                 .on_hover_text("Gestionar claves SSH")
@@ -1444,6 +1484,10 @@ impl App {
                 if self.vault.is_some() {
                     if ui.button("Bloquear").clicked() {
                         self.vault = None;
+                        ui.close();
+                    }
+                    if ui.button("Ver lo guardado…").clicked() {
+                        self.vault_window = Some(Default::default());
                         ui.close();
                     }
                     if ui.button("Cambiar contraseña maestra…").clicked() {
@@ -2302,7 +2346,11 @@ impl App {
             Command::RunOnFolder => {
                 self.fleet_window = Some(FleetWindow::new(self.target_folder()));
             }
-            Command::VaultContents => {}
+            Command::VaultContents => {
+                if self.vault.is_some() {
+                    self.vault_window = Some(Default::default());
+                }
+            }
             Command::ToggleSplit => self.split.enabled = !self.split.enabled,
             Command::ToggleBroadcast => self.broadcast.enabled = !self.broadcast.enabled,
             Command::SearchTerminal => {
@@ -2333,6 +2381,42 @@ impl App {
                 if let Some(index) = self.tabs.iter().position(|t| t.x_server) {
                     self.active = index;
                 }
+            }
+        }
+    }
+
+    /// Bloquea el baúl tras un rato sin actividad y muestra su visor.
+    fn vault_guard(&mut self, ctx: &egui::Context) {
+        let active = ctx.input(|i| {
+            !i.events.is_empty() || i.pointer.any_down() || i.pointer.delta() != egui::Vec2::ZERO
+        });
+        if active {
+            self.last_activity = Instant::now();
+        }
+        let minutes = self.settings.vault_autolock;
+        if minutes > 0 && self.vault.is_some() {
+            let limit = Duration::from_secs(u64::from(minutes) * 60);
+            let idle = self.last_activity.elapsed();
+            if idle >= limit {
+                self.vault = None;
+                self.vault_window = None;
+                self.notify("Baúl bloqueado por inactividad", false);
+                // El estado ya se ha pintado en este fotograma: hace falta
+                // otro para que se vea el cambio.
+                ctx.request_repaint();
+            } else {
+                // Sin actividad no habría otro fotograma en el que mirarlo.
+                ctx.request_repaint_after((limit - idle).min(Duration::from_secs(30)));
+            }
+        }
+        if let Some(window) = &mut self.vault_window {
+            let open = match &mut self.vault {
+                Some(vault) => window.show(ctx, vault, &self.tree),
+                None => false,
+            };
+            if !open {
+                self.vault_window = None;
+                self.focus_active_terminal();
             }
         }
     }
@@ -4290,6 +4374,7 @@ impl eframe::App for App {
             }
         }
         self.tunnels_window_ui(&ctx);
+        self.vault_guard(&ctx);
         self.fleet_window_ui(&ctx);
         self.palette_ui(&ctx);
         self.close_confirm_ui(&ctx);

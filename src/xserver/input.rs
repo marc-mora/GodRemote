@@ -1,7 +1,6 @@
 //! Teclado y ratón: a qué ventana y a qué cliente va cada evento, cruces de
 //! ventana (`Enter`/`Leave`) y capturas activas y pasivas.
 
-use super::keymap::Keymap;
 use super::proto::*;
 use super::server::{ClientId, Focus, KeyboardGrab, PointerGrab, ROOT, Server};
 use crate::desktop::char_keysym;
@@ -568,10 +567,5 @@ impl Server {
             self.pointer_button(button, true);
             self.pointer_button(button, false);
         }
-    }
-
-    /// Símbolo principal de un código de tecla y si es un modificador.
-    pub fn is_modifier_key(&self, code: u8) -> bool {
-        Keymap::modifier_bit(self.keymap.keysyms(code)[0]) != 0
     }
 }

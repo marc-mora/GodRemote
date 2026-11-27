@@ -13,12 +13,14 @@ pub mod model;
 pub mod monitor;
 pub mod palette;
 pub mod paths;
+pub mod proxy;
 pub mod rdp;
 #[cfg(feature = "rdp-integrado")]
 pub mod rdp_client;
 pub mod serial;
 pub mod session_log;
 pub mod sftp;
+pub mod shells;
 pub mod ssh;
 pub mod telnet;
 pub mod terminal;

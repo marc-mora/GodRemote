@@ -93,6 +93,10 @@ name = "tunnel_manager"
 path = "../tests/tunnel_manager.rs"
 
 [[test]]
+name = "xserver_integration"
+path = "../tests/xserver_integration.rs"
+
+[[test]]
 name = "xserver_ssh"
 path = "../tests/xserver_ssh.rs"
 

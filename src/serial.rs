@@ -118,7 +118,8 @@ pub fn spawn(options: &SerialOptions, waker: Waker) -> Result<TermBackend> {
     })
 }
 
-#[cfg(all(test, unix))]
+// (Solo en Linux: macOS no deja abrir un pseudo-terminal como puerto serie.)
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::time::Instant;

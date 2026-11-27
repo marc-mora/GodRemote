@@ -1203,6 +1203,14 @@ pub struct Settings {
     /// Palabras resaltadas y enlaces en los terminales.
     #[serde(rename = "resaltado")]
     pub highlight: crate::highlight::Highlight,
+    /// Shell de los terminales locales (programa y argumentos); vacía, la
+    /// habitual del sistema.
+    #[serde(rename = "shell_local")]
+    pub local_shell: String,
+    /// Minutos sin usar la aplicación tras los que el baúl se bloquea solo
+    /// (0 = nunca).
+    #[serde(rename = "bloqueo_baul")]
+    pub vault_autolock: u32,
     /// Atajos de teclado de la aplicación (paleta, cambiar de pestaña…).
     #[serde(rename = "atajos")]
     pub app_shortcuts: bool,
@@ -1254,6 +1262,8 @@ impl Default for Settings {
             activity_notice: true,
             highlight: Default::default(),
             x_server: Default::default(),
+            local_shell: String::new(),
+            vault_autolock: 15,
             app_shortcuts: true,
             confirm_paste: true,
             confirm_close: true,
@@ -1270,6 +1280,7 @@ impl Settings {
         settings.server_bar.sanitize();
         settings.highlight.sanitize();
         settings.reconnect_attempts = settings.reconnect_attempts.clamp(1, 50);
+        settings.vault_autolock = settings.vault_autolock.min(24 * 60);
         settings
     }
 
@@ -1478,6 +1489,8 @@ mod tests {
             reconnect_attempts: 3,
             restore_tabs: true,
             editor: "code -w".into(),
+            local_shell: "pwsh.exe -NoLogo".into(),
+            vault_autolock: 0,
             app_shortcuts: false,
             confirm_paste: false,
             confirm_close: false,

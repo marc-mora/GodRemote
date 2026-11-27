@@ -8,12 +8,22 @@
 //! el tamaño, si es monoespaciada, la negrita y la cursiva.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use skrifa::instance::{LocationRef, Size};
-use skrifa::outline::{DrawSettings, OutlinePen};
+use skrifa::outline::{
+    DrawSettings, HintingInstance, HintingOptions, OutlineGlyphCollection, OutlinePen,
+};
 use skrifa::raw::FontRef;
 use skrifa::{GlyphId, MetadataProvider as _};
+
+use super::lock;
+
+/// Memoria que pueden ocupar, entre todas las fuentes, los glifos ya
+/// rasterizados. Pasado el tope se siguen dibujando, pero sin guardarlos.
+const MAX_GLYPH_CACHE: usize = 48 * 1024 * 1024;
+static GLYPH_CACHE_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 /// Fuente TTF de la que salen los glifos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,7 +41,19 @@ pub enum Encoding {
     Latin9,
     /// ISO 10646 (Unicode), dos bytes por carácter.
     Unicode,
+    /// La fuente «Symbol» de Adobe (letras griegas y signos matemáticos):
+    /// xcalc rotula con ella sus teclas de raíz cuadrada y pi.
+    Symbol,
 }
+
+/// Unicode de los caracteres de la fuente Symbol, de 0x20 a 0x7E.
+const SYMBOL_LOW: &str = " !∀#∃%&∋()∗+,−./0123456789:;<=>?\
+≅ΑΒΧΔΕΦΓΗΙϑΚΛΜΝΟΠΘΡΣΤΥςΩΞΨΖ[∴]⊥_\
+‾αβχδεφγηιϕκλμνοπθρστυϖωξψζ{|}∼";
+/// Y de 0xA0 a 0xF2 (los que no existen, con un espacio).
+const SYMBOL_HIGH: &str = "€ϒ′≤⁄∞ƒ♣♦♥♠↔←↑→↓°±″≥×∝∂•÷≠≡≈…  ↵\
+ℵℑℜ℘⊗⊕∅∩∪⊃⊇⊄⊂⊆∈∉∠∇®©™∏√⋅¬∧∨⇔⇐⇑⇒⇓\
+◊〈®©™∑           〉∫";
 
 /// Último carácter de las fuentes ISO 10646: basta para latín, griego,
 /// cirílico, puntuación, flechas, cajas y símbolos sin que `QueryFont`
@@ -44,6 +66,7 @@ impl Encoding {
             Encoding::Latin1 => "iso8859-1",
             Encoding::Latin9 => "iso8859-15",
             Encoding::Unicode => "iso10646-1",
+            Encoding::Symbol => "adobe-fontspecific",
         }
     }
 
@@ -61,6 +84,15 @@ impl Encoding {
                 0xBE => 0x178,
                 c => c,
             },
+            Encoding::Symbol => {
+                let (table, first) = if code < 0xA0 {
+                    (SYMBOL_LOW, 0x20)
+                } else {
+                    (SYMBOL_HIGH, 0xA0)
+                };
+                let c = table.chars().nth(code.checked_sub(first)? as usize)?;
+                return (c != ' ' || code == 0x20).then_some(c);
+            }
             _ => code,
         };
         if cp < 0x20 || (0x7f..0xa0).contains(&cp) {
@@ -130,7 +162,24 @@ pub struct FontCore {
     pub infos: Vec<CharInfo>,
     pub min_bounds: CharInfo,
     pub max_bounds: CharInfo,
-    glyphs: Mutex<HashMap<u32, Option<Arc<Glyph>>>>,
+    /// Ajuste a la rejilla con las instrucciones de la propia fuente: deja
+    /// los trazos horizontales en píxeles enteros y el texto pequeño se lee
+    /// mucho mejor.
+    hinter: Option<HintingInstance>,
+    glyphs: Mutex<GlyphCache>,
+}
+
+/// Glifos ya rasterizados de una fuente y lo que ocupan.
+#[derive(Default)]
+struct GlyphCache {
+    map: HashMap<u32, Option<Arc<Glyph>>>,
+    bytes: usize,
+}
+
+impl Drop for GlyphCache {
+    fn drop(&mut self) {
+        GLYPH_CACHE_BYTES.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
 }
 
 /// Fuente abierta por un cliente: nombre XLFD más la fuente compartida.
@@ -397,7 +446,8 @@ impl FontCore {
             infos: vec![CharInfo::default(); last as usize + 1],
             min_bounds: CharInfo::default(),
             max_bounds: CharInfo::default(),
-            glyphs: Mutex::new(HashMap::new()),
+            hinter: None,
+            glyphs: Mutex::new(GlyphCache::default()),
         };
         core.measure();
         core
@@ -433,11 +483,18 @@ impl FontCore {
             self.cell = Some((width.round() as i16).max(1));
         }
         let outlines = font.outline_glyphs();
+        self.hinter = HintingInstance::new(
+            &outlines,
+            Size::new(self.em),
+            LocationRef::default(),
+            HintingOptions::default(),
+        )
+        .ok();
         for code in 0..=self.last {
             let Some(gid) = self.key.encoding.unicode(code).and_then(|c| charmap.map(c)) else {
                 continue;
             };
-            self.infos[code as usize] = match self.cell {
+            let info = match self.cell {
                 // Fuente de celdas: todos los caracteres miden lo mismo.
                 Some(cell) => CharInfo {
                     lbearing: 0,
@@ -448,13 +505,7 @@ impl FontCore {
                 },
                 None => {
                     let width = (advance(gid).round() as i16).max(1);
-                    let mut pen = self.pen();
-                    if let Some(glyph) = outlines.get(gid) {
-                        let settings =
-                            DrawSettings::unhinted(Size::new(self.em), LocationRef::default());
-                        let _ = glyph.draw(settings, &mut pen);
-                    }
-                    match pen.bounds() {
+                    match self.outline(&outlines, gid).bounds() {
                         Some((x0, y0, x1, y1)) => CharInfo {
                             lbearing: x0.floor() as i16,
                             rbearing: x1.ceil() as i16 + i16::from(self.key.bold),
@@ -469,6 +520,7 @@ impl FontCore {
                     }
                 }
             };
+            self.infos[code as usize] = info;
         }
         let mut existing = self.infos.iter().filter(|i| i.exists());
         if let Some(first) = existing.next() {
@@ -514,35 +566,66 @@ impl FontCore {
         if !self.info(code).exists() {
             return None;
         }
-        let mut cache = self.glyphs.lock().unwrap();
-        if let Some(cached) = cache.get(&code) {
+        let mut cache = lock(&self.glyphs);
+        if let Some(cached) = cache.map.get(&code) {
             return cached.clone();
         }
         let glyph = self.render(code).map(Arc::new);
-        cache.insert(code, glyph.clone());
+        let size = glyph.as_ref().map_or(0, |g| g.coverage.len()) + 64;
+        if GLYPH_CACHE_BYTES.load(Ordering::Relaxed) + size <= MAX_GLYPH_CACHE {
+            GLYPH_CACHE_BYTES.fetch_add(size, Ordering::Relaxed);
+            cache.bytes += size;
+            cache.map.insert(code, glyph.clone());
+        }
         glyph
     }
 
     fn render(&self, code: u32) -> Option<Glyph> {
         let font = face_ref(self.key.face)?;
         let gid = font.charmap().map(self.key.encoding.unicode(code)?)?;
-        let glyph = font.outline_glyphs().get(gid)?;
+        rasterize(&self.outline(&font.outline_glyphs(), gid), self.key.bold)
+    }
+
+    /// Contorno de un glifo a este tamaño, ajustado a la rejilla si se puede.
+    fn outline(&self, outlines: &OutlineGlyphCollection, gid: GlyphId) -> Outline {
         let mut pen = self.pen();
+        let Some(glyph) = outlines.get(gid) else {
+            return pen;
+        };
+        if let Some(hinter) = &self.hinter
+            && glyph
+                .draw(DrawSettings::hinted(hinter, false), &mut pen)
+                .is_ok()
+        {
+            return pen;
+        }
+        // Sin instrucciones (o si fallan): el contorno tal cual.
+        pen = self.pen();
         let settings = DrawSettings::unhinted(Size::new(self.em), LocationRef::default());
-        glyph.draw(settings, &mut pen).ok()?;
-        rasterize(&pen, self.key.bold)
+        let _ = glyph.draw(settings, &mut pen);
+        pen
     }
 }
 
+/// Fuente compartida para una clave. Solo se guardan referencias débiles:
+/// una fuente vive mientras alguien la tenga abierta, así que un cliente no
+/// puede hacer crecer esta tabla pidiendo tamaños distintos sin parar.
 fn core(key: CoreKey) -> Arc<FontCore> {
-    static CACHE: OnceLock<Mutex<HashMap<CoreKey, Arc<FontCore>>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<CoreKey, Weak<FontCore>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    if let Some(found) = cache.lock().unwrap().get(&key) {
-        return found.clone();
+    if let Some(found) = lock(cache).get(&key).and_then(Weak::upgrade) {
+        return found;
     }
     // Se mide fuera del candado: abrir una fuente Unicode lleva su tiempo.
     let made = Arc::new(FontCore::new(key));
-    cache.lock().unwrap().entry(key).or_insert(made).clone()
+    let mut cache = lock(cache);
+    cache.retain(|_, weak| weak.strong_count() > 0);
+    // Puede que otra tarea la haya creado entretanto.
+    if let Some(found) = cache.get(&key).and_then(Weak::upgrade) {
+        return found;
+    }
+    cache.insert(key, Arc::downgrade(&made));
+    made
 }
 
 // --- Nombres XLFD -----------------------------------------------------------
@@ -640,6 +723,14 @@ const FAMILIES: &[Family] = &[
         setwidth: "normal",
         italic: 'i',
         spacing: 'c',
+    },
+    Family {
+        foundry: "adobe",
+        family: "symbol",
+        face: Face::Mono,
+        setwidth: "normal",
+        italic: 'i',
+        spacing: 'p',
     },
 ];
 
@@ -776,7 +867,9 @@ fn parse(pattern: &str) -> Option<Request> {
         for (slot, part) in placed.iter_mut().zip(&parts) {
             *slot = Some(part);
         }
-    } else if let Some(star) = parts.iter().rposition(|p| *p == "*") {
+    } else {
+        // Sin ningún comodín no puede coincidir con un nombre completo.
+        let star = parts.iter().rposition(|p| *p == "*")?;
         let right = &parts[star + 1..];
         for (slot, part) in placed.iter_mut().zip(&parts[..star]) {
             *slot = Some(part);
@@ -784,9 +877,6 @@ fn parse(pattern: &str) -> Option<Request> {
         for (slot, part) in placed[14 - right.len()..].iter_mut().zip(right) {
             *slot = Some(part);
         }
-    } else {
-        // Sin comodín final no puede coincidir con ningún nombre completo.
-        return None;
     }
     let lower = |i: usize| placed[i].map(str::to_ascii_lowercase);
     let wild = |i: usize| placed[i].is_none_or(|f| f.contains(['*', '?']));
@@ -808,8 +898,17 @@ fn parse(pattern: &str) -> Option<Request> {
         || registry.starts_with("iso646")
     {
         Encoding::Latin1
+    } else if registry == "adobe" && enc == "fontspecific" {
+        Encoding::Symbol
     } else {
         return None;
+    };
+    // La familia «symbol» lleva su propio juego de caracteres aunque el
+    // patrón no lo concrete.
+    let symbol = lower(1).is_some_and(|f| f == "symbol");
+    let encoding = match encoding {
+        Encoding::Latin1 if symbol && wild(12) && wild(13) => Encoding::Symbol,
+        other => other,
     };
 
     // Campos concretos. Un «0» en los de tamaño es «cualquiera» (fuente
@@ -843,6 +942,9 @@ fn parse(pattern: &str) -> Option<Request> {
     let mono = matches!(spacing.as_str(), "c" | "m")
         || (spacing != "p" && MONO_WORDS.iter().any(|m| family.contains(m)));
     let weight = lower(2).unwrap_or_default();
+    // (Los símbolos salen de la fuente monoespaciada, que es la que tiene
+    // letras griegas y signos matemáticos.)
+    let mono = mono || encoding == Encoding::Symbol;
     Some(Request {
         face: if mono { Face::Mono } else { Face::Sans },
         bold: ["bold", "demi", "black", "heavy"]
@@ -872,7 +974,7 @@ fn scale(face: Face, pixel: u32) -> Option<(FontRef<'static>, f32, i16, i16)> {
 fn average_width(face: Face, pixel: u32) -> u32 {
     static CACHE: OnceLock<Mutex<HashMap<(Face, u32), u32>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    if let Some(found) = cache.lock().unwrap().get(&(face, pixel)) {
+    if let Some(found) = lock(cache).get(&(face, pixel)) {
         return *found;
     }
     let width = match scale(face, pixel) {
@@ -894,7 +996,7 @@ fn average_width(face: Face, pixel: u32) -> u32 {
         }
         None => pixel * 10,
     };
-    cache.lock().unwrap().insert((face, pixel), width);
+    lock(cache).insert((face, pixel), width);
     width
 }
 
@@ -1009,7 +1111,12 @@ pub fn list(pattern: &str, max: usize) -> Vec<String> {
         for bold in [false, true] {
             for italic in [false, true] {
                 for pixel in &sizes {
-                    for encoding in [Encoding::Latin1, Encoding::Latin9, Encoding::Unicode] {
+                    let encodings: &[Encoding] = if family.family == "symbol" {
+                        &[Encoding::Symbol]
+                    } else {
+                        &[Encoding::Latin1, Encoding::Latin9, Encoding::Unicode]
+                    };
+                    for encoding in encodings.iter().copied() {
                         let mut candidate = Request {
                             fields: Default::default(),
                             face: family.face,
@@ -1100,6 +1207,26 @@ mod tests {
             (r.face, r.pixel, r.encoding),
             (Face::Mono, 16, Encoding::Latin9)
         );
+        // La fuente de símbolos de xcalc: pi y raíz cuadrada.
+        let r = parse("-adobe-symbol-*-*-*-*-*-120-*-*-*-*-*-*").unwrap();
+        assert_eq!((r.pixel, r.encoding), (12, Encoding::Symbol));
+        let symbol = open("-adobe-symbol-*-*-*-*-*-120-*-*-*-*-*-*").unwrap();
+        assert!(
+            symbol.name.ends_with("-adobe-fontspecific"),
+            "{}",
+            symbol.name
+        );
+        assert_eq!(Encoding::Symbol.unicode(0x70), Some('π'));
+        assert_eq!(Encoding::Symbol.unicode(0xD6), Some('√'));
+        assert_eq!(Encoding::Symbol.unicode(0xB8), Some('÷'));
+        assert_eq!(Encoding::Symbol.unicode(0x31), Some('1'));
+        assert_eq!(Encoding::Symbol.unicode(0xF1), Some('〉'));
+        assert_eq!(Encoding::Symbol.unicode(0xF2), Some('∫'));
+        assert_eq!(Encoding::Symbol.unicode(0xF3), None);
+        assert_eq!(Encoding::Symbol.unicode(0x7E), Some('∼'));
+        assert_eq!(Encoding::Symbol.unicode(0xBD), None);
+        assert_eq!(Encoding::Symbol.unicode(0x90), None);
+        assert!(symbol.core.glyph(0x70).is_some() && symbol.core.glyph(0xD6).is_some());
         // Juegos de caracteres que no hay.
         assert_eq!(
             parse("-*-fixed-medium-r-normal--16-*-*-*-*-*-jisx0208.1983-0"),

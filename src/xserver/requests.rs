@@ -6,15 +6,21 @@ use super::draw::{Image, Rect};
 use super::keymap::{KEYSYMS_PER_KEYCODE, MAX_KEYCODE, MIN_KEYCODE};
 use super::proto::*;
 use super::server::{
-    Background, ClientId, DEFAULT_COLORMAP, Focus, KeyboardGrab, PassiveGrab, PointerGrab,
-    Property, ROOT, ROOT_VISUAL, Server, swap_property_data,
+    Background, ClientId, DEFAULT_COLORMAP, Focus, KeyboardGrab, MAX_PROPERTY_BYTES,
+    MAX_TREE_DEPTH, PassiveGrab, PointerGrab, Property, ROOT, ROOT_VISUAL, Server,
+    swap_property_data,
 };
 use super::wm::{FRAME, TITLE_H};
+use super::xkb::{XKB_FIRST_ERROR, XKB_FIRST_EVENT, XKB_OPCODE};
 
 /// Código de operación de la extensión BIG-REQUESTS (el mismo que usa X.Org).
 pub const BIG_REQUESTS_OPCODE: u8 = 133;
 /// Tamaño máximo de petición con BIG-REQUESTS, en unidades de 4 bytes.
-pub const MAX_BIG_REQUEST: u32 = 4 * 1024 * 1024;
+pub const MAX_BIG_REQUEST: u32 = 1024 * 1024;
+/// Capturas pasivas (de botón y de tecla) por ventana.
+const MAX_GRABS: usize = 1024;
+/// Longitud máxima del nombre de un átomo.
+const MAX_ATOM_NAME: usize = 1024;
 
 /// Con la variable de entorno `GODREMOTE_X11_TRACE` se anota en la salida de
 /// errores cada petición y cada error X: sirve para depurar un cliente que
@@ -40,6 +46,10 @@ impl Server {
                 body.len()
             );
         }
+        #[cfg(test)]
+        if self.panic_on_opcode == Some(opcode) {
+            panic!("pánico de prueba en la petición {opcode}");
+        }
         let mut rd = Reader::new(body, be);
         if let Err(err) = self.dispatch(client, opcode, data, &mut rd)
             && let Some(c) = self.clients.get_mut(&client)
@@ -58,14 +68,27 @@ impl Server {
 
     /// Empieza la respuesta a la petición en curso de un cliente.
     pub(super) fn reply(&self, client: ClientId, data: u8) -> Writer {
-        let c = &self.clients[&client];
-        Writer::reply(c.be, c.seq, data)
+        let (be, seq) = self
+            .clients
+            .get(&client)
+            .map_or((false, 0), |c| (c.be, c.seq));
+        Writer::reply(be, seq, data)
+    }
+
+    /// El cliente habla en *big-endian*.
+    pub(super) fn is_big_endian(&self, client: ClientId) -> bool {
+        self.clients.get(&client).is_some_and(|c| c.be)
     }
 
     pub(super) fn send_reply(&mut self, client: ClientId, w: Writer) {
         let bytes = w.finish_reply();
         if let Some(c) = self.clients.get_mut(&client) {
-            c.out.extend_from_slice(&bytes);
+            if c.out.is_empty() {
+                // Lo habitual, y evita copiar las respuestas grandes.
+                c.out = bytes;
+            } else {
+                c.out.extend_from_slice(&bytes);
+            }
         }
     }
 
@@ -268,6 +291,9 @@ impl Server {
                 let w = self.win_mut(window)?;
                 w.grabs
                     .retain(|g| !(g.key && g.detail == key && g.modifiers == modifiers));
+                if w.grabs.len() >= MAX_GRABS {
+                    return Err(XError::new(BAD_ALLOC, window));
+                }
                 w.grabs.push(grab);
                 Ok(())
             }
@@ -358,19 +384,30 @@ impl Server {
                 let len = rd.u16()? as usize;
                 rd.skip(2)?;
                 let name = rd.bytes(len)?;
-                let present = name == b"BIG-REQUESTS";
+                // (presente, código de operación, primer evento, primer error)
+                let answer = match name {
+                    b"BIG-REQUESTS" => (1, BIG_REQUESTS_OPCODE, 0, 0),
+                    // Solo si se pidió, para xdotool: véase `xkb.rs`.
+                    b"XKEYBOARD" if self.xkb_compat => {
+                        (1, XKB_OPCODE, XKB_FIRST_EVENT, XKB_FIRST_ERROR)
+                    }
+                    _ => (0, 0, 0, 0),
+                };
                 let mut w = self.reply(c, 0);
-                w.u8(present as u8)
-                    .u8(if present { BIG_REQUESTS_OPCODE } else { 0 })
-                    .u8(0)
-                    .u8(0);
+                w.u8(answer.0).u8(answer.1).u8(answer.2).u8(answer.3);
                 self.send_reply(c, w);
                 Ok(())
             }
             99 => {
-                let name = b"BIG-REQUESTS";
-                let mut w = self.reply(c, 1);
-                w.zeros(24).u8(name.len() as u8).bytes(name);
+                let mut names: Vec<&[u8]> = vec![b"BIG-REQUESTS"];
+                if self.xkb_compat {
+                    names.push(b"XKEYBOARD");
+                }
+                let mut w = self.reply(c, names.len() as u8);
+                w.zeros(24);
+                for name in names {
+                    w.u8(name.len() as u8).bytes(name);
+                }
                 self.send_reply(c, w);
                 Ok(())
             }
@@ -384,8 +421,8 @@ impl Server {
                     let mut syms = [0u32; KEYSYMS_PER_KEYCODE];
                     for k in 0..per {
                         let ks = rd.u32()?;
-                        if k < KEYSYMS_PER_KEYCODE {
-                            syms[k] = ks;
+                        if let Some(slot) = syms.get_mut(k) {
+                            *slot = ks;
                         }
                     }
                     let Some(code) = first.checked_add(i) else {
@@ -486,12 +523,9 @@ impl Server {
                 self.send_reply(c, w);
                 Ok(())
             }
-            _ => {
-                if !self.unimplemented.contains(&opcode) {
-                    self.unimplemented.push(opcode);
-                }
-                Err(XError::new(BAD_REQUEST, 0))
-            }
+            XKB_OPCODE if self.xkb_compat => self.dispatch_xkb(c, data, rd),
+            // Códigos sin asignar y extensiones que no existen.
+            _ => Err(XError::new(BAD_REQUEST, 0)),
         }
     }
 
@@ -521,17 +555,21 @@ impl Server {
         if w == 0 || h == 0 {
             return Err(XError::new(BAD_VALUE, 0));
         }
-        if input_only && (depth != 0 || bw != 0) || !input_only && p.input_only {
+        if (input_only && (depth != 0 || bw != 0)) || (!input_only && p.input_only) {
             return Err(XError::new(BAD_MATCH, id));
         }
         let depth = if input_only { 0 } else { depth };
-        if !input_only && depth != 0 && depth != 24 || visual != 0 && visual != ROOT_VISUAL {
+        if (!input_only && depth != 0 && depth != 24) || (visual != 0 && visual != ROOT_VISUAL) {
             return Err(XError::new(BAD_MATCH, id));
+        }
+        if self.ancestry(parent).len() >= MAX_TREE_DEPTH {
+            return Err(XError::new(BAD_ALLOC, id));
         }
         let mut win = self.blank_window(id, c, parent, if input_only { 0 } else { 24 }, input_only);
         (win.x, win.y, win.w, win.h, win.bw) = (x, y, w, h, bw);
         if !input_only {
-            win.image = Some(Image::new(w, h, 24));
+            let image = Image::budgeted(&self.budget, w, h, 24);
+            win.image = Some(image.ok_or(XError::new(BAD_ALLOC, id))?);
         }
         self.windows.insert(id, win);
         if let Err(e) = self.apply_window_attributes(c, id, mask, rd) {
@@ -728,10 +766,10 @@ impl Server {
         if mask & 0x0c != 0 && (w == 0 || h == 0) {
             return Err(XError::new(BAD_VALUE, 0));
         }
-        if let Some(s) = sibling {
-            if self.win(s)?.parent != parent || stack.is_none() {
-                return Err(XError::new(BAD_MATCH, s));
-            }
+        if let Some(s) = sibling
+            && (self.win(s)?.parent != parent || stack.is_none())
+        {
+            return Err(XError::new(BAD_MATCH, s));
         }
         if redirectable && let Some(wm) = self.redirector(parent, c) {
             let ev = Ev::new(CONFIGURE_REQUEST, stack.unwrap_or(0))
@@ -849,14 +887,20 @@ impl Server {
     fn intern_atom(&mut self, c: ClientId, only_if_exists: u8, rd: &mut Reader) -> XResult {
         let len = rd.u16()? as usize;
         rd.skip(2)?;
-        let name: String = rd.bytes(len)?.iter().map(|b| *b as char).collect();
+        let name = rd.bytes(len)?;
         if name.is_empty() {
             return Err(XError::new(BAD_VALUE, 0));
         }
+        if name.len() > MAX_ATOM_NAME {
+            return Err(XError::new(BAD_ALLOC, 0));
+        }
+        let name: String = name.iter().map(|b| *b as char).collect();
         let atom = if only_if_exists != 0 {
             self.atoms.find(&name).unwrap_or(0)
         } else {
-            self.atoms.intern(&name)
+            self.atoms
+                .try_intern(&name)
+                .ok_or(XError::new(BAD_ALLOC, 0))?
         };
         let mut w = self.reply(c, 0);
         w.u32(atom);
@@ -881,7 +925,7 @@ impl Server {
             .checked_mul(format as usize / 8)
             .ok_or(XError::new(BAD_LENGTH, 0))?;
         let mut data = rd.bytes(len)?.to_vec();
-        if self.clients[&c].be {
+        if self.is_big_endian(c) {
             swap_property_data(&mut data, format);
         }
         let existing = self.win(window)?.prop(name);
@@ -901,6 +945,12 @@ impl Server {
             }
             _ => data,
         };
+        // Tope al total de propiedades: añadiendo a trozos se podría crecer
+        // sin límite.
+        let replaced = existing.map_or(0, |old| old.data.len());
+        if self.property_bytes.saturating_sub(replaced) + data.len() > MAX_PROPERTY_BYTES {
+            return Err(XError::new(BAD_ALLOC, name));
+        }
         self.set_property(
             window,
             Property {
@@ -920,7 +970,7 @@ impl Server {
         if kind != 0 {
             self.check_atom(kind)?;
         }
-        let be = self.clients[&c].be;
+        let be = self.is_big_endian(c);
         let Some(prop) = self.win(window)?.prop(name) else {
             let mut w = self.reply(c, 0);
             w.u32(0).u32(0).u32(0);
@@ -968,11 +1018,17 @@ impl Server {
             names.push(rd.u32()?);
         }
         let w = self.win(window)?;
+        let mut bytes = 0usize;
         for (i, name) in names.iter().enumerate() {
             self.check_atom(*name)?;
-            if w.prop(*name).is_none() || names[..i].contains(name) {
-                return Err(XError::new(BAD_MATCH, *name));
+            match w.prop(*name) {
+                Some(p) if !names[..i].contains(name) => bytes += p.data.len(),
+                _ => return Err(XError::new(BAD_MATCH, *name)),
             }
+        }
+        // Girar copia los valores: que la copia quepa de sobra.
+        if bytes > MAX_PROPERTY_BYTES / 4 {
+            return Err(XError::new(BAD_ALLOC, window));
         }
         if n == 0 || delta.rem_euclid(n as i64) == 0 {
             return Ok(());
@@ -1030,7 +1086,7 @@ impl Server {
 
     fn send_event(&mut self, c: ClientId, propagate: u8, rd: &mut Reader) -> XResult {
         let (destination, mask) = (rd.u32()?, rd.u32()?);
-        let be = self.clients[&c].be;
+        let be = self.is_big_endian(c);
         let mut ev = Event::from_wire(rd.bytes(32)?, be);
         if !(2..=34).contains(&ev.code()) && ev.code() < 64 {
             return Err(XError::new(BAD_VALUE, ev.code() as u32));
@@ -1113,6 +1169,9 @@ impl Server {
             return Err(XError::new(BAD_ACCESS, window));
         }
         w.grabs.retain(|g| !same(g));
+        if w.grabs.len() >= MAX_GRABS {
+            return Err(XError::new(BAD_ALLOC, window));
+        }
         w.grabs.push(PassiveGrab {
             client: c,
             key: false,

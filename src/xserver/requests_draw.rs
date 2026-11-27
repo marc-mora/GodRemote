@@ -5,11 +5,20 @@ use std::sync::Arc;
 
 use super::colors;
 use super::draw::{
-    Clip, Gc, Image, Painter, Rect, decode_bitmap, decode_z32, encode_bitmap, row_bytes,
+    Clip, Gc, Image, MAX_PIXELS, Painter, Rect, decode_bitmap, decode_z32, encode_bitmap, row_bytes,
 };
 use super::font::{self, CharInfo, Font};
 use super::proto::*;
-use super::server::{A_FONT, ClientId, DEFAULT_COLORMAP, Pixmap, ROOT_VISUAL, Server};
+use super::server::{A_FONT, ClientId, DEFAULT_COLORMAP, MAX_FONTS, Pixmap, ROOT_VISUAL, Server};
+
+/// Píxeles que caben en una sola petición de imagen (`GetImage`, `PutImage`):
+/// de sobra para una pantalla 4K y acota lo que se reserva de una vez.
+const MAX_IMAGE_REQUEST_PIXELS: usize = 16 * 1024 * 1024;
+/// Rectángulos de recorte de un GC, y de todos los GC juntos.
+const MAX_CLIP_RECTS: usize = 4096;
+const MAX_TOTAL_CLIP_RECTS: usize = 1024 * 1024;
+/// Elementos de la lista de trazos de un GC.
+const MAX_DASHES: usize = 256;
 
 impl Server {
     pub(super) fn dispatch_draw(
@@ -26,6 +35,9 @@ impl Server {
                 rd.skip(2)?;
                 let name: String = rd.bytes(len)?.iter().map(|b| *b as char).collect();
                 self.check_new_id(c, id)?;
+                if self.fonts.len() >= MAX_FONTS {
+                    return Err(XError::new(BAD_ALLOC, id));
+                }
                 let font = font::open(&name).ok_or(XError::new(BAD_NAME, 0))?;
                 self.fonts.insert(id, (c, font));
                 Ok(())
@@ -97,13 +109,20 @@ impl Server {
                 if !matches!(data, 1 | 24 | 32) || w == 0 || h == 0 {
                     return Err(XError::new(BAD_VALUE, data as u32));
                 }
+                // Ni pixmaps desmesurados ni más memoria de imagen en total
+                // de la presupuestada.
+                if w as u64 * h as u64 > MAX_PIXELS {
+                    return Err(XError::new(BAD_ALLOC, id));
+                }
+                let image =
+                    Image::budgeted(&self.budget, w, h, data).ok_or(XError::new(BAD_ALLOC, id))?;
                 self.pixmaps.insert(
                     id,
                     Pixmap {
                         owner: c,
                         width: w,
                         height: h,
-                        image: Arc::new(Image::new(w, h, data)),
+                        image: Arc::new(image),
                     },
                 );
                 Ok(())
@@ -137,6 +156,10 @@ impl Server {
                 if src.depth != gc.depth {
                     return Err(XError::new(BAD_MATCH, dst));
                 }
+                // Copiar el recorte duplica su lista de rectángulos.
+                if mask & (1 << 19) != 0 {
+                    self.check_clip_budget(clip_rect_count(&src), dst)?;
+                }
                 copy_gc_fields(&src, &mut gc, mask);
                 self.store_gc(dst, gc);
                 Ok(())
@@ -144,10 +167,14 @@ impl Server {
             58 => {
                 let id = rd.u32()?;
                 let (offset, n) = (rd.u16()?, rd.u16()? as usize);
-                let dashes = rd.bytes(n)?.to_vec();
+                let dashes = rd.bytes(n)?;
                 if dashes.is_empty() || dashes.contains(&0) {
                     return Err(XError::new(BAD_VALUE, 0));
                 }
+                if dashes.len() > MAX_DASHES {
+                    return Err(XError::new(BAD_ALLOC, id));
+                }
+                let dashes = dashes.to_vec();
                 let mut gc = (*self.gc(id)?).clone();
                 (gc.dash_offset, gc.dashes) = (offset, dashes);
                 self.store_gc(id, gc);
@@ -156,6 +183,10 @@ impl Server {
             59 => {
                 let id = rd.u32()?;
                 let (x, y) = (rd.i16()?, rd.i16()?);
+                if rd.remaining() / 8 > MAX_CLIP_RECTS {
+                    return Err(XError::new(BAD_ALLOC, id));
+                }
+                self.check_clip_budget(rd.remaining() / 8, id)?;
                 let mut rects = vec![];
                 while rd.remaining() >= 8 {
                     let (rx, ry) = (rd.i16()? as i32, rd.i16()? as i32);
@@ -411,6 +442,16 @@ impl Server {
         }
     }
 
+    /// Comprueba que caben `extra` rectángulos de recorte más entre todos
+    /// los contextos gráficos.
+    fn check_clip_budget(&self, extra: usize, id: Xid) -> XResult {
+        let total: usize = self.gcs.values().map(|(_, gc)| clip_rect_count(gc)).sum();
+        if total + extra > MAX_TOTAL_CLIP_RECTS {
+            return Err(XError::new(BAD_ALLOC, id));
+        }
+        Ok(())
+    }
+
     fn check_colormap(&self, id: Xid) -> XResult {
         if id == DEFAULT_COLORMAP || self.colormaps.contains_key(&id) {
             Ok(())
@@ -517,6 +558,11 @@ impl Server {
         if let Some(w) = self.windows.get_mut(&id) {
             w.image.as_mut().ok_or(XError::new(BAD_MATCH, id))
         } else if let Some(p) = self.pixmaps.get_mut(&id) {
+            // Si el contenido está compartido (es mosaico de un GC o fondo
+            // de una ventana), pintar en él lo duplica: tiene que caber.
+            if Arc::strong_count(&p.image) > 1 && !self.budget.has_room(p.image.pixels()) {
+                return Err(XError::new(BAD_ALLOC, id));
+            }
             Ok(Arc::make_mut(&mut p.image))
         } else {
             Err(XError::new(BAD_DRAWABLE, id))
@@ -552,8 +598,21 @@ impl Server {
         self.paint_with(drawable, &gc, op)
     }
 
+    /// Límites del búfer real de un *drawable* (puede ser menor que la
+    /// ventana si esta era desmesurada).
+    fn buffer_bounds(&self, id: Xid) -> Rect {
+        if let Some(w) = self.windows.get(&id) {
+            w.image.as_ref().map_or(Rect::EMPTY, |img| img.bounds())
+        } else if let Some(p) = self.pixmaps.get(&id) {
+            p.image.bounds()
+        } else {
+            Rect::EMPTY
+        }
+    }
+
     /// Píxeles de una zona de un *drawable* (0 fuera de sus límites). Las
-    /// ventanas con hijas visibles se leen ya compuestas.
+    /// ventanas con hijas visibles se leen ya compuestas. Quien llama acota
+    /// el tamaño de la zona.
     fn read_pixels(&self, id: Xid, r: Rect, with_children: bool) -> XResult<Vec<u32>> {
         if let Some(w) = self.windows.get(&id) {
             let img = w.image.as_ref().ok_or(XError::new(BAD_MATCH, id))?;
@@ -592,19 +651,34 @@ impl Server {
             return Err(XError::new(BAD_VALUE, plane));
         }
         let area = Rect::new(sx, sy, w, h);
-        let mut block = self.read_pixels(src, area, gc.subwindow_mode == 1)?;
-        if opcode == 63 {
-            for p in &mut block {
-                *p = if *p & plane != 0 {
-                    gc.foreground
-                } else {
-                    gc.background
-                };
-            }
-        }
-        // Parte del origen que existe de verdad, en coordenadas del bloque.
+        // Parte del origen que existe de verdad, en coordenadas relativas a
+        // la zona pedida.
         let valid = area.intersect(&src_bounds).translate(-sx, -sy);
-        self.paint_with(dst, &gc, |p, _| p.blit(dx, dy, w, &block, valid))?;
+        // Solo se lee lo que acabará en el destino: un cliente puede pedir
+        // 65535×65535 y no por eso se reservan 16 GB.
+        let wanted = valid
+            .translate(dx, dy)
+            .intersect(&dst_bounds)
+            .intersect(&self.buffer_bounds(dst))
+            .translate(sx - dx, sy - dy)
+            .intersect(&self.buffer_bounds(src));
+        if !wanted.is_empty() {
+            let mut block = self.read_pixels(src, wanted, gc.subwindow_mode == 1)?;
+            if opcode == 63 {
+                for p in &mut block {
+                    *p = if *p & plane != 0 {
+                        gc.foreground
+                    } else {
+                        gc.background
+                    };
+                }
+            }
+            let (bx, by) = (wanted.x0 - sx + dx, wanted.y0 - sy + dy);
+            let whole = Rect::new(0, 0, wanted.width(), wanted.height());
+            self.paint_with(dst, &gc, |p, _| {
+                p.blit(bx, by, wanted.width(), &block, whole)
+            })?;
+        }
         if !gc.graphics_exposures {
             return Ok(());
         }
@@ -651,6 +725,18 @@ impl Server {
         let dst_depth = self.drawable_depth(drawable)?;
         let gc = self.gc(gc)?;
         let short = XError::new(BAD_LENGTH, 0);
+        if w * h > MAX_IMAGE_REQUEST_PIXELS {
+            return Err(XError::new(BAD_ALLOC, drawable));
+        }
+        // Antes de reservar nada: los datos que dice traer, ¿los trae?
+        let needed = match (format, depth) {
+            (0, _) | (2, 1) => row_bytes(w + left_pad, 1) * h,
+            (1, _) => row_bytes(w + left_pad, 1) * h * depth as usize,
+            _ => w * h * 4,
+        };
+        if data.len() < needed {
+            return Err(short);
+        }
         let block = match format {
             // XYBitmap: un plano que se pinta con primer plano y fondo.
             0 => {
@@ -712,30 +798,34 @@ impl Server {
         if !matches!(format, 1 | 2) {
             return Err(XError::new(BAD_VALUE, format as u32));
         }
+        // La respuesta lleva w×h píxeles: se acota antes de reservarla.
+        if w * h > MAX_IMAGE_REQUEST_PIXELS {
+            return Err(XError::new(BAD_ALLOC, drawable));
+        }
         let area = Rect::new(x, y, w as i32, h as i32);
         if area.intersect(&self.drawable_bounds(drawable)?) != area && !is_window {
             return Err(XError::new(BAD_MATCH, drawable));
         }
         let block = self.read_pixels(drawable, area, true)?;
-        let mut data = Vec::new();
+        // Los datos se escriben directamente en la respuesta, sin copias
+        // intermedias (pueden ser decenas de megas).
+        let mut out = self.reply(c, depth);
+        out.u32(if is_window { ROOT_VISUAL } else { 0 }).zeros(20);
         if format == 2 && depth > 1 {
-            data.reserve(block.len() * 4);
+            out.buf.reserve(block.len() * 4);
             for p in &block {
-                data.extend_from_slice(&(p & plane_mask).to_le_bytes());
+                out.buf.extend_from_slice(&(p & plane_mask).to_le_bytes());
             }
         } else if format == 2 {
-            encode_bitmap(&block, w, h, 1 & plane_mask, &mut data);
+            encode_bitmap(&block, w, h, 1 & plane_mask, &mut out.buf);
         } else {
             for plane in (0..depth as u32).rev() {
                 if plane_mask & (1 << plane) != 0 {
-                    encode_bitmap(&block, w, h, 1 << plane, &mut data);
+                    encode_bitmap(&block, w, h, 1 << plane, &mut out.buf);
                 }
             }
         }
-        let mut out = self.reply(c, depth);
-        out.u32(if is_window { ROOT_VISUAL } else { 0 })
-            .zeros(20)
-            .bytes(&data);
+        drop(block);
         self.send_reply(c, out);
         Ok(())
     }
@@ -763,16 +853,17 @@ impl Server {
         let core = &font.core;
         let x_height = core.info('x' as u32).ascent.max(1) as u32;
         let cap_height = core.info('X' as u32).ascent.max(1) as u32;
-        let pixel = (core.ascent + core.descent) as u32;
+        let pixel = (core.ascent as i32 + core.descent as i32).max(1) as u32;
+        // (Si ya no caben más átomos, la propiedad FONT se queda sin valor.)
         let props = [
-            (A_FONT, self.atoms.intern(&font.name)),
-            (self.atoms.intern("PIXEL_SIZE"), pixel),
-            (59, pixel * 10),                       // POINT_SIZE
-            (57, core.max_bounds.width as u32),     // QUAD_WIDTH
-            (56, x_height),                         // X_HEIGHT
-            (66, cap_height),                       // CAP_HEIGHT
-            (51, (core.descent as u32 / 2).max(1)), // UNDERLINE_POSITION
-            (52, 1),                                // UNDERLINE_THICKNESS
+            (A_FONT, self.atoms.try_intern(&font.name).unwrap_or(0)),
+            (self.atoms.try_intern("PIXEL_SIZE").unwrap_or(0), pixel),
+            (59, pixel * 10),                              // POINT_SIZE
+            (57, core.max_bounds.width as u32),            // QUAD_WIDTH
+            (56, x_height),                                // X_HEIGHT
+            (66, cap_height),                              // CAP_HEIGHT
+            (51, (core.descent.max(0) as u32 / 2).max(1)), // UNDERLINE_POSITION
+            (52, 1),                                       // UNDERLINE_THICKNESS
         ];
         let (max_byte1, max_char) = if core.two_byte() {
             ((core.last >> 8) as u8, 255)
@@ -812,7 +903,8 @@ impl Server {
             if !info.exists() {
                 continue;
             }
-            let (l, r) = (width + info.lbearing as i32, width + info.rbearing as i32);
+            let l = width.saturating_add(info.lbearing as i32);
+            let r = width.saturating_add(info.rbearing as i32);
             if first {
                 (left, right, first) = (l, r, false);
             }
@@ -820,7 +912,7 @@ impl Server {
             right = right.max(r);
             ascent = ascent.max(info.ascent as i32);
             descent = descent.max(info.descent as i32);
-            width += info.width as i32;
+            width = width.saturating_add(info.width as i32);
         }
         let mut w = self.reply(c, 0);
         w.i16(core.ascent)
@@ -858,6 +950,7 @@ impl Server {
             let font = self.gc_font(&gc);
             let core = font.core.clone();
             let width: i32 = codes.iter().map(|c| core.info(*c).width as i32).sum();
+            // (ImageText lleva como mucho 255 caracteres: no desborda.)
             let (fg, bg) = (gc.foreground, gc.background);
             return self.paint_with(drawable, &gc, |p, _| {
                 p.solid_copy(bg);
@@ -896,10 +989,17 @@ impl Server {
         self.paint_with(drawable, &gc, |p, _| {
             let mut pen = x;
             for (font, delta, codes) in &runs {
-                pen += delta;
-                pen += p.text(&font.core, pen, y, codes);
+                pen = pen.saturating_add(*delta);
+                pen = pen.saturating_add(p.text(&font.core, pen, y, codes));
             }
         })
+    }
+}
+
+fn clip_rect_count(gc: &Gc) -> usize {
+    match &gc.clip {
+        Clip::Rects(rects) => rects.len(),
+        _ => 0,
     }
 }
 

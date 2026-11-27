@@ -3,11 +3,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use tokio::sync::{Notify, mpsc};
 
-use super::draw::{Gc, Image, Rect};
+use super::draw::{Budget, Gc, Image, MAX_TOTAL_PIXELS, Rect};
 use super::font::Font;
 use super::keymap::Keymap;
 use super::proto::*;
@@ -25,6 +26,25 @@ pub const SERVER_WINDOW: Xid = 0x103;
 /// Bits de identificador que cada cliente puede usar a su gusto.
 pub const RESOURCE_MASK: u32 = 0x001f_ffff;
 pub const MAX_CLIENTS: u32 = 255;
+
+// Topes frente a clientes abusivos (los clientes X son programas de otros
+// equipos: entrada no fiable). Al superarlos la petición recibe `BadAlloc`.
+/// Ventanas anidadas unas dentro de otras: acota la recursión del árbol.
+pub const MAX_TREE_DEPTH: usize = 200;
+/// Recursos (ventanas, pixmaps, GC, fuentes, cursores, mapas de color).
+pub const MAX_RESOURCES: usize = 400_000;
+/// Fuentes abiertas a la vez (cada una guarda sus métricas).
+pub const MAX_FONTS: usize = 512;
+pub const MAX_ATOMS: usize = 100_000;
+/// Bytes de todas las propiedades de todas las ventanas.
+pub const MAX_PROPERTY_BYTES: usize = 256 * 1024 * 1024;
+/// Texto de portapapeles más largo que se acepta de un cliente.
+pub const MAX_CLIPBOARD: usize = 1024 * 1024;
+/// Salida pendiente de un cliente a partir de la cual se deja de atender
+/// sus peticiones hasta que la lea…
+pub const OUTPUT_SOFT_LIMIT: usize = 1024 * 1024;
+/// …y a partir de la cual se le expulsa (no lee y le siguen llegando cosas).
+pub const OUTPUT_HARD_LIMIT: usize = 192 * 1024 * 1024;
 
 // Átomos predefinidos que usa el propio servidor.
 pub const A_PRIMARY: Xid = 1;
@@ -134,6 +154,14 @@ impl Atoms {
         id
     }
 
+    /// Como [`Atoms::intern`], pero sin pasar del tope de átomos.
+    pub fn try_intern(&mut self, name: &str) -> Option<Xid> {
+        if self.names.len() >= MAX_ATOMS && !self.by_name.contains_key(name) {
+            return None;
+        }
+        Some(self.intern(name))
+    }
+
     pub fn find(&self, name: &str) -> Option<Xid> {
         self.by_name.get(name).copied()
     }
@@ -152,6 +180,7 @@ impl Atoms {
 /// Átomos que el servidor necesita tener a mano.
 pub struct KnownAtoms {
     pub wm_protocols: Xid,
+    pub wm_state: Xid,
     pub wm_delete_window: Xid,
     pub wm_take_focus: Xid,
     pub clipboard: Xid,
@@ -166,8 +195,18 @@ pub struct KnownAtoms {
     pub transfer: Xid,
 }
 
+/// Lo que comparten el estado y las tareas de un cliente.
+#[derive(Clone, Default)]
+pub struct ClientLink {
+    /// Despierta a la tarea del cliente para que cierre la conexión.
+    pub kill: Arc<Notify>,
+    /// Bytes entregados a la tarea de escritura y aún no escritos.
+    pub queued: Arc<AtomicUsize>,
+    /// La tarea de escritura avisa aquí cada vez que vacía algo.
+    pub drained: Arc<Notify>,
+}
+
 pub struct Client {
-    pub id: ClientId,
     /// El cliente habla en *big-endian*.
     pub be: bool,
     /// Número de secuencia de la última petición procesada.
@@ -175,8 +214,7 @@ pub struct Client {
     /// Bytes pendientes de enviar (respuestas, eventos y errores, en orden).
     pub out: Vec<u8>,
     pub tx: mpsc::UnboundedSender<Vec<u8>>,
-    /// Despierta a la tarea del cliente para que cierre la conexión.
-    pub kill: Arc<Notify>,
+    pub link: ClientLink,
     pub big_requests: bool,
     /// Ventanas ajenas que deben sobrevivir a este cliente (`ChangeSaveSet`).
     pub save_set: Vec<Xid>,
@@ -355,6 +393,10 @@ pub struct Server {
     pub clients: HashMap<ClientId, Client>,
     pub windows: HashMap<Xid, Window>,
     pub pixmaps: HashMap<Xid, Pixmap>,
+    /// Presupuesto de memoria de imagen de ventanas y pixmaps.
+    pub budget: Arc<Budget>,
+    /// Bytes que ocupan ahora mismo todas las propiedades.
+    pub property_bytes: usize,
     pub gcs: HashMap<Xid, (ClientId, Arc<Gc>)>,
     pub fonts: HashMap<Xid, (ClientId, Font)>,
     pub cursors: HashMap<Xid, ClientId>,
@@ -390,10 +432,13 @@ pub struct Server {
     pub clipboard_from_client: Option<String>,
     /// Sincronizar también PRIMARY (lo seleccionado con el ratón).
     pub sync_primary: bool,
+    /// Ofrecer el XKEYBOARD mínimo que necesita xdotool (véase `xkb.rs`).
+    pub xkb_compat: bool,
     /// Avisos pendientes para la interfaz.
     pub desktop_events: Vec<DesktopEvent>,
-    /// Peticiones sin implementar ya anotadas (para no repetir el aviso).
-    pub unimplemented: Vec<u8>,
+    /// Solo para pruebas: la petición con este código entra en pánico.
+    #[cfg(test)]
+    pub panic_on_opcode: Option<u8>,
     start: Instant,
     next_client: ClientId,
 }
@@ -439,6 +484,7 @@ impl Server {
         let mut atoms = Atoms::new();
         let known = KnownAtoms {
             wm_protocols: atoms.intern("WM_PROTOCOLS"),
+            wm_state: atoms.intern("WM_STATE"),
             wm_delete_window: atoms.intern("WM_DELETE_WINDOW"),
             wm_take_focus: atoms.intern("WM_TAKE_FOCUS"),
             clipboard: atoms.intern("CLIPBOARD"),
@@ -457,6 +503,8 @@ impl Server {
             clients: HashMap::new(),
             windows: HashMap::new(),
             pixmaps: HashMap::new(),
+            budget: Budget::new(MAX_TOTAL_PIXELS),
+            property_bytes: 0,
             gcs: HashMap::new(),
             fonts: HashMap::new(),
             cursors: HashMap::new(),
@@ -483,8 +531,10 @@ impl Server {
             clipboard: None,
             clipboard_from_client: None,
             sync_primary: true,
+            xkb_compat: false,
             desktop_events: vec![],
-            unimplemented: vec![],
+            #[cfg(test)]
+            panic_on_opcode: None,
             start: Instant::now(),
             next_client: 1,
         };
@@ -492,7 +542,8 @@ impl Server {
         (root.w, root.h) = (width, height);
         root.mapped = true;
         root.bg = Background::Pixel(DESKTOP_COLOR);
-        let mut image = Image::new(width, height, 24);
+        let mut image = Image::budgeted(&server.budget, width, height, 24)
+            .unwrap_or_else(|| Image::new(width, height, 24));
         image.fill(image.bounds(), DESKTOP_COLOR);
         root.image = Some(image);
         server.windows.insert(ROOT, root);
@@ -556,7 +607,7 @@ impl Server {
         &mut self,
         be: bool,
         tx: mpsc::UnboundedSender<Vec<u8>>,
-        kill: Arc<Notify>,
+        link: ClientLink,
     ) -> Option<ClientId> {
         if self.clients.len() as u32 >= MAX_CLIENTS {
             return None;
@@ -570,12 +621,11 @@ impl Server {
         self.clients.insert(
             id,
             Client {
-                id,
                 be,
                 seq: 0,
                 out: vec![],
                 tx,
-                kill,
+                link,
                 big_requests: false,
                 save_set: vec![],
                 motion_hint_sent: false,
@@ -595,6 +645,15 @@ impl Server {
 
     /// Comprueba que un cliente puede crear un recurso con ese identificador.
     pub fn check_new_id(&self, client: ClientId, id: Xid) -> XResult {
+        let total = self.windows.len()
+            + self.pixmaps.len()
+            + self.gcs.len()
+            + self.fonts.len()
+            + self.cursors.len()
+            + self.colormaps.len();
+        if total >= MAX_RESOURCES {
+            return Err(XError::new(BAD_ALLOC, id));
+        }
         let used = self.windows.contains_key(&id)
             || self.pixmaps.contains_key(&id)
             || self.gcs.contains_key(&id)
@@ -608,11 +667,21 @@ impl Server {
     }
 
     /// Envía los bytes pendientes de cada cliente a su tarea de escritura.
+    /// A quien acumula demasiado sin leer se le expulsa.
     pub fn flush(&mut self) {
-        for client in self.clients.values_mut() {
-            if !client.out.is_empty() {
-                let _ = client.tx.send(std::mem::take(&mut client.out));
+        let mut stuck = vec![];
+        for (id, client) in &mut self.clients {
+            if client.out.is_empty() {
+                continue;
             }
+            let bytes = std::mem::take(&mut client.out);
+            let queued = client.link.queued.fetch_add(bytes.len(), Ordering::Relaxed) + bytes.len();
+            if queued > OUTPUT_HARD_LIMIT || client.tx.send(bytes).is_err() {
+                stuck.push(*id);
+            }
+        }
+        for id in stuck {
+            self.remove_client(id);
         }
     }
 
@@ -621,14 +690,16 @@ impl Server {
         let Some(client) = self.clients.remove(&id) else {
             return;
         };
-        client.kill.notify_one();
+        client.link.kill.notify_one();
         // Las ventanas ajenas de su conjunto de salvación vuelven a la raíz
         // (así sobreviven a la muerte de un gestor de ventanas).
         for win in client.save_set {
-            if self.windows.contains_key(&win) && Self::owner_of(win) != id {
+            let Some((parent, bw)) = self.windows.get(&win).map(|w| (w.parent, w.bw as i32)) else {
+                continue;
+            };
+            if Self::owner_of(win) != id {
                 let (ax, ay) = self.abs_origin(win);
-                let bw = self.windows[&win].bw as i32;
-                if self.windows[&win].parent != ROOT {
+                if parent != ROOT {
                     let _ = self.reparent_window(win, ROOT, ax - bw, ay - bw);
                 }
                 self.map_window(0, win);
@@ -724,49 +795,31 @@ impl Server {
 
     /// Origen del interior de una ventana en coordenadas de pantalla.
     pub fn abs_origin(&self, id: Xid) -> (i32, i32) {
-        let (mut x, mut y) = (0, 0);
-        let mut cur = id;
-        while let Some(w) = self.windows.get(&cur) {
+        let (mut x, mut y) = (0i32, 0i32);
+        for cur in self.ancestry(id) {
             if cur == ROOT {
                 break;
             }
-            x += w.x + w.bw as i32;
-            y += w.y + w.bw as i32;
-            cur = w.parent;
+            if let Some(w) = self.windows.get(&cur) {
+                x = x.saturating_add(w.x + w.bw as i32);
+                y = y.saturating_add(w.y + w.bw as i32);
+            }
         }
         (x, y)
     }
 
-    /// Mapeada ella y todas sus antecesoras.
+    /// Mapeada ella y todas sus antecesoras, hasta la raíz.
     pub fn viewable(&self, id: Xid) -> bool {
-        let mut cur = id;
-        loop {
-            let Some(w) = self.windows.get(&cur) else {
-                return false;
-            };
-            if !w.mapped {
-                return false;
-            }
-            if cur == ROOT {
-                return true;
-            }
-            cur = w.parent;
-        }
+        let chain = self.ancestry(id);
+        chain.last() == Some(&ROOT)
+            && chain
+                .iter()
+                .all(|w| self.windows.get(w).is_some_and(|w| w.mapped))
     }
 
     /// `a` es antecesora estricta de `b`.
     pub fn is_ancestor(&self, a: Xid, b: Xid) -> bool {
-        let mut cur = b;
-        while let Some(w) = self.windows.get(&cur) {
-            if w.parent == a {
-                return true;
-            }
-            if cur == ROOT {
-                return false;
-            }
-            cur = w.parent;
-        }
-        false
+        a != b && self.ancestry(b).contains(&a)
     }
 
     /// Cadena de ventanas desde `id` hasta la raíz (ambas incluidas).
@@ -775,12 +828,33 @@ impl Server {
         let mut cur = id;
         while let Some(w) = self.windows.get(&cur) {
             out.push(cur);
-            if cur == ROOT {
+            // El árbol tiene la profundidad acotada; el tope evita además
+            // dar vueltas si alguna vez quedara un ciclo.
+            if cur == ROOT || out.len() > MAX_TREE_DEPTH + 2 {
                 break;
             }
             cur = w.parent;
         }
         out
+    }
+
+    /// Niveles que hay por debajo de una ventana (0 si no tiene hijas).
+    pub fn subtree_height(&self, id: Xid) -> usize {
+        let mut height = 0;
+        let mut level = vec![id];
+        while height <= MAX_TREE_DEPTH + 2 {
+            let next: Vec<Xid> = level
+                .iter()
+                .filter_map(|w| self.windows.get(w))
+                .flat_map(|w| w.children.iter().copied())
+                .collect();
+            if next.is_empty() {
+                break;
+            }
+            height += 1;
+            level = next;
+        }
+        height
     }
 
     /// Ventana de primer nivel (hija de la raíz) que contiene a `id`.
@@ -791,17 +865,11 @@ impl Server {
 
     /// Hija de `parent` que es `descendant` o la contiene (0 si no hay).
     pub fn child_towards(&self, parent: Xid, descendant: Xid) -> Xid {
-        let mut cur = descendant;
-        while let Some(w) = self.windows.get(&cur) {
-            if w.parent == parent {
-                return cur;
-            }
-            if cur == ROOT {
-                break;
-            }
-            cur = w.parent;
+        let chain = self.ancestry(descendant);
+        match chain.iter().position(|w| *w == parent) {
+            Some(i) if i > 0 => chain[i - 1],
+            _ => 0,
         }
-        0
     }
 
     /// Ventana visible más profunda que contiene el punto de pantalla.
@@ -809,9 +877,13 @@ impl Server {
         let mut cur = ROOT;
         let (mut ox, mut oy) = (0, 0);
         'descend: loop {
-            let w = &self.windows[&cur];
+            let Some(w) = self.windows.get(&cur) else {
+                return ROOT;
+            };
             for child in w.children.iter().rev() {
-                let c = &self.windows[child];
+                let Some(c) = self.windows.get(child) else {
+                    continue;
+                };
                 if c.mapped && c.outer().translate(ox, oy).contains(x, y) {
                     ox += c.x + c.bw as i32;
                     oy += c.y + c.bw as i32;
@@ -852,9 +924,8 @@ impl Server {
     /// Zona visible (en pantalla) de un rectángulo del interior de una
     /// ventana: recortada por todas sus antecesoras. Vacía si no se ve.
     pub fn visible_rect(&self, id: Xid, r: Rect) -> Rect {
-        let mut cur = id;
         let mut r = r;
-        loop {
+        for cur in self.ancestry(id) {
             let Some(w) = self.windows.get(&cur) else {
                 return Rect::EMPTY;
             };
@@ -866,8 +937,8 @@ impl Server {
                 return r;
             }
             r = r.translate(w.x + w.bw as i32, w.y + w.bw as i32);
-            cur = w.parent;
         }
+        Rect::EMPTY
     }
 
     /// Anota como dañada una zona del interior de una ventana.
@@ -908,9 +979,24 @@ impl Server {
     }
 
     fn paint_tree(&self, id: Xid, ox: i32, oy: i32, clip: Rect, target: &mut Target) {
+        self.paint_level(id, ox, oy, clip, target, 0);
+    }
+
+    fn paint_level(
+        &self,
+        id: Xid,
+        ox: i32,
+        oy: i32,
+        clip: Rect,
+        target: &mut Target,
+        level: usize,
+    ) {
         let Some(w) = self.windows.get(&id) else {
             return;
         };
+        if level > MAX_TREE_DEPTH + 2 {
+            return;
+        }
         let inner = Rect::new(ox, oy, w.w as i32, w.h as i32);
         if w.bw > 0 && !w.input_only {
             let bw = w.bw as i32;
@@ -942,7 +1028,7 @@ impl Server {
             if id == ROOT && self.decorated(c) {
                 self.paint_decoration(c, visible, target);
             }
-            self.paint_tree(*child, cx, cy, visible, target);
+            self.paint_level(*child, cx, cy, visible, target, level + 1);
         }
     }
 
@@ -951,19 +1037,18 @@ impl Server {
     /// Fondo efectivo de una ventana y origen de su mosaico (resuelve
     /// `ParentRelative` subiendo por el árbol).
     fn effective_background(&self, id: Xid) -> (Background, i32, i32) {
-        let (mut ox, mut oy) = (0, 0);
-        let mut cur = id;
-        loop {
+        let (mut ox, mut oy) = (0i32, 0i32);
+        for cur in self.ancestry(id) {
             let Some(w) = self.windows.get(&cur) else {
-                return (Background::None, 0, 0);
+                break;
             };
             if w.bg != Background::ParentRelative || cur == ROOT {
                 return (w.bg.clone(), ox, oy);
             }
-            ox -= w.x + w.bw as i32;
-            oy -= w.y + w.bw as i32;
-            cur = w.parent;
+            ox = ox.saturating_sub(w.x + w.bw as i32);
+            oy = oy.saturating_sub(w.y + w.bw as i32);
         }
+        (Background::None, 0, 0)
     }
 
     /// Pinta el fondo en una zona del búfer de la ventana.
@@ -1010,22 +1095,23 @@ impl Server {
 
     /// Expone entera una ventana recién visible y todas sus hijas mapeadas.
     pub fn expose_tree(&mut self, id: Xid) {
-        let Some(w) = self.windows.get(&id) else {
-            return;
-        };
-        if !w.mapped {
-            return;
-        }
-        let whole = Rect::new(0, 0, w.w as i32, w.h as i32);
-        let children = w.children.clone();
-        if !w.input_only {
-            // «Sin obstrucción»: el contenido se guarda siempre entero.
-            let ev = Ev::new(VISIBILITY_NOTIFY, 0).u32(id).u8(0).done();
-            self.deliver(id, M_VISIBILITY_CHANGE, ev);
-            self.expose(id, &[whole]);
-        }
-        for child in children {
-            self.expose_tree(child);
+        // Sin recursión: la lista de pendientes hace de pila.
+        let mut pending = vec![id];
+        while let Some(id) = pending.pop() {
+            let Some(w) = self.windows.get(&id) else {
+                continue;
+            };
+            if !w.mapped {
+                continue;
+            }
+            let whole = Rect::new(0, 0, w.w as i32, w.h as i32);
+            pending.extend(w.children.iter().rev());
+            if !w.input_only {
+                // «Sin obstrucción»: el contenido se guarda siempre entero.
+                let ev = Ev::new(VISIBILITY_NOTIFY, 0).u32(id).u8(0).done();
+                self.deliver(id, M_VISIBILITY_CHANGE, ev);
+                self.expose(id, &[whole]);
+            }
         }
     }
 
@@ -1098,6 +1184,7 @@ impl Server {
                 .u8(from_configure as u8)
                 .done()
         });
+        self.wm_after_unmap(id);
         self.after_hidden(id);
     }
 
@@ -1141,26 +1228,37 @@ impl Server {
         self.after_hidden(id);
     }
 
+    /// Destruye una ventana y sus descendientes: primero las de más abajo.
     fn destroy_recursive(&mut self, id: Xid) {
-        let children = self.windows.get(&id).map_or(vec![], |w| w.children.clone());
-        for child in children {
-            self.destroy_recursive(child);
+        // Recorrido en preorden sin recursión; al revés, las hijas van antes
+        // que sus madres.
+        let mut order = vec![];
+        let mut pending = vec![id];
+        while let Some(cur) = pending.pop() {
+            order.push(cur);
+            if let Some(w) = self.windows.get(&cur) {
+                pending.extend(w.children.iter().copied());
+            }
         }
-        self.notify_structure(id, |event| {
-            Ev::new(DESTROY_NOTIFY, 0).u32(event).u32(id).done()
-        });
-        let Some(w) = self.windows.remove(&id) else {
-            return;
-        };
-        if let Some(parent) = self.windows.get_mut(&w.parent) {
-            parent.children.retain(|c| *c != id);
-        }
-        self.selections.retain(|_, s| s.window != id);
-        for client in self.clients.values_mut() {
-            client.save_set.retain(|s| *s != id);
-        }
-        if self.pointer_window == id {
-            self.pointer_window = ROOT;
+        for id in order.into_iter().rev() {
+            self.notify_structure(id, |event| {
+                Ev::new(DESTROY_NOTIFY, 0).u32(event).u32(id).done()
+            });
+            let Some(w) = self.windows.remove(&id) else {
+                continue;
+            };
+            let bytes: usize = w.props.iter().map(|p| p.data.len()).sum();
+            self.property_bytes = self.property_bytes.saturating_sub(bytes);
+            if let Some(parent) = self.windows.get_mut(&w.parent) {
+                parent.children.retain(|c| *c != id);
+            }
+            self.selections.retain(|_, s| s.window != id);
+            for client in self.clients.values_mut() {
+                client.save_set.retain(|s| *s != id);
+            }
+            if self.pointer_window == id {
+                self.pointer_window = ROOT;
+            }
         }
     }
 
@@ -1178,15 +1276,21 @@ impl Server {
         let (old_w, old_h) = (win.w as i32, win.h as i32);
         let gravity = win.bit_gravity;
         self.damage_frame(id);
-        let win = self.windows.get_mut(&id).expect("ventana");
+        let Some(win) = self.windows.get_mut(&id) else {
+            return;
+        };
         (win.x, win.y, win.bw) = (x, y, bw);
         if resized {
             (win.w, win.h) = (w, h);
             win.title_cache = None;
-            if let Some(img) = &mut win.image {
-                // Gravedad de bits «noroeste»: el contenido se queda donde
-                // estaba. Con cualquier otra se redibuja todo.
-                *img = img.resized(w, h, 0, 0);
+            // Gravedad de bits «noroeste»: el contenido se queda donde
+            // estaba; con cualquier otra se redibuja todo. Si el búfer nuevo
+            // no cabe en el presupuesto de memoria se conserva el antiguo
+            // (lo que quede fuera, sencillamente, no se pinta).
+            if let Some(img) = &mut win.image
+                && let Some(bigger) = img.resized(w, h, 0, 0)
+            {
+                *img = bigger;
             }
         }
         self.damage_frame(id);
@@ -1267,6 +1371,9 @@ impl Server {
             return Err(XError::new(BAD_MATCH, id));
         }
         self.win(new_parent)?;
+        if self.ancestry(new_parent).len() + self.subtree_height(id) >= MAX_TREE_DEPTH {
+            return Err(XError::new(BAD_ALLOC, id));
+        }
         let was_mapped = self.win(id)?.mapped;
         self.unmap_window(id, false);
         let old_parent = self.win(id)?.parent;
@@ -1308,10 +1415,15 @@ impl Server {
         let Some(w) = self.windows.get_mut(&window) else {
             return;
         };
-        match w.props.iter_mut().find(|p| p.name == name) {
-            Some(existing) => *existing = prop,
-            None => w.props.push(prop),
-        }
+        let added = prop.data.len();
+        let removed = match w.props.iter_mut().find(|p| p.name == name) {
+            Some(existing) => std::mem::replace(existing, prop).data.len(),
+            None => {
+                w.props.push(prop);
+                0
+            }
+        };
+        self.property_bytes = (self.property_bytes + added).saturating_sub(removed);
         self.property_changed(window, name, false);
     }
 
@@ -1319,11 +1431,12 @@ impl Server {
         let Some(w) = self.windows.get_mut(&window) else {
             return;
         };
-        let before = w.props.len();
-        w.props.retain(|p| p.name != name);
-        if w.props.len() != before {
-            self.property_changed(window, name, true);
-        }
+        let Some(pos) = w.props.iter().position(|p| p.name == name) else {
+            return;
+        };
+        let removed = w.props.remove(pos).data.len();
+        self.property_bytes = self.property_bytes.saturating_sub(removed);
+        self.property_changed(window, name, true);
     }
 
     pub fn property_changed(&mut self, window: Xid, name: Xid, deleted: bool) {
@@ -1344,16 +1457,18 @@ impl Server {
         }
     }
 
-    /// Texto de una propiedad de cadena (Latin-1 o UTF-8).
-    pub fn text_property(&self, window: Xid, name: Xid) -> Option<String> {
+    /// Texto de una propiedad de cadena (Latin-1 o UTF-8), como mucho
+    /// `max` bytes: un título no necesita más, por larga que sea la propiedad.
+    pub fn text_property(&self, window: Xid, name: Xid, max: usize) -> Option<String> {
         let prop = self.windows.get(&window)?.prop(name)?;
         if prop.format != 8 {
             return None;
         }
+        let data = &prop.data[..prop.data.len().min(max)];
         Some(if prop.kind == self.known.utf8_string {
-            String::from_utf8_lossy(&prop.data).into_owned()
+            String::from_utf8_lossy(data).into_owned()
         } else {
-            prop.data.iter().map(|b| *b as char).collect()
+            data.iter().map(|b| *b as char).collect()
         })
     }
 
@@ -1547,6 +1662,7 @@ impl Server {
         let Some(text) = self.clipboard.clone() else {
             return 0;
         };
+        let latin1 = |c: char| (c as u32) < 256;
         let property = if property == 0 { target } else { property };
         let k = &self.known;
         let prop = if target == k.targets {
@@ -1557,21 +1673,23 @@ impl Server {
                 format: 32,
                 data: targets.iter().flat_map(|a| a.to_le_bytes()).collect(),
             }
-        } else if target == k.utf8_string || target == k.text {
+        } else if target == k.utf8_string || (target == k.text && !text.chars().all(latin1)) {
             Property {
                 name: property,
                 kind: k.utf8_string,
                 format: 8,
                 data: text.into_bytes(),
             }
-        } else if target == A_STRING {
+        } else if target == A_STRING || target == k.text {
+            // (TEXT deja elegir al dueño: Latin-1 si cabe, que lo entiende
+            // cualquier cliente antiguo.)
             Property {
                 name: property,
                 kind: A_STRING,
                 format: 8,
                 data: text
                     .chars()
-                    .map(|c| if (c as u32) < 256 { c as u8 } else { b'?' })
+                    .map(|c| if latin1(c) { c as u8 } else { b'?' })
                     .collect(),
             }
         } else if target == k.timestamp {
@@ -1608,7 +1726,7 @@ impl Server {
         };
         // Borrar la propiedad es el acuse de recibo para el dueño.
         self.delete_property(SERVER_WINDOW, property);
-        if prop.format != 8 || prop.kind == self.known.incr {
+        if prop.format != 8 || prop.kind == self.known.incr || prop.data.len() > MAX_CLIPBOARD {
             return;
         }
         let text = if prop.kind == A_STRING {
@@ -1634,7 +1752,11 @@ impl Server {
         if let Some(root) = self.windows.get_mut(&ROOT) {
             (root.w, root.h) = (width, height);
             if let Some(img) = &mut root.image {
-                *img = img.resized(width, height, 0, 0);
+                // La raíz no puede quedarse sin búfer: si no cabe en el
+                // presupuesto, va por fuera de él.
+                *img = img
+                    .resized(width, height, 0, 0)
+                    .unwrap_or_else(|| Image::new(width, height, 24));
             }
         }
         self.resized = true;
@@ -1644,6 +1766,79 @@ impl Server {
         self.damage_screen(whole);
         self.notify_configure(ROOT);
         self.wm_keep_on_screen();
+    }
+}
+
+impl Server {
+    /// Deja el estado coherente después de un pánico a medio procesar una
+    /// petición: enlaces del árbol, capturas, foco y selecciones que apunten
+    /// a ventanas que ya no existen. Después se recompone toda la pantalla.
+    pub fn repair(&mut self) {
+        let ids: Vec<Xid> = self.windows.keys().copied().collect();
+        // Cada ventana, hija de una madre que existe y que la tiene apuntada.
+        let mut orphans = vec![];
+        for id in &ids {
+            let Some(parent) = self.windows.get(id).map(|w| w.parent) else {
+                continue;
+            };
+            if *id == ROOT || *id == SERVER_WINDOW {
+                continue;
+            }
+            match self.windows.get_mut(&parent) {
+                Some(p) if !p.children.contains(id) => p.children.push(*id),
+                Some(_) => {}
+                None => orphans.push(*id),
+            }
+        }
+        for id in orphans {
+            self.windows.remove(&id);
+        }
+        let existing: std::collections::HashSet<Xid> = self.windows.keys().copied().collect();
+        let parents: HashMap<Xid, Xid> =
+            self.windows.iter().map(|(id, w)| (*id, w.parent)).collect();
+        for (id, w) in &mut self.windows {
+            let mut seen = std::collections::HashSet::new();
+            w.children
+                .retain(|c| parents.get(c) == Some(id) && seen.insert(*c));
+        }
+        self.property_bytes = self
+            .windows
+            .values()
+            .flat_map(|w| &w.props)
+            .map(|p| p.data.len())
+            .sum();
+        if !existing.contains(&self.pointer_window) {
+            self.pointer_window = ROOT;
+        }
+        if self
+            .grab
+            .as_ref()
+            .is_some_and(|g| !existing.contains(&g.window))
+        {
+            self.grab = None;
+        }
+        if self
+            .keyboard_grab
+            .as_ref()
+            .is_some_and(|g| !existing.contains(&g.window))
+        {
+            self.keyboard_grab = None;
+        }
+        if let Focus::Window(f) = self.focus
+            && !existing.contains(&f)
+        {
+            self.focus = Focus::PointerRoot;
+        }
+        self.wm_drag = None;
+        self.selections.retain(|_, s| existing.contains(&s.window));
+        if self
+            .wm_client
+            .is_some_and(|c| !self.clients.contains_key(&c))
+        {
+            self.wm_client = None;
+        }
+        self.damage.clear();
+        self.damage_screen(self.screen_rect());
     }
 }
 

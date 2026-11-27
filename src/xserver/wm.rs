@@ -15,8 +15,8 @@ use std::sync::Arc;
 use super::draw::{Clip, Gc, Image, Painter, Rect};
 use super::proto::*;
 use super::server::{
-    A_WM_HINTS, A_WM_NAME, A_WM_NORMAL_HINTS, Focus, ROOT, SERVER_WINDOW, Server, Target, Window,
-    WmDrag,
+    A_WM_HINTS, A_WM_NAME, A_WM_NORMAL_HINTS, Focus, Property, ROOT, SERVER_WINDOW, Server, Target,
+    Window, WmDrag,
 };
 
 /// Alto de la barra de título.
@@ -27,6 +27,8 @@ pub const FRAME: i32 = 3;
 const CLOSE_SIZE: i32 = 16;
 /// Zona de las esquinas inferiores que estira en las dos direcciones.
 const CORNER: i32 = 18;
+/// Bytes del título que se llegan a mirar.
+const MAX_TITLE: usize = 512;
 
 const ACTIVE_COLOR: u32 = 0x2f6fb5;
 const INACTIVE_COLOR: u32 = 0x77808c;
@@ -82,8 +84,8 @@ impl Server {
 
     /// Título de una ventana: `_NET_WM_NAME` o, si no, `WM_NAME`.
     pub fn window_title(&self, id: Xid) -> String {
-        self.text_property(id, self.known.net_wm_name)
-            .or_else(|| self.text_property(id, A_WM_NAME))
+        self.text_property(id, self.known.net_wm_name, MAX_TITLE)
+            .or_else(|| self.text_property(id, A_WM_NAME, MAX_TITLE))
             .unwrap_or_default()
     }
 
@@ -236,11 +238,10 @@ impl Server {
         let (x, y, ww, wh, bw) = (w.x, w.y, w.w, w.h, w.bw);
         let hints = self.property_u32s(id, A_WM_NORMAL_HINTS);
         let flags = hints.first().copied().unwrap_or(0);
-        // USPosition, o una posición distinta del origen: se respeta, y se
-        // entiende como la esquina de la decoración.
+        // USPosition, o una posición distinta del origen: se respeta.
         let asked = flags & 1 != 0 || x != 0 || y != 0;
         let (mut nx, mut ny) = if asked {
-            (x + FRAME, y + TITLE_H)
+            (x, y)
         } else {
             let step = (self.cascade % 8) as i32 * 28;
             self.cascade += 1;
@@ -267,7 +268,31 @@ impl Server {
         if self.wm_client.is_some() || w.override_redirect || w.owner == 0 || w.input_only {
             return;
         }
+        // Como cualquier gestor de ventanas (ICCCM): la ventana gestionada
+        // lleva WM_STATE = «normal». Herramientas como xdotool o xprop lo
+        // usan para distinguir la ventana de la aplicación de sus hijas.
+        let wm_state = self.known.wm_state;
+        self.set_property(
+            id,
+            Property {
+                name: wm_state,
+                kind: wm_state,
+                format: 32,
+                data: [1u32, 0].iter().flat_map(|v| v.to_le_bytes()).collect(),
+            },
+        );
         self.wm_activate(id);
+    }
+
+    /// Una ventana de primer nivel se ha ocultado: deja de estar gestionada.
+    pub fn wm_after_unmap(&mut self, id: Xid) {
+        let managed = self
+            .windows
+            .get(&id)
+            .is_some_and(|w| w.parent == ROOT && !w.override_redirect);
+        if managed && self.wm_client.is_none() {
+            self.delete_property(id, self.known.wm_state);
+        }
     }
 
     /// Sube una ventana de primer nivel y le da el foco del teclado.
@@ -471,8 +496,9 @@ impl Server {
     /// (mínimo, máximo e incrementos, como las celdas de un terminal).
     fn constrain_size(&self, id: Xid, w: i32, h: i32) -> (i32, i32) {
         let hints = self.property_u32s(id, A_WM_NORMAL_HINTS);
-        let get = |i: usize| hints.get(i).copied().unwrap_or(0) as i32;
-        let flags = get(0);
+        let flags = hints.first().copied().unwrap_or(0);
+        // Los valores los pone el cliente: se acotan antes de hacer cuentas.
+        let get = |i: usize| hints.get(i).copied().unwrap_or(0).min(32_767) as i32;
         let (mut min_w, mut min_h) = (1, 1);
         if flags & 16 != 0 {
             (min_w, min_h) = (get(5).max(1), get(6).max(1));

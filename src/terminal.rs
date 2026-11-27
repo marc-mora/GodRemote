@@ -59,6 +59,17 @@ pub struct TermBackend {
 
 /// Lanza la shell local del sistema en un pseudo-terminal.
 pub fn spawn_local_shell(waker: Waker, cols: u16, rows: u16) -> Result<TermBackend> {
+    spawn_local_command("", waker, cols, rows)
+}
+
+/// Abre un terminal local con la shell indicada (programa y argumentos);
+/// con la orden vacía, la shell habitual del sistema.
+pub fn spawn_local_command(
+    command: &str,
+    waker: Waker,
+    cols: u16,
+    rows: u16,
+) -> Result<TermBackend> {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
     let size = PtySize {
@@ -68,7 +79,15 @@ pub fn spawn_local_shell(waker: Waker, cols: u16, rows: u16) -> Result<TermBacke
         pixel_height: 0,
     };
     let pair = native_pty_system().openpty(size)?;
-    let mut cmd = CommandBuilder::new_default_prog();
+    let parts = crate::shells::split_command(command);
+    let mut cmd = match parts.split_first() {
+        None => CommandBuilder::new_default_prog(),
+        Some((program, arguments)) => {
+            let mut cmd = CommandBuilder::new(program);
+            cmd.args(arguments);
+            cmd
+        }
+    };
     cmd.env("TERM", "xterm-256color");
     cmd.cwd(crate::paths::home_dir());
     let mut child = pair.slave.spawn_command(cmd)?;
@@ -1846,7 +1865,6 @@ mod tests {
         assert_eq!(indexed_color(1, &palette), palette.ansi[1]);
     }
 
-    #[cfg(unix)]
     /// Terminal conectado a una shell de mentira: devuelve lo que se le
     /// envía y deja inyectarle la salida de la «aplicación remota».
     fn fake_terminal() -> (
@@ -2180,7 +2198,14 @@ mod tests {
         loop {
             view.poll();
             if view.state == ConnState::Connected && !sent {
-                view.send(b"echo god$((40+2))remote\r".to_vec());
+                // Lo tecleado y su resultado difieren, para no confundir el
+                // eco de la orden con su salida («^» es el escape de cmd).
+                let command: &[u8] = if cfg!(windows) {
+                    b"echo god^42remote\r"
+                } else {
+                    b"echo god$((40+2))remote\r"
+                };
+                view.send(command.to_vec());
                 sent = true;
             }
             if view.contents().contains("god42remote") {

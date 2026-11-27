@@ -7,7 +7,9 @@
 //!
 //! Implementa el protocolo básico (*core*) de X11 y la extensión
 //! BIG-REQUESTS. No hay RENDER, XKB, SHAPE, MIT-SHM, XInput ni GLX: las
-//! aplicaciones Xlib/Xt/Athena clásicas se apañan sin ellas.
+//! aplicaciones Xlib/Xt/Athena clásicas se apañan sin ellas. (Hay un
+//! XKEYBOARD mínimo, desactivado por defecto, solo para poder usar `xdotool`:
+//! véase [`XServer::set_xkb_compat`].)
 //!
 //! Organización:
 //!
@@ -18,6 +20,23 @@
 //! - cada ventana y cada pixmap tienen su propio búfer; la pantalla se
 //!   **compone** pintando el árbol sobre el [`SharedFrame`], y solo las zonas
 //!   que cambiaron en cada lote.
+//!
+//! Los clientes X son programas de otros equipos, es decir, entrada no
+//! fiable, y el servidor vive dentro del proceso de la aplicación. Por eso:
+//!
+//! - cada lote de peticiones se procesa dentro de `catch_unwind`: si un
+//!   manejador entra en pánico se expulsa a ese cliente, se repara el estado
+//!   y el servidor sigue atendiendo a los demás;
+//! - los candados toleran el «envenenamiento», de modo que la interfaz nunca
+//!   se cae por un pánico ocurrido aquí;
+//! - la memoria de imagen tiene un presupuesto global y las reservas de cada
+//!   petición están acotadas (error `Alloc` o `Length`, no un aborto);
+//! - a quien no lee lo que se le envía se le deja de atender y, si aun así
+//!   se le acumula demasiado, se le expulsa.
+//!
+//! Orden de los candados: primero el del estado y después el del
+//! [`SharedFrame`]. Quien use el servidor no debe llamar a sus métodos
+//! mientras tenga cogido el candado de la imagen.
 
 mod colors;
 mod draw;
@@ -31,13 +50,16 @@ mod server;
 #[cfg(test)]
 mod tests;
 mod wm;
+mod xkb;
 
-use std::sync::{Arc, Mutex};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 
 use crate::desktop::{
     DesktopBackend, DesktopEvent, DesktopInput, Framebuffer, MouseButton, SharedFrame,
@@ -45,7 +67,10 @@ use crate::desktop::{
 use crate::ssh::Waker;
 use keymap::{MAX_KEYCODE, MIN_KEYCODE};
 use proto::Writer;
-use server::{ClientId, DEFAULT_COLORMAP, RESOURCE_MASK, ROOT, ROOT_VISUAL, Server};
+use server::{
+    ClientId, ClientLink, DEFAULT_COLORMAP, OUTPUT_SOFT_LIMIT, RESOURCE_MASK, ROOT, ROOT_VISUAL,
+    Server,
+};
 
 /// Nombre del protocolo de autenticación por *cookie*.
 const COOKIE_PROTOCOL: &[u8] = b"MIT-MAGIC-COOKIE-1";
@@ -53,6 +78,15 @@ const COOKIE_PROTOCOL: &[u8] = b"MIT-MAGIC-COOKIE-1";
 const MAX_AUTH_FIELD: usize = 1024;
 /// Primer número de pantalla que se prueba al buscar uno libre.
 const FIRST_FREE_DISPLAY: u16 = 20;
+
+/// Toma un candado aunque un pánico anterior lo dejara «envenenado»: el
+/// servidor repara su estado después de un pánico y sigue, así que el dato
+/// protegido se puede usar.
+pub(crate) fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Tamaño inicial de la pantalla raíz.
 pub struct XServerConfig {
@@ -70,12 +104,25 @@ struct Inner {
     stop: watch::Sender<bool>,
     /// Búfer de trabajo de la composición.
     scratch: Mutex<Vec<u32>>,
+    /// Pánicos contenidos hasta ahora (para las pruebas).
+    #[cfg(test)]
+    panics: std::sync::atomic::AtomicUsize,
 }
 
 /// Manejador del servidor X (barato de clonar).
 #[derive(Clone)]
 pub struct XServer {
     inner: Arc<Inner>,
+}
+
+/// Cómo acabó un lote de peticiones de un cliente.
+enum Batch {
+    /// Faltan bytes para completar la siguiente petición.
+    NeedMore,
+    /// El cliente tiene demasiada salida sin leer: se espera a que lea.
+    Throttled,
+    /// El cliente ya no está dado de alta (se le expulsó).
+    Gone,
 }
 
 impl XServer {
@@ -104,9 +151,11 @@ impl XServer {
                 events: Mutex::new(ev_tx),
                 stop,
                 scratch: Mutex::new(vec![]),
+                #[cfg(test)]
+                panics: Default::default(),
             }),
         };
-        server.finish(&mut server.inner.state.lock().unwrap());
+        server.guarded(|st| server.finish(st));
         server.emit(DesktopEvent::Connected);
 
         // Tarea de entrada: teclado, ratón y portapapeles de la interfaz.
@@ -124,19 +173,18 @@ impl XServer {
                 // Todo lo que haya en cola se aplica de una vez y se compone
                 // una sola vez.
                 let mut close = false;
-                {
-                    let mut st = task.inner.state.lock().unwrap();
+                task.guarded(|st| {
                     let mut next = Some(first);
                     while let Some(input) = next {
                         if input == DesktopInput::Close {
                             close = true;
                             break;
                         }
-                        apply_input(&mut st, input);
+                        apply_input(st, input);
                         next = input_rx.try_recv().ok();
                     }
-                    task.finish(&mut st);
-                }
+                    task.finish(st);
+                });
                 if close {
                     break;
                 }
@@ -153,8 +201,28 @@ impl XServer {
         )
     }
 
+    /// Ejecuta una operación sobre el estado con su candado cogido. Un pánico
+    /// dentro no sale de aquí: se repara el estado, se recompone la pantalla
+    /// y se devuelve `None`.
+    fn guarded<R>(&self, op: impl FnOnce(&mut Server) -> R) -> Option<R> {
+        let mut st = lock(&self.inner.state);
+        match catch_unwind(AssertUnwindSafe(|| op(&mut st))) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                #[cfg(test)]
+                self.inner.panics.fetch_add(1, Ordering::Relaxed);
+                // La reparación tampoco puede tumbar a quien llama.
+                let _ = catch_unwind(AssertUnwindSafe(|| {
+                    st.repair();
+                    self.finish(&mut st);
+                }));
+                None
+            }
+        }
+    }
+
     fn emit(&self, event: DesktopEvent) {
-        let _ = self.inner.events.lock().unwrap().send(event);
+        let _ = lock(&self.inner.events).send(event);
         (self.inner.waker)();
     }
 
@@ -170,14 +238,19 @@ impl XServer {
         if resized || !st.damage.is_empty() {
             st.prepare_decorations();
             let rects = std::mem::take(&mut st.damage);
-            let mut scratch = self.inner.scratch.lock().unwrap();
-            let mut frame = self.inner.frame.lock().unwrap();
+            let mut scratch = lock(&self.inner.scratch);
+            let mut frame = lock(&self.inner.frame);
             if resized || (frame.width(), frame.height()) != (st.width, st.height) {
                 frame.resize(st.width, st.height);
             }
+            let bounds = st.screen_rect();
             let stride = frame.width() as usize * 4;
             for r in rects {
+                let r = r.intersect(&bounds);
                 let (w, h) = (r.width() as usize, r.height() as usize);
+                if w == 0 || h == 0 {
+                    continue;
+                }
                 scratch.clear();
                 scratch.resize(w * h, 0);
                 st.compose(r, &mut scratch);
@@ -210,6 +283,9 @@ impl XServer {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        if self.stopped() {
+            bail!("El servidor X está parado");
+        }
         let (mut rd, mut wr) = tokio::io::split(stream);
 
         // --- Petición de conexión -------------------------------------------
@@ -265,57 +341,75 @@ impl XServer {
 
         // --- Alta del cliente -----------------------------------------------
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let kill = Arc::new(Notify::new());
-        let id = {
-            let mut st = self.inner.state.lock().unwrap();
-            let id = if self.stopped() {
-                None
-            } else {
-                st.add_client(be, tx, kill.clone())
-            };
-            if let Some(id) = id {
-                let setup = setup_reply(&st, be, id);
+        let link = ClientLink::default();
+        let id = self
+            .guarded(|st| {
+                if self.stopped() {
+                    return None;
+                }
+                let id = st.add_client(be, tx, link.clone())?;
+                let setup = setup_reply(st, be, id);
                 if let Some(c) = st.clients.get_mut(&id) {
                     c.out = setup;
                 }
                 st.flush();
-            }
-            id
-        };
+                Some(id)
+            })
+            .flatten();
         let Some(id) = id else {
             wr.write_all(&refuse("Maximum number of clients reached"))
                 .await?;
             bail!("El servidor X no admite más clientes");
         };
         // Tarea de escritura: termina sola cuando el cliente se da de baja.
+        let writer_link = link.clone();
         let writer = self.inner.rt.spawn(async move {
             while let Some(bytes) = rx.recv().await {
-                if wr.write_all(&bytes).await.is_err() {
+                let written = wr.write_all(&bytes).await.is_ok();
+                writer_link.queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+                writer_link.drained.notify_one();
+                if !written {
+                    // Sin poder escribirle no tiene sentido seguir leyéndole.
+                    writer_link.kill.notify_one();
                     break;
                 }
             }
             let _ = wr.shutdown().await;
         });
 
-        let result = self.read_requests(id, be, &mut rd, &kill).await;
+        let result = self.read_requests(id, be, &mut rd, &link).await;
+        self.expel(id);
+        // La tarea de escritura acaba al vaciar lo pendiente; si el cliente
+        // no lee, no se la espera para siempre: se corta la conexión.
+        let mut writer = writer;
+        if tokio::time::timeout(Duration::from_secs(5), &mut writer)
+            .await
+            .is_err()
         {
-            let mut st = self.inner.state.lock().unwrap();
-            st.remove_client(id);
-            self.finish(&mut st);
+            writer.abort();
         }
-        let _ = writer.await;
         result
     }
 
-    /// Bucle de lectura de un cliente: cada vez que llegan datos se procesan
-    /// todas las peticiones completas de una tacada.
-    async fn read_requests<R: AsyncRead + Unpin>(
+    /// Da de baja a un cliente y libera lo suyo.
+    fn expel(&self, id: ClientId) {
+        self.guarded(|st| {
+            st.remove_client(id);
+            self.finish(st);
+        });
+        // Si la propia baja falló a medias, al menos que no siga constando.
+        self.guarded(|st| st.clients.remove(&id).is_some());
+    }
+
+    /// Procesa todas las peticiones completas que haya en `buf`. Devuelve
+    /// cuántos bytes consumió y por qué paró.
+    fn process(
         &self,
+        st: &mut Server,
         id: ClientId,
         be: bool,
-        rd: &mut R,
-        kill: &Notify,
-    ) -> Result<()> {
+        buf: &[u8],
+    ) -> Result<(usize, Batch)> {
         let word = |b: &[u8]| -> usize {
             (if be {
                 u16::from_be_bytes([b[0], b[1]])
@@ -330,53 +424,88 @@ impl XServer {
                 u32::from_le_bytes([b[0], b[1], b[2], b[3]])
             }) as usize
         };
+        let mut used = 0;
+        let outcome = loop {
+            let Some(client) = st.clients.get(&id) else {
+                break Batch::Gone;
+            };
+            // No se generan más respuestas mientras no lea las que tiene.
+            let pending_out = client.out.len() + client.link.queued.load(Ordering::Relaxed);
+            if pending_out > OUTPUT_SOFT_LIMIT {
+                break Batch::Throttled;
+            }
+            let pending = &buf[used..];
+            if pending.len() < 4 {
+                break Batch::NeedMore;
+            }
+            let (header, total) = match word(&pending[2..4]) {
+                // Longitud 0: petición grande (BIG-REQUESTS), con la longitud
+                // real en los 4 bytes siguientes.
+                0 if client.big_requests => {
+                    if pending.len() < 8 {
+                        break Batch::NeedMore;
+                    }
+                    let units = long(&pending[4..8]);
+                    if !(2..=requests::MAX_BIG_REQUEST as usize).contains(&units) {
+                        bail!("Petición X11 de tamaño no válido");
+                    }
+                    (8, units * 4)
+                }
+                0 => (4, 4),
+                units => (4, units * 4),
+            };
+            if pending.len() < total {
+                break Batch::NeedMore;
+            }
+            st.request(id, pending[0], pending[1], &pending[header..total]);
+            used += total;
+        };
+        // (Al frenar se envía siempre lo pendiente: es lo que hay que esperar
+        // a que el cliente lea.)
+        if used > 0 || matches!(outcome, Batch::Throttled) {
+            self.finish(st);
+        }
+        Ok((used, outcome))
+    }
+
+    /// Bucle de lectura de un cliente: cada vez que llegan datos se procesan
+    /// todas las peticiones completas de una tacada.
+    async fn read_requests<R: AsyncRead + Unpin>(
+        &self,
+        id: ClientId,
+        be: bool,
+        rd: &mut R,
+        link: &ClientLink,
+    ) -> Result<()> {
         let mut stopped = self.inner.stop.subscribe();
         let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
         let mut chunk = vec![0u8; 64 * 1024];
         loop {
-            let mut used = 0;
-            {
-                let mut st = self.inner.state.lock().unwrap();
-                let mut worked = false;
-                loop {
-                    let Some(client) = st.clients.get(&id) else {
-                        return Ok(()); // expulsado
-                    };
-                    let pending = &buf[used..];
-                    if pending.len() < 4 {
-                        break;
-                    }
-                    let (header, total) = match word(&pending[2..4]) {
-                        // Longitud 0: petición grande (BIG-REQUESTS), con la
-                        // longitud real en los 4 bytes siguientes.
-                        0 if client.big_requests => {
-                            if pending.len() < 8 {
-                                break;
-                            }
-                            let units = long(&pending[4..8]);
-                            if !(2..=requests::MAX_BIG_REQUEST as usize).contains(&units) {
-                                bail!("Petición X11 de tamaño no válido");
-                            }
-                            (8, units * 4)
-                        }
-                        0 => (4, 4),
-                        units => (4, units * 4),
-                    };
-                    if pending.len() < total {
-                        break;
-                    }
-                    st.request(id, pending[0], pending[1], &pending[header..total]);
-                    used += total;
-                    worked = true;
-                }
-                if worked {
-                    self.finish(&mut st);
+            // Con demasiada salida pendiente, se espera a que el cliente lea.
+            while link.queued.load(Ordering::Relaxed) > OUTPUT_SOFT_LIMIT {
+                tokio::select! {
+                    biased;
+                    _ = link.kill.notified() => return Ok(()),
+                    _ = stopped.changed() => return Ok(()),
+                    _ = link.drained.notified() => {}
                 }
             }
+            let Some(batch) = self.guarded(|st| self.process(st, id, be, &buf)) else {
+                // Un manejador entró en pánico: fuera este cliente; los demás
+                // siguen (el estado ya se ha reparado).
+                self.expel(id);
+                bail!("El servidor X expulsó a un cliente por un error interno al atenderlo");
+            };
+            let (used, outcome) = batch?;
             buf.drain(..used);
+            match outcome {
+                Batch::Gone => return Ok(()),
+                Batch::Throttled => continue,
+                Batch::NeedMore => {}
+            }
             tokio::select! {
                 biased;
-                _ = kill.notified() => return Ok(()),
+                _ = link.kill.notified() => return Ok(()),
                 _ = stopped.changed() => return Ok(()),
                 n = rd.read(&mut chunk) => {
                     let n = n?;
@@ -441,22 +570,34 @@ impl XServer {
 
     /// Clientes X conectados ahora mismo.
     pub fn client_count(&self) -> usize {
-        self.inner.state.lock().unwrap().clients.len()
+        lock(&self.inner.state).clients.len()
     }
 
     /// Cambia el tamaño de la pantalla raíz (la pestaña cambió de tamaño).
     /// El [`SharedFrame`] cambia de tamaño (y de `epoch`) a la vez.
     pub fn resize(&self, width: u32, height: u32) {
-        let mut st = self.inner.state.lock().unwrap();
-        st.resize_screen(width, height);
-        self.finish(&mut st);
+        self.guarded(|st| {
+            st.resize_screen(width, height);
+            self.finish(st);
+        });
     }
 
     /// Elige si lo que se selecciona con el ratón en las aplicaciones
     /// (selección PRIMARY) se envía también como portapapeles a la interfaz.
     /// Por defecto, sí.
     pub fn set_primary_sync(&self, enabled: bool) {
-        self.inner.state.lock().unwrap().sync_primary = enabled;
+        lock(&self.inner.state).sync_primary = enabled;
+    }
+
+    /// Ofrece a los clientes que se conecten a partir de ahora un XKEYBOARD
+    /// mínimo (`UseExtension`, `GetMap`, `GetState`). Solo hace falta para
+    /// `xdotool`, cuya librería se cae si el servidor no tiene XKB; las
+    /// aplicaciones Xlib funcionan igual con él. Está desactivado por
+    /// defecto porque **no es un XKB completo**: GTK, Qt y demás toolkits que
+    /// usan XKB a fondo darían por buena la extensión y se quedarían a medias,
+    /// mientras que sin ella pasan sin problemas al teclado básico.
+    pub fn set_xkb_compat(&self, enabled: bool) {
+        lock(&self.inner.state).xkb_compat = enabled;
     }
 
     /// Para el servidor: desconecta a todos los clientes, deja de escuchar
@@ -465,14 +606,15 @@ impl XServer {
         if self.inner.stop.send_replace(true) {
             return;
         }
-        {
-            let mut st = self.inner.state.lock().unwrap();
+        self.guarded(|st| {
             let clients: Vec<ClientId> = st.clients.keys().copied().collect();
             for client in clients {
                 st.remove_client(client);
             }
-            self.finish(&mut st);
-        }
+            self.finish(st);
+        });
+        // Pase lo que pase arriba, nadie sigue dado de alta.
+        self.guarded(|st| st.clients.clear());
         self.emit(DesktopEvent::Closed(None));
     }
 }

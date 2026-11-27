@@ -62,17 +62,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends freerdp3-shadow-x11 || true
       - name: Formato
         run: cargo fmt --check
-      - name: Avisos (clippy), edición completa
-        run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Avisos (clippy), edición SSH reforzada
-        run: cargo clippy --locked --all-targets --manifest-path reforzado/Cargo.toml -- -D warnings
       - name: Pruebas, edición completa
         run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test --locked
       - name: Pruebas, edición SSH reforzada
         run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test --locked --manifest-path reforzado/Cargo.toml
-      - name: Devolver la caché a su dueño
+      - name: Devolver los ficheros a su dueño
         if: always()
-        run: sudo chown -R "$(id -u):$(id -g)" target reforzado/target "$HOME/.cargo" || true
+        run: sudo chown -R "$(id -u):$(id -g)" . "$HOME/.cargo" || true
+      - name: Avisos (clippy), edición completa
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Avisos (clippy), edición SSH reforzada
+        run: cargo clippy --locked --all-targets --manifest-path reforzado/Cargo.toml -- -D warnings
 
   # Windows y macOS: compilación nativa y las pruebas que no dependen de
   # servidores de Unix.

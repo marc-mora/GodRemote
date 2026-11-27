@@ -161,6 +161,11 @@ impl Vault {
         self.secrets.get(key).map(String::as_str)
     }
 
+    /// Nombres de todos los secretos guardados.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.secrets.keys().map(String::as_str)
+    }
+
     pub fn contains(&self, key: &str) -> bool {
         self.secrets.contains_key(key)
     }
