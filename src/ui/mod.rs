@@ -225,11 +225,56 @@ pub struct App {
     toast: Option<(String, bool, Instant)>,
     quick_connect: String,
     broadcast: Broadcast,
+    split: SplitView,
     /// Pestañas guardadas en disco la última vez.
     saved_tabs: SavedTabs,
     /// Pestañas por reabrir al arrancar (cuando el baúl ya esté resuelto).
     pending_restore: Option<SavedTabs>,
 }
+
+/// Vista dividida: varios terminales a la vez, en mosaico.
+struct SplitView {
+    enabled: bool,
+    /// Mostrar todos los terminales abiertos (también los que se abran).
+    all: bool,
+    /// Pestañas elegidas, por identificador (si no son todos).
+    chosen: std::collections::BTreeSet<u64>,
+    /// Columnas del mosaico; 0 = las que mejor cuadren.
+    columns: usize,
+}
+
+impl Default for SplitView {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            all: true,
+            chosen: Default::default(),
+            columns: 0,
+        }
+    }
+}
+
+impl SplitView {
+    fn includes(&self, tab: u64) -> bool {
+        self.enabled && (self.all || self.chosen.contains(&tab))
+    }
+}
+
+/// Columnas y filas de un mosaico de `count` terminales. `columns` es la
+/// preferencia del usuario (0 = automático).
+fn split_grid(count: usize, columns: usize) -> (usize, usize) {
+    let count = count.max(1);
+    let columns = if columns == 0 {
+        (count as f64).sqrt().ceil() as usize
+    } else {
+        columns
+    }
+    .clamp(1, count);
+    (columns, count.div_ceil(columns))
+}
+
+/// Como máximo, estos terminales a la vez: más no caben con un tamaño útil.
+const MAX_TILES: usize = 16;
 
 /// Difusión: lo que se escribe en un terminal se repite en otros.
 struct Broadcast {
@@ -353,6 +398,7 @@ impl App {
             toast,
             quick_connect: String::new(),
             broadcast: Broadcast::default(),
+            split: SplitView::default(),
             pending_restore: restore_tabs.then(|| saved_tabs.clone()),
             saved_tabs,
         }
@@ -1254,8 +1300,114 @@ impl App {
         self.apply_tree_actions(actions);
     }
 
+    /// Pestañas (por índice) que forman el mosaico de la vista dividida.
+    fn split_tiles(&self) -> Vec<usize> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| {
+                matches!(tab.kind, TabKind::Terminal(_)) && self.split.includes(tab.id)
+            })
+            .map(|(index, _)| index)
+            .take(MAX_TILES)
+            .collect()
+    }
+
+    /// Botón de la barra de pestañas que abre las opciones de la vista
+    /// dividida.
+    fn split_button(&mut self, ui: &mut egui::Ui) {
+        use egui::containers::menu::{MenuButton, MenuConfig};
+        let terminals: Vec<(u64, String)> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| matches!(tab.kind, TabKind::Terminal(_)))
+            .map(|(i, tab)| (tab.id, format!("{}. {}", i + 1, tab.title)))
+            .collect();
+        let label = if self.split.enabled {
+            RichText::new("⊞ Dividida").strong()
+        } else {
+            RichText::new("⊞ Dividir")
+        };
+        let config =
+            MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        let was_enabled = self.split.enabled;
+        let split = &mut self.split;
+        let (response, _) = MenuButton::new(label).config(config).ui(ui, |ui| {
+            ui.set_min_width(280.0);
+            ui.set_max_width(340.0);
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            ui.checkbox(&mut split.enabled, "Ver varios terminales a la vez");
+            ui.weak(
+                "Los terminales se reparten en mosaico. Un clic en uno le da el teclado; \
+                 doble clic en su título lo deja a pantalla completa.",
+            );
+            ui.add_enabled_ui(split.enabled, |ui| {
+                ui.radio_value(&mut split.all, true, "Todos los terminales abiertos");
+                ui.radio_value(&mut split.all, false, "Solo los que elija:");
+                ui.add_enabled_ui(!split.all, |ui| {
+                    ui.indent("split_tabs", |ui| {
+                        for (id, title) in &terminals {
+                            let mut on = split.chosen.contains(id);
+                            if ui.checkbox(&mut on, title).changed() {
+                                if on {
+                                    split.chosen.insert(*id);
+                                } else {
+                                    split.chosen.remove(id);
+                                }
+                            }
+                        }
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Columnas");
+                    ui.selectable_value(&mut split.columns, 0, "Auto");
+                    for n in 1..=4 {
+                        ui.selectable_value(&mut split.columns, n, n.to_string());
+                    }
+                });
+            });
+        });
+        response.on_hover_text("Ver varios terminales a la vez, en mosaico");
+        if self.split.enabled != was_enabled {
+            self.focus_active_terminal();
+        }
+    }
+
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         let mut close = None;
+        ui.horizontal(|ui| {
+            self.split_button(ui);
+            // En el mosaico los terminales no llevan su cabecera completa:
+            // la difusión se maneja desde aquí.
+            let tiles = self.split_tiles();
+            if tiles.len() >= 2 && tiles.contains(&self.active) {
+                let terminals: Vec<(u64, String, bool)> = self
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, tab)| match &tab.kind {
+                        TabKind::Terminal(t) => Some((
+                            tab.id,
+                            format!("{}. {}", i + 1, tab.title),
+                            t.is_connected(),
+                        )),
+                        _ => None,
+                    })
+                    .collect();
+                let current = self.tabs[self.active].id;
+                broadcast_button(ui, &mut self.broadcast, &terminals, current);
+            }
+            ui.separator();
+            self.tab_strip(ui, &mut close);
+        });
+        if let Some(i) = close {
+            self.close_tab(i);
+        }
+    }
+
+    fn tab_strip(&mut self, ui: &mut egui::Ui, close: &mut Option<usize>) {
+        let mut activate = None;
         egui::ScrollArea::horizontal()
             .id_salt("tab_bar")
             .auto_shrink([false, true])
@@ -1306,7 +1458,7 @@ impl App {
                                 resp
                             };
                             if resp.clicked() {
-                                self.active = i;
+                                activate = Some(i);
                             }
                             if resp.middle_clicked()
                                 || ui
@@ -1314,20 +1466,200 @@ impl App {
                                     .on_hover_text("Cerrar pestaña")
                                     .clicked()
                             {
-                                close = Some(i);
+                                *close = Some(i);
                             }
                         });
                         ui.separator();
                     }
                 });
             });
-        if let Some(i) = close {
-            let closed = self.tabs.remove(i);
-            self.broadcast.chosen.remove(&closed.id);
-            if self.active >= i && self.active > 0 {
-                self.active -= 1;
-            }
+        if let Some(i) = activate {
+            self.active = i;
             self.focus_active_terminal();
+        }
+    }
+
+    /// Cierra una pestaña y deja el teclado en la que quede activa.
+    fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        let closed = self.tabs.remove(index);
+        self.broadcast.chosen.remove(&closed.id);
+        self.split.chosen.remove(&closed.id);
+        if self.active >= index && self.active > 0 {
+            self.active -= 1;
+        }
+        self.focus_active_terminal();
+    }
+
+    /// Vista dividida: los terminales de `tiles` repartidos en mosaico.
+    fn split_view_ui(&mut self, ui: &mut egui::Ui, tiles: &[usize]) {
+        let area = ui.available_rect_before_wrap();
+        let (columns, rows) = split_grid(tiles.len(), self.split.columns);
+        let gap = 4.0;
+        let tile = egui::vec2(
+            (area.width() - gap * (columns - 1) as f32) / columns as f32,
+            (area.height() - gap * (rows - 1) as f32) / rows as f32,
+        );
+        let receivers = self
+            .tabs
+            .iter()
+            .filter(|t| matches!(t.kind, TabKind::Terminal(_)) && self.broadcast.includes(t.id))
+            .count();
+        let accent = ui.visuals().selection.bg_fill;
+        let mut mirrored: Option<(u64, Vec<TermInput>)> = None;
+        let mut focused = None;
+        let mut maximize = None;
+        let mut reconnect = None;
+        let mut close = None;
+        let mut open_bar_settings = false;
+        for (n, &index) in tiles.iter().enumerate() {
+            let rect = egui::Rect::from_min_size(
+                area.min
+                    + egui::vec2(
+                        (n % columns) as f32 * (tile.x + gap),
+                        (n / columns) as f32 * (tile.y + gap),
+                    ),
+                tile,
+            );
+            let is_active = index == self.active;
+            let Some(tab) = self.tabs.get_mut(index) else {
+                continue;
+            };
+            let tab_id = tab.id;
+            let TabKind::Terminal(term) = &mut tab.kind else {
+                continue;
+            };
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                ui.push_id(("tile", tab_id), |ui| {
+                    // Cabecera compacta: estado, nombre y botones.
+                    ui.horizontal(|ui| {
+                        let color = match term.state {
+                            ConnState::Connecting => warn_color(),
+                            ConnState::Connected => ok_color(),
+                            ConnState::Closed(_) => ui.visuals().error_fg_color,
+                        };
+                        status_dot(ui, color);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("×").on_hover_text("Cerrar").clicked() {
+                                close = Some(index);
+                            }
+                            if ui
+                                .small_button("⛶")
+                                .on_hover_text("Ver solo este terminal")
+                                .clicked()
+                            {
+                                maximize = Some(index);
+                            }
+                            if matches!(term.state, ConnState::Closed(_))
+                                && tab.session.is_some()
+                                && ui.small_button("⟳").on_hover_text("Reconectar").clicked()
+                            {
+                                reconnect = Some(index);
+                            }
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    let mut title = RichText::new(&tab.title);
+                                    if is_active {
+                                        title = title.strong();
+                                    }
+                                    let label = ui.add(
+                                        egui::Label::new(title)
+                                            .truncate()
+                                            .sense(egui::Sense::click()),
+                                    );
+                                    if label.double_clicked() {
+                                        maximize = Some(index);
+                                    } else if label.clicked() {
+                                        term.request_focus();
+                                        focused = Some(index);
+                                    }
+                                },
+                            );
+                        });
+                    });
+                    // Terminal y, si cabe, la barra de información.
+                    let body = ui.available_rect_before_wrap();
+                    let bar = tab
+                        .session
+                        .as_ref()
+                        .filter(|s| wants_server_bar(&self.settings.server_bar, s))
+                        .filter(|_| body.height() > 200.0);
+                    let bar_height = match bar {
+                        Some(_) => server_bar::height(ui),
+                        None => 0.0,
+                    };
+                    let mut term_rect = body;
+                    term_rect.max.y -= bar_height;
+                    // Con la difusión activa, el terminal que tenga el
+                    // teclado anota lo que se escribe para los demás.
+                    let sending = self.broadcast.includes(tab_id) && receivers > 1;
+                    term.mirror = sending.then(Vec::new);
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(term_rect), |ui| term.ui(ui));
+                    if let Some(inputs) = term.mirror.take().filter(|i| !i.is_empty()) {
+                        mirrored = Some((tab_id, inputs));
+                    }
+                    if term.has_focus && !is_active {
+                        focused = Some(index);
+                    }
+                    // Marco: el de aviso si se escribe para varios; si no,
+                    // el del terminal que tiene el teclado.
+                    let frame = if sending {
+                        Some(warn_color())
+                    } else if is_active {
+                        Some(accent)
+                    } else {
+                        None
+                    };
+                    if let Some(color) = frame {
+                        ui.painter().rect_stroke(
+                            term_rect,
+                            0.0,
+                            egui::Stroke::new(2.0, color),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    if let Some(session) = bar {
+                        let mut bar_rect = body;
+                        bar_rect.min.y = term_rect.max.y;
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |ui| {
+                            if server_bar::show(
+                                ui,
+                                &self.settings.server_bar,
+                                session,
+                                term.monitor.as_ref(),
+                            ) {
+                                open_bar_settings = true;
+                            }
+                        });
+                    }
+                });
+            });
+        }
+        if let Some((source, inputs)) = mirrored {
+            self.mirror_to_group(source, &inputs);
+        }
+        if let Some(index) = focused {
+            self.active = index;
+        }
+        if let Some(index) = reconnect {
+            match self.restart_terminal(index, "[Reconectando…]") {
+                Ok(()) => self.tabs[index].reconnect = None,
+                Err(e) => self.notify(e, true),
+            }
+        }
+        if let Some(index) = maximize {
+            self.active = index;
+            self.split.enabled = false;
+            self.focus_active_terminal();
+        }
+        if let Some(index) = close {
+            self.close_tab(index);
+        }
+        if open_bar_settings {
+            self.server_bar_window = Some(ServerBarWindow::new(&self.settings.server_bar));
         }
     }
 
@@ -2591,7 +2923,14 @@ impl eframe::App for App {
                 self.tab_bar(ui);
                 ui.separator();
                 self.content_size = ui.available_size();
-                self.active_tab_ui(ui);
+                // Mosaico, si la pestaña activa es uno de sus terminales y
+                // hay al menos dos; si no, la pestaña activa a solas.
+                let tiles = self.split_tiles();
+                if tiles.len() >= 2 && tiles.contains(&self.active) {
+                    self.split_view_ui(ui, &tiles);
+                } else {
+                    self.active_tab_ui(ui);
+                }
             }
         });
 
@@ -2841,7 +3180,23 @@ fn wants_server_bar(config: &crate::monitor::ServerBar, session: &Session) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::{rdp_error_summary, reconnect_delay, worth_retrying};
+    use super::{rdp_error_summary, reconnect_delay, split_grid, worth_retrying};
+
+    #[test]
+    fn split_view_grid() {
+        // Automático: lo más cuadrado posible.
+        assert_eq!(split_grid(2, 0), (2, 1));
+        assert_eq!(split_grid(3, 0), (2, 2));
+        assert_eq!(split_grid(4, 0), (2, 2));
+        assert_eq!(split_grid(5, 0), (3, 2));
+        assert_eq!(split_grid(9, 0), (3, 3));
+        assert_eq!(split_grid(10, 0), (4, 3));
+        // Con las columnas que pida el usuario (nunca más que terminales).
+        assert_eq!(split_grid(4, 1), (1, 4));
+        assert_eq!(split_grid(5, 4), (4, 2));
+        assert_eq!(split_grid(2, 4), (2, 1));
+        assert_eq!(split_grid(0, 0), (1, 1));
+    }
 
     #[test]
     fn reconnection_policy() {

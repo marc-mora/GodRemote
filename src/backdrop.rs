@@ -422,9 +422,11 @@ impl Backdrop {
                     return;
                 }
                 let angle = self.angle.to_radians();
+                // La posición de un texto es su esquina superior izquierda;
+                // el giro se hace alrededor de su centro.
                 let draw = |center: Pos2| {
                     painter.add(
-                        egui::epaint::TextShape::new(center, galley.clone(), color)
+                        egui::epaint::TextShape::new(center - size / 2.0, galley.clone(), color)
                             .with_angle_and_anchor(angle, Align2::CENTER_CENTER),
                     );
                 };
