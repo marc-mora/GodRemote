@@ -3,6 +3,7 @@
 pub mod backdrop_view;
 pub mod desktop_view;
 pub mod editor;
+pub mod fleet_view;
 pub mod folder_editor;
 pub mod keys_view;
 pub mod macros_view;
@@ -39,6 +40,7 @@ use crate::tunnels::TunnelStatus;
 use crate::vault::Vault;
 use desktop_view::{DesktopState, DesktopView};
 use editor::{EditorResult, SessionEditor};
+use fleet_view::{FleetRequest, FleetWindow};
 use folder_editor::{FolderEditor, FolderResult};
 use keys_view::KeysWindow;
 use macros_view::{MacroRequest, MacrosWindow};
@@ -221,6 +223,8 @@ enum TreeAction {
     NewSession(Option<Uuid>),
     NewFolder(Option<Uuid>),
     RenameFolder(Uuid),
+    /// Ejecutar una orden en los equipos de una carpeta.
+    RunOnFolder(Uuid),
     Move(Uuid, Option<Uuid>),
 }
 
@@ -286,6 +290,8 @@ pub struct App {
     pending_autostart: bool,
     /// Paleta de órdenes, si está abierta.
     palette: Option<Palette>,
+    /// Ventana para ejecutar una orden en varios equipos.
+    fleet_window: Option<FleetWindow>,
     pending_close: Option<PendingClose>,
     /// Se ha pedido salir con sesiones vivas; `Some(true)` cuando el botón
     /// «Cancelar» de la pregunta ya tiene el foco.
@@ -484,6 +490,7 @@ impl App {
             tunnels_window: None,
             pending_autostart: true,
             palette: None,
+            fleet_window: None,
             pending_close: None,
             pending_quit: None,
             quit_confirmed: false,
@@ -573,6 +580,11 @@ impl App {
     fn new_terminal(&self, session: &Session) -> Result<TerminalView, String> {
         let mut view = TerminalView::new(self.terminal_backend(session)?);
         view.set_backdrop(session.backdrop.as_ref());
+        // Órdenes al conectar: solo por SSH (en Telnet o serie se
+        // escribirían en la pregunta del usuario o de la contraseña).
+        if session.protocol == Protocol::Ssh && !session.on_connect.trim().is_empty() {
+            view.set_on_connect(on_connect_bytes(session));
+        }
         view.log = self.automatic_log(&session.display_name(), &session.target());
         Ok(view)
     }
@@ -1329,6 +1341,9 @@ impl App {
                     if let Some(Node::Folder(f)) = self.tree.find(id) {
                         self.folder_editor = Some(FolderEditor::edit(f, self.tree.parent_of(id)));
                     }
+                }
+                TreeAction::RunOnFolder(id) => {
+                    self.fleet_window = Some(FleetWindow::new(Some(id)));
                 }
                 TreeAction::Move(id, parent) => {
                     if self.tree.move_node(id, parent) {
@@ -2284,7 +2299,10 @@ impl App {
                     focus: true,
                 });
             }
-            Command::VaultContents | Command::RunOnFolder => {}
+            Command::RunOnFolder => {
+                self.fleet_window = Some(FleetWindow::new(self.target_folder()));
+            }
+            Command::VaultContents => {}
             Command::ToggleSplit => self.split.enabled = !self.split.enabled,
             Command::ToggleBroadcast => self.broadcast.enabled = !self.broadcast.enabled,
             Command::SearchTerminal => {
@@ -2316,6 +2334,63 @@ impl App {
                     self.active = index;
                 }
             }
+        }
+    }
+
+    fn fleet_window_ui(&mut self, ctx: &egui::Context) {
+        let Some(mut window) = self.fleet_window.take() else {
+            return;
+        };
+        let (open, request) = window.show(ctx, &self.tree, &self.macros);
+        if let FleetRequest::Start {
+            sessions,
+            command,
+            parallel,
+            timeout_secs,
+        } = request
+        {
+            let now = chrono::Local::now();
+            let mut jobs = vec![];
+            let mut problem = None;
+            for id in sessions {
+                let Some(session) = self.tree.resolved_session(id) else {
+                    continue;
+                };
+                match self.endpoint_for(&session) {
+                    Ok(endpoint) => {
+                        let context = crate::macros::SnippetContext {
+                            host: session.host.trim().to_string(),
+                            port: session.port.to_string(),
+                            user: session.username.trim().to_string(),
+                            name: session.display_name(),
+                        };
+                        jobs.push(crate::fleet::HostJob {
+                            id,
+                            name: session.display_name(),
+                            endpoint,
+                            command: crate::macros::expand(&command, &context, &[], now),
+                        });
+                    }
+                    Err(e) => problem = Some(format!("{}: {e}", session.display_name())),
+                }
+            }
+            if let Some(problem) = problem {
+                self.notify(problem, true);
+            }
+            if !jobs.is_empty() {
+                window.run = Some(crate::fleet::run(
+                    self.rt.handle(),
+                    jobs,
+                    self.prompter.clone(),
+                    parallel,
+                    Duration::from_secs(timeout_secs),
+                ));
+            }
+        }
+        if open {
+            self.fleet_window = Some(window);
+        } else {
+            self.focus_active_terminal();
         }
     }
 
@@ -3896,6 +3971,17 @@ fn tree_ui(
                         actions.push(TreeAction::RenameFolder(f.id));
                         ui.close();
                     }
+                    if ui
+                        .button("▶ Ejecutar una orden en sus equipos…")
+                        .on_hover_text(
+                            "Lanza la misma orden en todos sus equipos SSH y recoge lo que \
+                             contesta cada uno",
+                        )
+                        .clicked()
+                    {
+                        actions.push(TreeAction::RunOnFolder(f.id));
+                        ui.close();
+                    }
                     move_menu(ui, f.id, folders, actions);
                     ui.separator();
                     if ui.button("🗑 Eliminar…").clicked() {
@@ -3961,6 +4047,9 @@ impl eframe::App for App {
                     t.poll();
                     secrets.append(&mut t.secrets_to_save);
                     notices.append(&mut t.notices);
+                    if t.is_waiting_login() {
+                        ui.ctx().request_repaint_after(Duration::from_millis(120));
+                    }
                     // Consulta del estado del servidor para la barra.
                     let bar = &self.settings.server_bar;
                     let wanted = tab
@@ -4002,6 +4091,14 @@ impl eframe::App for App {
             self.notify(notice, true);
         }
         self.poll_tunnels(ui.ctx(), &mut secrets);
+        if let Some(run) = self.fleet_window.as_mut().and_then(|w| w.run.as_mut()) {
+            run.poll();
+            secrets.append(&mut run.secrets_to_save);
+            if !run.is_finished() {
+                // Los segundos de cada equipo siguen corriendo.
+                ui.ctx().request_repaint_after(Duration::from_millis(250));
+            }
+        }
         self.sync_x_server(ui.ctx());
         // Solo se guardan secretos de sesiones que existen en el árbol.
         secrets.retain(|(key, _)| {
@@ -4193,6 +4290,7 @@ impl eframe::App for App {
             }
         }
         self.tunnels_window_ui(&ctx);
+        self.fleet_window_ui(&ctx);
         self.palette_ui(&ctx);
         self.close_confirm_ui(&ctx);
         self.quit_guard(&ctx);
@@ -4217,6 +4315,21 @@ impl eframe::App for App {
 }
 
 /// Datos de una pestaña para las variables de los snippets.
+/// Bytes que se envían al conectar a un equipo: sus órdenes, con las
+/// variables de los snippets ya sustituidas y un Intro al final.
+fn on_connect_bytes(session: &Session) -> Vec<u8> {
+    let context = crate::macros::SnippetContext {
+        host: session.host.trim().to_string(),
+        port: session.port.to_string(),
+        user: session.username.trim().to_string(),
+        name: session.display_name(),
+    };
+    let mut text = session.on_connect.trim_end().to_string();
+    text.push('\n');
+    let expanded = crate::macros::expand(&text, &context, &[], chrono::Local::now());
+    crate::macros::decode(&expanded)
+}
+
 fn snippet_context(tab: &Tab) -> crate::macros::SnippetContext {
     match &tab.session {
         Some(session) => crate::macros::SnippetContext {

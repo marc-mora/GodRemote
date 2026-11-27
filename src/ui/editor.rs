@@ -684,11 +684,42 @@ impl SessionEditor {
     /// Reenvío X11 y túneles (solo terminales SSH).
     fn advanced_ssh(&mut self, ui: &mut egui::Ui) {
         let s = &mut self.session;
-        let configured = s.x11_forwarding || !s.tunnels.is_empty();
-        egui::CollapsingHeader::new("Avanzado: X11 y túneles")
+        let configured = s.x11_forwarding
+            || !s.tunnels.is_empty()
+            || !s.on_connect.trim().is_empty()
+            || s.agent_forwarding
+            || s.bypass_proxy;
+        egui::CollapsingHeader::new("Avanzado: órdenes al conectar, agente, X11 y túneles")
             .id_salt("ssh_advanced")
             .default_open(configured)
             .show(ui, |ui| {
+                ui.label("Órdenes al conectar");
+                ui.add(
+                    egui::TextEdit::multiline(&mut s.on_connect)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_rows(2)
+                        .desired_width(430.0)
+                        .hint_text("una por línea; por ejemplo: cd /var/log"),
+                )
+                .on_hover_text(
+                    "Se escriben solas en el terminal cuando la shell termina de saludar, \
+                     también al reconectar. Admiten las variables de los snippets: {{host}}, \
+                     {{usuario}}, {{nombre}}, {{fecha}}…",
+                );
+                ui.checkbox(
+                    &mut s.agent_forwarding,
+                    "Reenviar el agente SSH (como ssh -A)",
+                )
+                .on_hover_text(
+                    "Las claves de tu agente SSH quedan disponibles en este equipo para \
+                         saltar desde él a otros. Quien administre ese equipo puede usarlas \
+                         mientras dure la sesión: actívalo solo en equipos de confianza",
+                );
+                ui.checkbox(
+                    &mut s.bypass_proxy,
+                    "Conectar directamente, sin el proxy de salida de los ajustes",
+                );
+                ui.add_space(4.0);
                 ui.checkbox(
                     &mut s.x11_forwarding,
                     "Reenviar aplicaciones gráficas (X11)",

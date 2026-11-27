@@ -3,6 +3,7 @@
 pub mod backdrop;
 pub mod backup;
 pub mod desktop;
+pub mod fleet;
 pub mod fonts;
 pub mod highlight;
 pub mod import;

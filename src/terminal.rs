@@ -400,6 +400,11 @@ fn find_all(line: &[char], needle: &[char]) -> Vec<usize> {
         .collect()
 }
 
+/// Silencio tras el saludo de la shell antes de enviar las órdenes de
+/// conexión, y espera máxima si la shell no dice nada.
+const LOGIN_QUIET: std::time::Duration = std::time::Duration::from_millis(350);
+const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// Pedir confirmación antes de pegar varias líneas (ajuste de la aplicación).
 static PASTE_GUARD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
@@ -564,6 +569,13 @@ pub struct TerminalView {
     /// Texto de varias líneas a la espera de que el usuario confirme que
     /// quiere pegarlo.
     pending_paste: Option<String>,
+    /// Órdenes que se envían cada vez que la sesión conecta.
+    on_connect: Vec<u8>,
+    /// Envío pendiente de esas órdenes: cuándo conectó la sesión y cuándo
+    /// llegó su última salida (se espera a que la shell termine de saludar).
+    login_wait: Option<(std::time::Instant, Option<std::time::Instant>)>,
+    /// Silencio que se espera tras la última salida antes de enviarlas.
+    login_quiet: std::time::Duration,
     /// Avisos para el usuario (los recoge la aplicación).
     pub notices: Vec<String>,
     /// La sesión llegó a conectarse: si después se cierra con error es una
@@ -618,6 +630,9 @@ impl TerminalView {
             decor: None,
             menu_link: None,
             pending_paste: None,
+            on_connect: vec![],
+            login_wait: None,
+            login_quiet: LOGIN_QUIET,
             notices: vec![],
             was_connected: false,
             log: None,
@@ -731,6 +746,9 @@ impl TerminalView {
                     self.ssh = handle;
                     self.state = ConnState::Connected;
                     self.was_connected = true;
+                    if !self.on_connect.is_empty() {
+                        self.login_wait = Some((std::time::Instant::now(), None));
+                    }
                 }
                 TermEvent::Data(data) => {
                     if let Some(log) = &mut self.log {
@@ -739,6 +757,9 @@ impl TerminalView {
                     self.activity |= !data.is_empty();
                     self.parser.process(&data);
                     self.generation += 1;
+                    if let Some((_, last_output)) = &mut self.login_wait {
+                        *last_output = Some(std::time::Instant::now());
+                    }
                 }
                 TermEvent::SaveSecrets(s) => self.secrets_to_save.extend(s),
                 TermEvent::Tunnel { index, status } => {
@@ -764,10 +785,31 @@ impl TerminalView {
                     self.ssh = None;
                     self.monitor = None;
                     self.tunnels.clear();
+                    self.login_wait = None;
                     self.state = ConnState::Closed(err);
                 }
             }
         }
+        // Órdenes de conexión: cuando la shell ha terminado de saludar (o
+        // si no dice nada en un rato).
+        if let Some((connected, last_output)) = self.login_wait {
+            let greeted = last_output.is_some_and(|at| at.elapsed() >= self.login_quiet);
+            if greeted || connected.elapsed() >= LOGIN_TIMEOUT {
+                self.login_wait = None;
+                self.send_raw(self.on_connect.clone());
+            }
+        }
+    }
+
+    /// Órdenes que se envían solas cada vez que la sesión conecta.
+    pub fn set_on_connect(&mut self, bytes: Vec<u8>) {
+        self.on_connect = bytes;
+    }
+
+    /// Hay órdenes de conexión a la espera de enviarse: conviene volver a
+    /// mirar pronto.
+    pub fn is_waiting_login(&self) -> bool {
+        self.login_wait.is_some()
     }
 
     /// Envía bytes a la shell sin registrarlos en la macro en curso.
@@ -1970,6 +2012,44 @@ mod tests {
         });
         let decor = view.decor(&off);
         assert!(decor.links.is_empty() && decor.colors.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn connect_commands_wait_for_the_shell_greeting() {
+        let (mut view, mut sent, events) = fake_terminal();
+        view.set_on_connect(b"sudo -i\r".to_vec());
+        view.login_quiet = std::time::Duration::from_millis(30);
+        // Al conectar todavía no se envía nada: la shell no ha saludado.
+        events.send(TermEvent::Connected(None)).unwrap();
+        view.poll();
+        assert!(view.is_waiting_login());
+        assert!(sent_bytes(&mut sent).is_empty());
+        // Llega el saludo; mientras siga llegando salida, se espera.
+        events
+            .send(TermEvent::Data(b"Last login\r\n$ ".to_vec()))
+            .unwrap();
+        view.poll();
+        assert!(sent_bytes(&mut sent).is_empty());
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        view.poll();
+        assert!(!view.is_waiting_login());
+        assert_eq!(sent_bytes(&mut sent), [b"sudo -i\r".to_vec()]);
+        // Una sola vez por conexión…
+        view.poll();
+        assert!(sent_bytes(&mut sent).is_empty());
+        // …y otra vez al reconectar.
+        events.send(TermEvent::Connected(None)).unwrap();
+        events.send(TermEvent::Data(b"$ ".to_vec())).unwrap();
+        view.poll();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        view.poll();
+        assert_eq!(sent_bytes(&mut sent), [b"sudo -i\r".to_vec()]);
+        // Si la sesión se cierra antes, no se envía.
+        events.send(TermEvent::Connected(None)).unwrap();
+        events.send(TermEvent::Closed(None)).unwrap();
+        view.poll();
+        assert!(!view.is_waiting_login());
+        assert!(sent_bytes(&mut sent).is_empty());
     }
 
     #[test]
