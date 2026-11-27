@@ -349,8 +349,10 @@ impl vt100::Callbacks for TermCallbacks {
         self.bell = true;
     }
 
-    /// Informes de estado (DSR). La consola de Windows pregunta por la
-    /// posición del cursor al arrancar y no escribe nada hasta saberla.
+    /// Preguntas que las aplicaciones hacen al terminal. La consola de
+    /// Windows pide la posición del cursor al arrancar y no escribe nada
+    /// hasta saberla; otras shells preguntan qué terminal tienen delante y
+    /// esperan (o protestan) si nadie contesta.
     fn unhandled_csi(
         &mut self,
         screen: &mut vt100::Screen,
@@ -359,18 +361,21 @@ impl vt100::Callbacks for TermCallbacks {
         params: &[&[u16]],
         c: char,
     ) {
-        if intermediate.is_some() || c != 'n' || self.replies.len() >= MAX_PENDING_REPLIES {
+        if intermediate.is_some() || self.replies.len() >= MAX_PENDING_REPLIES {
             return;
         }
-        match params.first().and_then(|p| p.first()) {
+        let param = params.first().and_then(|p| p.first()).copied();
+        match (c, param) {
             // ¿Funciona el terminal? Sí.
-            Some(5) => self.replies.push(b"\x1b[0n".to_vec()),
+            ('n', Some(5)) => self.replies.push(b"\x1b[0n".to_vec()),
             // ¿Dónde está el cursor? (fila y columna, desde 1).
-            Some(6) => {
+            ('n', Some(6)) => {
                 let (row, col) = screen.cursor_position();
                 self.replies
                     .push(format!("\x1b[{};{}R", row + 1, col + 1).into_bytes());
             }
+            // ¿Qué terminal eres? Un VT220 con colores.
+            ('c', None | Some(0)) => self.replies.push(b"\x1b[?62;22c".to_vec()),
             _ => {}
         }
     }
@@ -2086,8 +2091,11 @@ mod tests {
         // Estado del terminal.
         feed(&mut view, b"\x1b[5n");
         assert_eq!(sent_bytes(&mut sent), [b"\x1b[0n".to_vec()]);
+        // Qué terminal es (lo pregunta, por ejemplo, fish al arrancar).
+        feed(&mut view, b"\x1b[c\x1b[0c");
+        assert_eq!(sent_bytes(&mut sent), vec![b"\x1b[?62;22c".to_vec(); 2]);
         // Otras consultas no se contestan, y una avalancha no se acumula.
-        feed(&mut view, b"\x1b[?6n\x1b[7n\x1b[n");
+        feed(&mut view, b"\x1b[?6n\x1b[7n\x1b[n\x1b[>c\x1b[1c");
         assert!(sent_bytes(&mut sent).is_empty());
         feed(&mut view, &b"\x1b[6n".repeat(100));
         assert_eq!(sent_bytes(&mut sent).len(), MAX_PENDING_REPLIES);
