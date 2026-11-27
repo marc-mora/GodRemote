@@ -72,6 +72,8 @@ struct Tab {
     rang: bool,
     /// El usuario le ha puesto nombre: se conserva al reabrirla.
     renamed: bool,
+    /// Es la pantalla del servidor X integrado.
+    x_server: bool,
 }
 
 /// Acción pedida desde el menú contextual de una pestaña.
@@ -270,6 +272,11 @@ pub struct App {
     tunnels_window: Option<TunnelsWindow>,
     /// Faltan por iniciar los túneles marcados para arrancar solos.
     pending_autostart: bool,
+    /// Servidor X integrado (arranca con la primera aplicación gráfica).
+    xhost: Arc<crate::xhost::XHost>,
+    /// Tamaño que pide la pestaña del servidor X y desde cuándo: se aplica
+    /// cuando deja de cambiar.
+    x_resize: Option<((u32, u32), Instant)>,
 }
 
 /// Vista dividida: varios terminales a la vez, en mosaico.
@@ -374,6 +381,9 @@ impl App {
             .options_mut(|o| o.input_options.max_double_click_delay = 0.5);
         let ctx = cc.egui_ctx.clone();
         let waker: Waker = Arc::new(move || ctx.request_repaint());
+        let xhost = crate::xhost::XHost::new(rt.handle().clone(), waker.clone());
+        xhost.configure(settings.x_server.embedded, settings.x_server.listen_local);
+        crate::xhost::install(xhost.clone());
         let (prompt_tx, prompt_rx) = std::sync::mpsc::channel();
         let (notice_tx, notice_rx) = std::sync::mpsc::channel();
 
@@ -452,6 +462,8 @@ impl App {
             tunnel_runs: HashMap::new(),
             tunnels_window: None,
             pending_autostart: true,
+            xhost,
+            x_resize: None,
         }
     }
 
@@ -507,6 +519,7 @@ impl App {
             unseen: false,
             rang: false,
             renamed: false,
+            x_server: false,
         });
         self.active = self.tabs.len() - 1;
     }
@@ -574,6 +587,64 @@ impl App {
             term.restart(backend, message);
         }
         Ok(())
+    }
+
+    /// Atiende al servidor X integrado: abre su pestaña cuando arranca, la
+    /// quita si se para y ajusta su pantalla al espacio de la pestaña.
+    fn sync_x_server(&mut self, ctx: &egui::Context) {
+        self.xhost.set_initial_size(
+            self.content_size.x.round().max(0.0) as u32,
+            (self.content_size.y - 30.0).round().max(0.0) as u32,
+        );
+        if let Some(backend) = self.xhost.take_backend() {
+            // Una pantalla anterior ya no sirve.
+            self.tabs.retain(|t| !t.x_server);
+            let mut view = DesktopView::new(backend, true);
+            view.clipboard_on_focus = true;
+            self.push_tab("Servidor X".into(), None, TabKind::Desktop(Box::new(view)));
+            if let Some(tab) = self.tabs.last_mut() {
+                tab.x_server = true;
+            }
+            self.x_resize = None;
+        }
+        let Some(server) = self.xhost.running() else {
+            // Parado (desde los ajustes): su pestaña ya no muestra nada.
+            if let Some(index) = self.tabs.iter().position(|t| t.x_server) {
+                self.close_tab(index);
+            }
+            return;
+        };
+        // La pantalla sigue al tamaño de la pestaña cuando deja de cambiar.
+        let Some(Tab {
+            kind: TabKind::Desktop(view),
+            x_server: true,
+            ..
+        }) = self.tabs.get(self.active)
+        else {
+            return;
+        };
+        let wanted = (
+            view.last_area.x.round() as u32,
+            view.last_area.y.round() as u32,
+        );
+        if wanted.0 < 64 || wanted.1 < 64 || view.remote_size().is_none_or(|size| size == wanted) {
+            self.x_resize = None;
+            return;
+        }
+        match self.x_resize {
+            Some((size, since)) if size == wanted => {
+                if since.elapsed() >= Duration::from_millis(250) {
+                    server.resize(wanted.0, wanted.1);
+                    self.x_resize = None;
+                } else {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
+            }
+            _ => {
+                self.x_resize = Some((wanted, Instant::now()));
+                ctx.request_repaint_after(Duration::from_millis(260));
+            }
+        }
     }
 
     /// Inicia un túnel del gestor sobre una conexión SSH propia.
@@ -1134,6 +1205,10 @@ impl App {
             theme.apply(ctx);
         }
         crate::highlight::set(&self.settings.highlight);
+        self.xhost.configure(
+            self.settings.x_server.embedded,
+            self.settings.x_server.listen_local,
+        );
         self.macros = MacroStore::load(&crate::paths::macros_file()).unwrap_or_default();
         // Los túneles en marcha eran de la configuración anterior.
         self.tunnel_runs.clear();
@@ -1947,6 +2022,8 @@ impl App {
                     return;
                 };
                 match (tab.session.clone(), &tab.kind) {
+                    // La pantalla del servidor X es única.
+                    (None, TabKind::Desktop(_)) => {}
                     (None, _) => self.open_local_terminal(),
                     (Some(session), TabKind::Terminal(_)) => self.open_terminal(session),
                     (Some(session), TabKind::Sftp(_)) => self.open_sftp(session, None),
@@ -1981,6 +2058,11 @@ impl App {
         }
         let active = self.tabs.get(self.active).map(|t| t.id);
         let closed = self.tabs.remove(index);
+        if closed.x_server {
+            // Cerrar su pestaña para el servidor X (y sus aplicaciones);
+            // volverá a arrancar con la siguiente.
+            self.xhost.stop();
+        }
         self.broadcast.chosen.remove(&closed.id);
         self.split.chosen.remove(&closed.id);
         if self
@@ -2624,6 +2706,41 @@ impl App {
                 }
             }
             TabKind::Sftp(view) => view.ui(ui),
+            TabKind::Desktop(view) if tab.x_server => {
+                ui.horizontal(|ui| {
+                    status_dot(ui, ok_color());
+                    ui.colored_label(ok_color(), "Servidor X integrado");
+                    let clients = self.xhost.running().map_or(0, |s| s.client_count());
+                    ui.weak(match clients {
+                        0 => "sin aplicaciones".to_string(),
+                        1 => "1 aplicación".to_string(),
+                        n => format!("{n} aplicaciones"),
+                    });
+                    if let Some((w, h)) = view.remote_size() {
+                        ui.weak(format!("· {w}×{h}"));
+                    }
+                    if let Some(display) = self.xhost.local_display() {
+                        ui.weak("· programas locales:");
+                        if ui
+                            .button(format!("DISPLAY={display}"))
+                            .on_hover_text("Copiar «export DISPLAY=…» al portapapeles")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(format!("export DISPLAY={display}"));
+                            notice = Some(("Copiado al portapapeles".into(), false));
+                        }
+                    } else if let Some(error) = self.xhost.local_error() {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    }
+                    if clients == 0 {
+                        ui.weak(
+                            "· lanza una aplicación gráfica desde un terminal SSH con el \
+                             reenvío X11 activado",
+                        );
+                    }
+                });
+                egui::Frame::NONE.show(ui, |ui| view.ui(ui));
+            }
             TabKind::Desktop(view) => {
                 ui.horizontal(|ui| {
                     match &view.state {
@@ -3410,6 +3527,7 @@ impl eframe::App for App {
             self.notify(notice, true);
         }
         self.poll_tunnels(ui.ctx(), &mut secrets);
+        self.sync_x_server(ui.ctx());
         // Solo se guardan secretos de sesiones que existen en el árbol.
         secrets.retain(|(key, _)| {
             key.split('/')
@@ -3502,6 +3620,17 @@ impl eframe::App for App {
             if changed {
                 self.settings.highlight.sanitize();
                 crate::highlight::set(&self.settings.highlight);
+                self.xhost.configure(
+                    self.settings.x_server.embedded,
+                    self.settings.x_server.listen_local,
+                );
+            }
+            if request.open_x_server && self.settings.x_server.embedded {
+                // Si ya está en marcha, se enseña su pestaña.
+                self.xhost.server();
+                if let Some(index) = self.tabs.iter().position(|t| t.x_server) {
+                    self.active = index;
+                }
             }
             if changed && let Err(e) = self.settings.save(&crate::paths::settings_file()) {
                 self.notify(

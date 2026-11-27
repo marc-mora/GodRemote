@@ -28,6 +28,8 @@ pub mod ui;
 pub mod vault;
 pub mod vnc;
 pub mod x11;
+pub mod xhost;
+pub mod xserver;
 
 /// `true` si esta compilación incluye el cliente RDP integrado.
 pub const HAS_EMBEDDED_RDP: bool = cfg!(feature = "rdp-integrado");

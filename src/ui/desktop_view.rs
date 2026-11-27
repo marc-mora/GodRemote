@@ -128,6 +128,19 @@ pub struct DesktopView {
     /// Texto del portapapeles remoto pendiente de copiar al local.
     remote_clipboard: Option<String>,
     want_focus: bool,
+    /// Espacio que tuvo la imagen la última vez que se dibujó (en puntos).
+    pub last_area: egui::Vec2,
+    /// Entregar el portapapeles local al recibir el foco, sin esperar a
+    /// Ctrl+V (las aplicaciones X pegan con el botón central o
+    /// Mayús+Insert, no con Ctrl+V).
+    pub clipboard_on_focus: bool,
+    /// Cuándo se pidió el portapapeles al sistema para sincronizarlo: el
+    /// «pegar» que llegue enseguida no es una pulsación de Ctrl+V.
+    clipboard_requested: Option<f64>,
+    /// Tenía el foco del teclado la última vez que se dibujó, y en qué
+    /// fotograma fue (una pestaña oculta no se dibuja).
+    was_focused: bool,
+    last_frame: u64,
 }
 
 impl DesktopView {
@@ -147,6 +160,11 @@ impl DesktopView {
             clipboard,
             remote_clipboard: None,
             want_focus: true,
+            last_area: egui::Vec2::ZERO,
+            clipboard_on_focus: false,
+            clipboard_requested: None,
+            was_focused: false,
+            last_frame: 0,
         }
     }
 
@@ -345,6 +363,7 @@ impl DesktopView {
         }
 
         let avail = ui.available_size();
+        self.last_area = avail;
         let (area, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
         let (rw, rh) = (self.size.0.max(1) as f32, self.size.1.max(1) as f32);
         // Se reduce para caber, pero nunca se amplía (se vería borroso).
@@ -497,7 +516,16 @@ impl DesktopView {
                     if self.clipboard {
                         self.send(DesktopInput::ClipboardText(text));
                     }
-                    self.ctrl_shortcut(b'v');
+                    // Si el portapapeles lo acabamos de pedir nosotros
+                    // para sincronizarlo, nadie ha pulsado Ctrl+V.
+                    let now = ui.input(|i| i.time);
+                    let requested = self
+                        .clipboard_requested
+                        .take()
+                        .is_some_and(|at| now - at < 0.5);
+                    if !requested {
+                        self.ctrl_shortcut(b'v');
+                    }
                 }
                 _ => {}
             }
@@ -505,6 +533,24 @@ impl DesktopView {
         if has_focus {
             self.sync_modifiers(modifiers);
         }
+        // Al volver a esta pestaña (o a la ventana) el portapapeles local
+        // puede haber cambiado: se pide para entregarlo.
+        let window_back = ui.input(|i| {
+            i.events
+                .iter()
+                .any(|event| matches!(event, Event::WindowFocused(true)))
+        });
+        // Si no se dibujó en el fotograma anterior, la pestaña estaba oculta.
+        let frame = ui.ctx().cumulative_frame_nr();
+        let shown_before = self.was_focused && frame <= self.last_frame + 1;
+        self.last_frame = frame;
+        if has_focus && (!shown_before || window_back) && self.clipboard && self.clipboard_on_focus
+        {
+            self.clipboard_requested = Some(ui.input(|i| i.time));
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+        }
+        self.was_focused = has_focus;
     }
 }
 

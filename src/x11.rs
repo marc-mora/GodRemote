@@ -1,12 +1,14 @@
 //! Reenvío X11: las aplicaciones gráficas del servidor se muestran en el
-//! servidor X local (el propio escritorio en Linux; VcXsrv, Xming o WSLg en
-//! Windows; XQuartz en macOS).
+//! servidor X integrado de GodRemote o en el del sistema (el propio
+//! escritorio en Linux; VcXsrv, Xming o WSLg en Windows; XQuartz en macOS).
 //!
 //! Al servidor remoto se le entrega una *cookie* falsa; cada conexión X11
-//! entrante debe presentarla y aquí se sustituye por la auténtica antes de
-//! pasarla al servidor X local, que nunca queda expuesto.
+//! entrante debe presentarla. Con el servidor integrado la comprueba él;
+//! con el del sistema se sustituye aquí por la auténtica antes de pasarla,
+//! de modo que el servidor X local nunca queda expuesto.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -113,27 +115,59 @@ pub fn find_cookie(xauthority: &[u8], display_number: u32) -> Option<Vec<u8>> {
     fallback
 }
 
+/// A dónde van las conexiones X11 reenviadas.
+enum Destination {
+    /// El servidor X del sistema.
+    Local {
+        display: LocalDisplay,
+        real_cookie: Option<Vec<u8>>,
+    },
+    /// El servidor X integrado de GodRemote.
+    Embedded(Arc<crate::xhost::XHost>),
+}
+
 /// Datos necesarios para atender conexiones X11 reenviadas.
 pub struct X11Forward {
-    pub display: LocalDisplay,
-    real_cookie: Option<Vec<u8>>,
+    destination: Destination,
     fake_cookie: [u8; 16],
 }
 
 impl X11Forward {
-    /// Localiza el servidor X local y prepara una cookie falsa.
+    /// Elige el servidor X (el integrado, si está activado; si no, el del
+    /// sistema) y prepara una cookie falsa.
     pub fn prepare() -> Result<Self> {
+        let mut fake_cookie = [0u8; 16];
+        rand::fill(&mut fake_cookie);
+        if let Some(host) = crate::xhost::active() {
+            return Ok(Self {
+                destination: Destination::Embedded(host),
+                fake_cookie,
+            });
+        }
         let display = local_display()?;
         let real_cookie = std::fs::read(xauthority_path())
             .ok()
             .and_then(|data| find_cookie(&data, display.number));
-        let mut fake_cookie = [0u8; 16];
-        rand::fill(&mut fake_cookie);
         Ok(Self {
-            display,
-            real_cookie,
+            destination: Destination::Local {
+                display,
+                real_cookie,
+            },
             fake_cookie,
         })
+    }
+
+    /// Las aplicaciones se verán en el servidor X integrado.
+    pub fn is_embedded(&self) -> bool {
+        matches!(self.destination, Destination::Embedded(_))
+    }
+
+    /// Número de pantalla (*screen*) que se anuncia al servidor remoto.
+    pub fn screen(&self) -> u32 {
+        match &self.destination {
+            Destination::Local { display, .. } => display.screen,
+            Destination::Embedded(_) => 0,
+        }
     }
 
     /// Cookie (falsa) que se anuncia al servidor remoto, en hexadecimal.
@@ -147,17 +181,28 @@ impl X11Forward {
     /// Atiende una conexión X11 llegada por el canal SSH.
     pub async fn bridge<S>(&self, mut channel: S) -> Result<()>
     where
-        S: AsyncRead + AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        let (display, real_cookie) = match &self.destination {
+            // El servidor integrado arranca con la primera aplicación y
+            // comprueba él mismo la cookie.
+            Destination::Embedded(host) => {
+                return host.server().serve(channel, Some(self.fake_cookie)).await;
+            }
+            Destination::Local {
+                display,
+                real_cookie,
+            } => (display, real_cookie),
+        };
         // Cabecera de conexión: se valida y se cambia la cookie.
         let mut head = [0u8; 12];
         channel.read_exact(&mut head).await?;
         let (name_len, data_len) = setup_lengths(&head)?;
         let mut rest = vec![0u8; pad4(name_len) + pad4(data_len)];
         channel.read_exact(&mut rest).await?;
-        let setup = rewrite_setup(&head, &rest, &self.fake_cookie, self.real_cookie.as_deref())?;
+        let setup = rewrite_setup(&head, &rest, &self.fake_cookie, real_cookie.as_deref())?;
 
-        match &self.display.target {
+        match &display.target {
             #[cfg(unix)]
             X11Target::Unix(path) => {
                 let mut local = tokio::net::UnixStream::connect(path)

@@ -893,7 +893,7 @@ async fn request_x11(
             false,
             crate::x11::COOKIE_PROTOCOL,
             forward.fake_cookie_hex(),
-            forward.display.screen,
+            forward.screen(),
         )
         .await?;
     let accepted = tokio::time::timeout(Duration::from_secs(15), async {
@@ -908,8 +908,13 @@ async fn request_x11(
     .await
     .unwrap_or(false);
     if accepted {
+        let message = if forward.is_embedded() {
+            "Reenvío X11 activo: las aplicaciones gráficas se abrirán en la pestaña «Servidor X»"
+        } else {
+            "Reenvío X11 activo (servidor X del sistema)"
+        };
         *handle.shared.x11.lock().unwrap() = Some(Arc::new(forward));
-        emit(TermEvent::Status("Reenvío X11 activo".into()));
+        emit(TermEvent::Status(message.into()));
     } else {
         emit(TermEvent::Status(
             "El servidor rechazó el reenvío X11 (¿X11Forwarding yes y xauth instalado?)".into(),

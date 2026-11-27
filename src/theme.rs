@@ -1172,6 +1172,9 @@ pub fn default_export_dir() -> PathBuf {
 pub struct Settings {
     #[serde(rename = "tema")]
     pub theme: String,
+    /// Servidor X para las aplicaciones gráficas reenviadas.
+    #[serde(rename = "servidor_x")]
+    pub x_server: XServerSettings,
     /// Barra de información del servidor bajo los terminales SSH.
     #[serde(rename = "barra_servidor")]
     pub server_bar: ServerBar,
@@ -1202,6 +1205,31 @@ pub struct Settings {
     pub highlight: crate::highlight::Highlight,
 }
 
+/// Dónde se muestran las aplicaciones gráficas que llegan por X11.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct XServerSettings {
+    /// Usar el servidor X integrado (en una pestaña) y no el del sistema.
+    #[serde(rename = "integrado")]
+    pub embedded: bool,
+    /// Aceptar también programas de este equipo (`DISPLAY=127.0.0.1:N`).
+    #[serde(rename = "local")]
+    pub listen_local: bool,
+}
+
+// (Fuera de Windows todo queda en `false`, pero no es derivable.)
+#[allow(clippy::derivable_impls)]
+impl Default for XServerSettings {
+    fn default() -> Self {
+        Self {
+            // En Windows no suele haber un servidor X; en Linux y macOS el
+            // del sistema entiende más extensiones.
+            embedded: cfg!(windows),
+            listen_local: false,
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -1215,6 +1243,7 @@ impl Default for Settings {
             editor: String::new(),
             activity_notice: true,
             highlight: Default::default(),
+            x_server: Default::default(),
         }
     }
 }
@@ -1436,6 +1465,10 @@ mod tests {
             reconnect_attempts: 3,
             restore_tabs: true,
             editor: "code -w".into(),
+            x_server: XServerSettings {
+                embedded: !cfg!(windows),
+                listen_local: true,
+            },
             activity_notice: false,
             highlight: crate::highlight::Highlight {
                 enabled: false,

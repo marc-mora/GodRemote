@@ -2,7 +2,8 @@
 
 Gestor de conexiones remotas escrito en Rust, al estilo de MobaXterm: un árbol
 jerárquico de equipos, terminales con pestañas (SSH, Telnet, puerto serie),
-explorador SFTP, escritorios remotos integrados (RDP y VNC), túneles, gestor de
+explorador SFTP, escritorios remotos integrados (RDP y VNC), servidor X propio
+para las aplicaciones gráficas remotas, túneles con su gestor, gestor de
 claves, snippets con atajos, vista dividida y escritura simultánea en varios
 terminales, ajustes heredados por carpeta, importación desde otras
 herramientas, temas personalizables y un baúl cifrado para las credenciales.
@@ -13,6 +14,7 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 ![Escribir en varios terminales a la vez](docs/difusion.png)
 ![Pestañas con nombre propio, avisos de actividad, enlaces y palabras resaltadas](docs/pestanas-y-enlaces.png)
 ![Gestor de túneles](docs/tuneles.png)
+![Servidor X integrado](docs/servidor-x.png)
 ![Snippets con atajos de teclado](docs/snippets.png)
 ![Escritorio remoto integrado](docs/escritorio.png)
 ![Temas](docs/temas.png)
@@ -28,7 +30,7 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 | **SSH** | Terminal integrado (xterm-256color, historial de 10 000 líneas, selección y copiar/pegar, ratón para `htop`, `mc`, `vim`…). Autenticación por contraseña, keyboard-interactive (PAM, códigos OTP), clave privada (OpenSSH, PEM, PuTTY `.ppk`) y agente SSH / Pageant. |
 | **Saltos (bastiones)** | Cada equipo tiene su lista ordenada de saltos SSH, como `ProxyJump a,b,c`. Vale para SSH, SFTP, Telnet, VNC y RDP integrado. |
 | **Túneles** | Reenvío local (`-L`), remoto (`-R`) y dinámico SOCKS5 (`-D`). Ligados a una sesión (se abren y se cierran con su terminal) o guardados en el **gestor de túneles**, que los inicia y los detiene sin abrir un terminal. |
-| **X11** | Reenvío de aplicaciones gráficas al servidor X local, con cookie de autenticación sustituida. |
+| **X11** | Servidor X propio, escrito en Rust e integrado: las aplicaciones gráficas remotas se ven en una pestaña sin instalar VcXsrv, Xming ni XQuartz. También puede usarse el servidor X del sistema. Reenvío por SSH con cookie de autenticación. |
 | **Verificación de host** | Usa `~/.ssh/known_hosts`, compartido con OpenSSH. Pregunta la primera vez y **rechaza** la conexión si la clave del servidor cambia. |
 | **Terminal** | Búsqueda en pantalla e historial, registro de la sesión en un fichero, reconexión automática si se cae la red y reapertura de las pestañas al arrancar. Enlaces que se abren con `Ctrl+clic` y palabras resaltadas (errores en rojo, avisos en amarillo…) con reglas propias. |
 | **Pestañas** | Se reordenan arrastrando, se renombran con doble clic y avisan cuando hay salida nueva (o suena la campana) en una que no estás mirando. |
@@ -151,11 +153,47 @@ En el editor de una sesión:
   así hasta el destino; el editor muestra el camino resultante. Si un salto
   necesita a su vez otros, se intercalan solos. Está disponible para SSH,
   SFTP, Telnet, VNC y RDP integrado (no con el cliente RDP externo).
-- **X11**: necesita un servidor X local (el propio escritorio en Linux;
-  VcXsrv, Xming o WSLg en Windows; XQuartz en macOS).
+- **X11**: marca «Reenviar aplicaciones gráficas (X11)» para que las
+  aplicaciones gráficas que lances en ese equipo se vean aquí, en el servidor
+  X integrado o en el del sistema (véase «Servidor X integrado»).
 - **Túneles**: tipo, dirección y puerto de escucha, y destino. La cabecera del
   terminal muestra cuántos están activos. Estos túneles viven mientras viva
   el terminal de la sesión.
+
+### Servidor X integrado
+
+GodRemote trae su propio servidor X, escrito en Rust: no hay que instalar
+ni arrancar nada aparte. En **⚙ Ajustes → Aplicaciones gráficas (X11)** se
+elige entre el **servidor X integrado** (por defecto en Windows) y el **del
+sistema** (por defecto en Linux y macOS: el escritorio, VcXsrv, Xming,
+XQuartz…).
+
+Con el integrado:
+
+- Conecta a un equipo SSH que tenga marcado el reenvío X11 y lanza una
+  aplicación gráfica desde su terminal (`xterm &`, `xclock &`…). El servidor
+  arranca con la primera aplicación y se abre la pestaña **Servidor X**, con
+  todas las ventanas dentro.
+- Cada ventana lleva su barra de título: se mueve arrastrándola, se trae al
+  frente con un clic y se cierra con su aspa. El teclado va a la ventana que
+  tiene el foco; el ratón, a la que está debajo.
+- La pantalla se ajusta sola al tamaño de la pestaña.
+- El portapapeles va en los dos sentidos: lo que selecciones en una
+  aplicación llega al portapapeles local, y el portapapeles local se
+  entrega a las aplicaciones al entrar en la pestaña. Dentro se pega como
+  en X: con el botón central o, en `xterm`, con `Mayús+Insert`.
+- Cerrar la pestaña **para el servidor** y cierra las aplicaciones que
+  tuviera; vuelve a arrancar solo con la siguiente.
+- **Aceptar también programas de este equipo** hace que escuche en
+  `127.0.0.1`; la pestaña muestra el `DISPLAY` que hay que usar (por ejemplo,
+  desde WSL o desde un terminal local).
+
+El servidor entiende el protocolo X11 básico (*core*): ventanas, dibujo,
+fuentes, colores, teclado, ratón y selecciones. Es suficiente para `xterm`,
+`xclock`, `xcalc`, `xeyes`, `xmessage`, editores y herramientas clásicas
+(Xlib, Xt, Athena, Motif, Tk). Las aplicaciones que exigen extensiones
+modernas (RENDER, XKB, GLX: GTK 3/4, Qt 5/6, navegadores) necesitan el
+servidor X del sistema.
 
 ### Gestor de túneles
 
@@ -397,8 +435,14 @@ recuperar; el resto de la configuración sigue intacta.
   (FreeRDP 2 y 3), nunca en la línea de órdenes.
 - Los túneles dinámicos y locales escuchan en `127.0.0.1` salvo que se indique
   otra dirección.
-- El reenvío X11 da a las aplicaciones remotas acceso a tu servidor X (pueden
-  leer el teclado y la pantalla): actívalo solo con servidores de confianza.
+- El reenvío X11 da a las aplicaciones remotas acceso al servidor X (pueden
+  leer el teclado y la pantalla de las demás aplicaciones X): actívalo solo
+  con servidores de confianza. Con el servidor integrado ese acceso se queda
+  dentro de su pestaña: no alcanza al resto de tu escritorio.
+- El servidor X integrado solo atiende las conexiones que llegan por un
+  reenvío SSH y presentan la cookie de esa sesión. Si activas «Aceptar
+  también programas de este equipo», escucha además en `127.0.0.1` **sin
+  autenticación**: cualquier programa de tu equipo puede conectarse.
 - Los enlaces del terminal los escribe el servidor: solo se abren los que
   empiezan por `http`, `https` o `ftp`, y se entregan al navegador sin pasar
   por un intérprete de órdenes. Aun así, mira a dónde lleva un enlace antes
@@ -440,7 +484,17 @@ recuperar; el resto de la configuración sigue intacta.
   solo admite texto Latin-1, como define el protocolo.
 - Escritorios remotos: la tecla Windows y Ctrl+Alt+Supr solo desde los
   botones; Ctrl+Alt a la vez se trata como AltGr.
-- X11: hace falta un servidor X local; GodRemote no trae uno propio.
+- **Servidor X integrado**: solo el protocolo básico de X11 y BIG-REQUESTS.
+  Sin RENDER, XKB, SHAPE, MIT-SHM, XInput, RANDR ni GLX, de modo que las
+  aplicaciones GTK 3/4, Qt 5/6, los navegadores y todo lo que use OpenGL no
+  arrancan o se ven mal: para ellas, el servidor X del sistema. Trabaja en
+  una sola pantalla dentro de su pestaña (las ventanas no salen al
+  escritorio como ventanas nativas), con un gestor de ventanas mínimo: mover,
+  traer al frente y cerrar, sin redimensionar ni minimizar desde la barra.
+  El texto se dibuja con las fuentes integradas de GodRemote, sea cual sea
+  la fuente X que pida la aplicación, así que las medidas no coinciden al
+  píxel con las de un servidor X tradicional. Probado con las aplicaciones
+  clásicas de X.Org en Linux; no con Motif, Tk ni Java.
 - **Gestor de túneles**: un túnel por conexión (dos túneles al mismo equipo
   abren dos conexiones SSH); no cuenta las conexiones ni el tráfico que
   pasan por cada túnel.
@@ -496,6 +550,9 @@ la edición «SSH reforzada», es decir, contra russh 0.65.4.
 - `tests/tunnel_manager.rs`: gestor de túneles contra un `sshd` real: local,
   SOCKS a través de un salto y remoto, sin terminal; parar y volver a
   iniciar, puerto ocupado, caída de la conexión y servidor apagado.
+- `tests/xserver_ssh.rs`: de extremo a extremo: una aplicación lanzada por
+  SSH con reenvío X11 (contra un `sshd` real) acaba dibujada en el servidor
+  X integrado; cambio de tamaño, parada y rearranque.
 - `tests/monitor_integration.rs`: barra de información contra un `sshd`
   real (datos coherentes con los del equipo, y la consulta deja de
   ejecutarse en el servidor al cerrarla).
@@ -520,6 +577,8 @@ src/
   tunnels.rs      reenvío de puertos y SOCKS5
   tunnel_manager.rs  túneles guardados, con su propia conexión
   x11.rs          reenvío X11
+  xserver/        servidor X propio (protocolo, dibujo, fuentes, ventanas)
+  xhost.rs        arranque del servidor X integrado bajo demanda
   sftp.rs         cliente SFTP y transferencias
   telnet.rs       cliente Telnet
   serial.rs       consola por puerto serie

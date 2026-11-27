@@ -12,6 +12,8 @@ pub struct SettingsRequest {
     pub open_folder: Option<std::path::PathBuf>,
     /// Abrir la ventana de importación y copias de seguridad.
     pub open_transfer: bool,
+    /// Arrancar el servidor X integrado y mostrar su pestaña.
+    pub open_x_server: bool,
 }
 
 #[derive(Default)]
@@ -114,11 +116,58 @@ impl SettingsWindow {
                             }
                         });
                         ui.separator();
+                        x_server_section(ui, settings, &mut request);
+                        ui.separator();
                         highlight_section(ui, &mut settings.highlight);
                     });
             });
         (open, *settings != before, request)
     }
+}
+
+/// Dónde se muestran las aplicaciones gráficas (X11).
+fn x_server_section(ui: &mut egui::Ui, settings: &mut Settings, request: &mut SettingsRequest) {
+    ui.strong("Aplicaciones gráficas (X11)");
+    let x = &mut settings.x_server;
+    ui.radio_value(
+        &mut x.embedded,
+        true,
+        "Servidor X integrado de GodRemote, en una pestaña",
+    )
+    .on_hover_text("No hace falta instalar nada: VcXsrv, Xming ni XQuartz");
+    ui.radio_value(
+        &mut x.embedded,
+        false,
+        "Servidor X del sistema (el escritorio de Linux, VcXsrv, Xming, XQuartz…)",
+    );
+    ui.add_enabled_ui(x.embedded, |ui| {
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut x.listen_local,
+                "Aceptar también programas de este equipo",
+            )
+            .on_hover_text(
+                "El servidor escucha en 127.0.0.1 y cualquier programa de este equipo puede \
+                 conectarse sin contraseña (por ejemplo, desde WSL). La pestaña «Servidor X» \
+                 indica el valor de DISPLAY",
+            );
+            if ui
+                .button("Abrir su pestaña")
+                .on_hover_text("Arranca el servidor X integrado y muestra su pantalla")
+                .clicked()
+            {
+                request.open_x_server = true;
+            }
+        });
+    });
+    ui.weak(
+        "El servidor integrado se usa con las sesiones SSH que tengan marcado «Reenviar \
+         aplicaciones gráficas (X11)» y arranca con la primera aplicación. Entiende el \
+         protocolo X11 básico (xterm, xclock, editores y herramientas clásicas); las \
+         aplicaciones que exigen extensiones modernas (RENDER, XKB, GLX: GTK 3, Qt 5, \
+         navegadores) necesitan el servidor X del sistema. El cambio afecta a las \
+         conexiones nuevas.",
+    );
 }
 
 /// Palabras resaltadas y enlaces del terminal.
