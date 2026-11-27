@@ -339,11 +339,40 @@ struct TermCallbacks {
     cwd: Option<String>,
     /// Ha sonado la campana (BEL) desde la última vez que se miró.
     bell: bool,
+    /// Respuestas que el terminal debe enviar a quien le pregunta por su
+    /// estado o por la posición del cursor.
+    replies: Vec<Vec<u8>>,
 }
 
 impl vt100::Callbacks for TermCallbacks {
     fn audible_bell(&mut self, _: &mut vt100::Screen) {
         self.bell = true;
+    }
+
+    /// Informes de estado (DSR). La consola de Windows pregunta por la
+    /// posición del cursor al arrancar y no escribe nada hasta saberla.
+    fn unhandled_csi(
+        &mut self,
+        screen: &mut vt100::Screen,
+        intermediate: Option<u8>,
+        _: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        if intermediate.is_some() || c != 'n' || self.replies.len() >= MAX_PENDING_REPLIES {
+            return;
+        }
+        match params.first().and_then(|p| p.first()) {
+            // ¿Funciona el terminal? Sí.
+            Some(5) => self.replies.push(b"\x1b[0n".to_vec()),
+            // ¿Dónde está el cursor? (fila y columna, desde 1).
+            Some(6) => {
+                let (row, col) = screen.cursor_position();
+                self.replies
+                    .push(format!("\x1b[{};{}R", row + 1, col + 1).into_bytes());
+            }
+            _ => {}
+        }
     }
 
     fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
@@ -418,6 +447,10 @@ fn find_all(line: &[char], needle: &[char]) -> Vec<usize> {
         })
         .collect()
 }
+
+/// Respuestas a informes de estado que se guardan como mucho entre dos
+/// lecturas: una salida que pregunte sin parar no llena la memoria.
+const MAX_PENDING_REPLIES: usize = 8;
 
 /// Silencio tras el saludo de la shell antes de enviar las órdenes de
 /// conexión, y espera máxima si la shell no dice nada.
@@ -776,6 +809,11 @@ impl TerminalView {
                     self.activity |= !data.is_empty();
                     self.parser.process(&data);
                     self.generation += 1;
+                    // Lo que la aplicación haya preguntado al terminal se
+                    // contesta sin pasar por el teclado (ni por la difusión).
+                    for reply in std::mem::take(&mut self.parser.callbacks_mut().replies) {
+                        let _ = self.backend.cmd.send(TermCmd::Input(reply));
+                    }
                     if let Some((_, last_output)) = &mut self.login_wait {
                         *last_output = Some(std::time::Instant::now());
                     }
@@ -2030,6 +2068,34 @@ mod tests {
         });
         let decor = view.decor(&off);
         assert!(decor.links.is_empty() && decor.colors.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn status_reports_are_answered() {
+        let (mut view, mut sent, events) = fake_terminal();
+        let feed = |view: &mut TerminalView, data: &[u8]| {
+            events.send(TermEvent::Data(data.to_vec())).unwrap();
+            view.poll();
+        };
+        // Posición del cursor: al principio, arriba a la izquierda.
+        feed(&mut view, b"\x1b[6n");
+        assert_eq!(sent_bytes(&mut sent), [b"\x1b[1;1R".to_vec()]);
+        // Después de escribir, donde haya quedado.
+        feed(&mut view, b"uno\r\ndos\x1b[6n");
+        assert_eq!(sent_bytes(&mut sent), [b"\x1b[2;4R".to_vec()]);
+        // Estado del terminal.
+        feed(&mut view, b"\x1b[5n");
+        assert_eq!(sent_bytes(&mut sent), [b"\x1b[0n".to_vec()]);
+        // Otras consultas no se contestan, y una avalancha no se acumula.
+        feed(&mut view, b"\x1b[?6n\x1b[7n\x1b[n");
+        assert!(sent_bytes(&mut sent).is_empty());
+        feed(&mut view, &b"\x1b[6n".repeat(100));
+        assert_eq!(sent_bytes(&mut sent).len(), MAX_PENDING_REPLIES);
+        // Contestar no es escribir: no se repite en otros terminales.
+        view.mirror = Some(vec![]);
+        feed(&mut view, b"\x1b[6n");
+        assert_eq!(sent_bytes(&mut sent).len(), 1);
+        assert!(view.mirror.as_ref().unwrap().is_empty());
     }
 
     #[test]

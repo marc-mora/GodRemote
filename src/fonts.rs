@@ -325,7 +325,8 @@ mod tests {
             "{:?}",
             fonts.iter().map(|f| &f.family).collect::<Vec<_>>()
         );
-        assert!(!fonts.iter().any(|f| f.family.contains("Emoji")));
+        // (La de Linux solo trae emojis; la de Windows sí tiene letras.)
+        assert!(!fonts.iter().any(|f| f.family == "Noto Color Emoji"));
 
         // Se localiza por nombre (sin distinguir mayúsculas) o por ruta.
         let first = &fonts[0];
