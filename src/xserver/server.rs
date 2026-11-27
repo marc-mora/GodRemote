@@ -12,6 +12,9 @@ use super::draw::{Budget, Gc, Image, MAX_TOTAL_PIXELS, Rect};
 use super::font::Font;
 use super::keymap::Keymap;
 use super::proto::*;
+use super::render::{GlyphSet, Picture};
+use super::shape::{Region, region_contains};
+use super::wm::{Ewmh, WmDrag};
 use crate::desktop::DesktopEvent;
 
 /// Identificador de cliente; el 0 es el propio servidor.
@@ -31,6 +34,8 @@ pub const MAX_CLIENTS: u32 = 255;
 // equipos: entrada no fiable). Al superarlos la petición recibe `BadAlloc`.
 /// Ventanas anidadas unas dentro de otras: acota la recursión del árbol.
 pub const MAX_TREE_DEPTH: usize = 200;
+/// Niveles de ventanas con forma (SHAPE) anidadas que se respetan al pintar.
+const MAX_NESTED_SHAPES: usize = 3;
 /// Recursos (ventanas, pixmaps, GC, fuentes, cursores, mapas de color).
 pub const MAX_RESOURCES: usize = 400_000;
 /// Fuentes abiertas a la vez (cada una guarda sus métricas).
@@ -185,6 +190,9 @@ pub struct KnownAtoms {
     pub wm_take_focus: Xid,
     pub clipboard: Xid,
     pub utf8_string: Xid,
+    /// «text/plain;charset=utf-8»: como piden el texto GTK 3 y los
+    /// navegadores antes que UTF8_STRING.
+    pub text_plain_utf8: Xid,
     pub targets: Xid,
     pub text: Xid,
     pub timestamp: Xid,
@@ -289,8 +297,19 @@ pub struct Window {
     pub grabs: Vec<PassiveGrab>,
     /// El gestor integrado ya eligió su posición inicial.
     pub placed: bool,
+    /// Maximizada a lo ancho / a lo alto / a pantalla completa.
+    pub max_h: bool,
+    pub max_v: bool,
+    pub fullscreen: bool,
+    /// Geometría `(x, y, ancho, alto)` de antes de maximizarla.
+    pub saved: Option<(i32, i32, u32, u32)>,
     /// Barra de título ya dibujada: `(ancho, activa, imagen)`.
     pub title_cache: Option<(i32, bool, Arc<Image>)>,
+    /// SHAPE: forma de contorno y de entrada (rectangular si no hay) y
+    /// clientes que quieren saber cuándo cambian.
+    pub shape: Option<Region>,
+    pub input_shape: Option<Region>,
+    pub shape_listeners: Vec<ClientId>,
 }
 
 impl Window {
@@ -364,29 +383,6 @@ pub struct KeyboardGrab {
     pub by_key: Option<u8>,
 }
 
-/// Arrastre en curso de una ventana por su decoración.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WmDrag {
-    Move {
-        window: Xid,
-        dx: i32,
-        dy: i32,
-    },
-    Resize {
-        window: Xid,
-        /// Bordes que se mueven: izquierdo, derecho, inferior.
-        left: bool,
-        right: bool,
-        bottom: bool,
-        start: (i32, i32),
-        geometry: (i32, i32, i32, i32),
-    },
-    /// Botón de cerrar pulsado: cierra si se suelta encima.
-    Close {
-        window: Xid,
-    },
-}
-
 pub struct Server {
     pub width: u32,
     pub height: u32,
@@ -401,6 +397,18 @@ pub struct Server {
     pub fonts: HashMap<Xid, (ClientId, Font)>,
     pub cursors: HashMap<Xid, ClientId>,
     pub colormaps: HashMap<Xid, ClientId>,
+    /// RENDER: imágenes componibles y conjuntos de glifos.
+    pub pictures: HashMap<Xid, Picture>,
+    pub glyphsets: HashMap<Xid, GlyphSet>,
+    /// Bytes que ocupan los glifos de todos los conjuntos.
+    pub glyph_bytes: usize,
+    /// Pixmaps ya liberados que algún `Picture` sigue usando, con un
+    /// identificador interno.
+    pub zombie_pixmaps: HashMap<Xid, Pixmap>,
+    pub next_internal: Xid,
+    /// RANDR: quién quiere avisos y cuándo cambió la pantalla por última vez.
+    pub randr_listeners: Vec<super::randr::Listener>,
+    pub randr_time: u32,
     pub atoms: Atoms,
     pub known: KnownAtoms,
     pub default_font: Font,
@@ -420,6 +428,10 @@ pub struct Server {
     /// Cliente que hace de gestor de ventanas (redirige la raíz).
     pub wm_client: Option<ClientId>,
     pub wm_drag: Option<WmDrag>,
+    /// Átomos de EWMH del gestor integrado.
+    pub ewmh: Ewmh,
+    /// Último clic en una barra de título: `(ventana, hora, posición)`.
+    pub last_title_click: Option<(Xid, u32, (i32, i32))>,
     /// Siguiente hueco de la colocación en cascada.
     pub cascade: u32,
     /// Zonas de pantalla que hay que recomponer.
@@ -489,6 +501,7 @@ impl Server {
             wm_take_focus: atoms.intern("WM_TAKE_FOCUS"),
             clipboard: atoms.intern("CLIPBOARD"),
             utf8_string: atoms.intern("UTF8_STRING"),
+            text_plain_utf8: atoms.intern("text/plain;charset=utf-8"),
             targets: atoms.intern("TARGETS"),
             text: atoms.intern("TEXT"),
             timestamp: atoms.intern("TIMESTAMP"),
@@ -497,6 +510,7 @@ impl Server {
             motif_wm_hints: atoms.intern("_MOTIF_WM_HINTS"),
             transfer: atoms.intern("GODREMOTE_SELECTION"),
         };
+        let ewmh = Ewmh::new(&mut atoms);
         let mut server = Server {
             width,
             height,
@@ -509,6 +523,13 @@ impl Server {
             fonts: HashMap::new(),
             cursors: HashMap::new(),
             colormaps: HashMap::new(),
+            pictures: HashMap::new(),
+            glyphsets: HashMap::new(),
+            glyph_bytes: 0,
+            zombie_pixmaps: HashMap::new(),
+            next_internal: 0x1000,
+            randr_listeners: vec![],
+            randr_time: 1,
             atoms,
             known,
             default_font: super::font::open("fixed").expect("fuente por defecto"),
@@ -525,6 +546,8 @@ impl Server {
             keyboard_grab: None,
             wm_client: None,
             wm_drag: None,
+            ewmh,
+            last_title_click: None,
             cascade: 0,
             damage: vec![],
             resized: false,
@@ -550,6 +573,7 @@ impl Server {
         let mut internal = server.blank_window(SERVER_WINDOW, 0, ROOT, 0, true);
         (internal.x, internal.y, internal.w, internal.h) = (-10, -10, 1, 1);
         server.windows.insert(SERVER_WINDOW, internal);
+        server.wm_announce();
         server.damage_screen(Rect::new(0, 0, width as i32, height as i32));
         server
     }
@@ -592,7 +616,14 @@ impl Server {
             image: None,
             grabs: vec![],
             placed: false,
+            max_h: false,
+            max_v: false,
+            fullscreen: false,
+            saved: None,
             title_cache: None,
+            shape: None,
+            input_shape: None,
+            shape_listeners: vec![],
         }
     }
 
@@ -650,7 +681,9 @@ impl Server {
             + self.gcs.len()
             + self.fonts.len()
             + self.cursors.len()
-            + self.colormaps.len();
+            + self.colormaps.len()
+            + self.pictures.len()
+            + self.glyphsets.len();
         if total >= MAX_RESOURCES {
             return Err(XError::new(BAD_ALLOC, id));
         }
@@ -659,7 +692,9 @@ impl Server {
             || self.gcs.contains_key(&id)
             || self.fonts.contains_key(&id)
             || self.cursors.contains_key(&id)
-            || self.colormaps.contains_key(&id);
+            || self.colormaps.contains_key(&id)
+            || self.pictures.contains_key(&id)
+            || self.glyphsets.contains_key(&id);
         if Self::owner_of(id) != client || used {
             return Err(XError::new(BAD_ID_CHOICE, id));
         }
@@ -731,8 +766,11 @@ impl Server {
         for w in self.windows.values_mut() {
             w.masks.retain(|(c, _)| *c != id);
             w.grabs.retain(|g| g.client != id);
+            w.shape_listeners.retain(|c| *c != id);
         }
         self.pixmaps.retain(|_, p| p.owner != id);
+        self.render_remove_client(id);
+        self.randr_remove_client(id);
         self.gcs.retain(|_, (c, _)| *c != id);
         self.fonts.retain(|_, (c, _)| *c != id);
         self.cursors.retain(|_, c| *c != id);
@@ -750,6 +788,17 @@ impl Server {
             return;
         }
         if let Some(c) = self.clients.get_mut(&client) {
+            if super::requests::tracing() && ev.code() != MOTION_NOTIFY {
+                eprintln!(
+                    "[x11] cliente {client}: evento {} ({:#x}, {:#x}, {:#x}, {:#x}, {:#x})",
+                    ev.code(),
+                    ev.u32_at(4),
+                    ev.u32_at(8),
+                    ev.u32_at(12),
+                    ev.u32_at(16),
+                    ev.u32_at(20)
+                );
+            }
             let bytes = ev.encode(c.be, c.seq);
             c.out.extend_from_slice(&bytes);
         }
@@ -885,8 +934,16 @@ impl Server {
                     continue;
                 };
                 if c.mapped && c.outer().translate(ox, oy).contains(x, y) {
-                    ox += c.x + c.bw as i32;
-                    oy += c.y + c.bw as i32;
+                    let (cx, cy) = (ox + c.x + c.bw as i32, oy + c.y + c.bw as i32);
+                    // Con forma, solo cuenta lo que cae dentro de ella.
+                    let outside = [&c.shape, &c.input_shape]
+                        .into_iter()
+                        .flatten()
+                        .any(|region| !region_contains(region, x - cx, y - cy));
+                    if outside {
+                        continue;
+                    }
+                    (ox, oy) = (cx, cy);
                     cur = *child;
                     continue 'descend;
                 }
@@ -979,9 +1036,11 @@ impl Server {
     }
 
     fn paint_tree(&self, id: Xid, ox: i32, oy: i32, clip: Rect, target: &mut Target) {
-        self.paint_level(id, ox, oy, clip, target, 0);
+        self.paint_level(id, ox, oy, clip, target, (0, 0));
     }
 
+    /// `level`: profundidad en el árbol y cuántas ventanas con forma hay ya
+    /// por encima.
     fn paint_level(
         &self,
         id: Xid,
@@ -989,12 +1048,27 @@ impl Server {
         oy: i32,
         clip: Rect,
         target: &mut Target,
-        level: usize,
+        level: (usize, usize),
     ) {
         let Some(w) = self.windows.get(&id) else {
             return;
         };
-        if level > MAX_TREE_DEPTH + 2 {
+        let (depth, shaped) = level;
+        if depth > MAX_TREE_DEPTH + 2 {
+            return;
+        }
+        // Una ventana con forma se pinta (con sus hijas) trozo a trozo. Solo
+        // se respetan unos pocos niveles de formas anidadas: más allá, el
+        // trabajo se multiplicaría sin que nadie lo necesite.
+        if let Some(region) = &w.shape
+            && shaped < MAX_NESTED_SHAPES
+        {
+            for r in region.iter() {
+                let part = r.translate(ox, oy).intersect(&clip);
+                if !part.is_empty() {
+                    self.paint_body(w, ox, oy, part, target, (depth, shaped + 1));
+                }
+            }
             return;
         }
         let inner = Rect::new(ox, oy, w.w as i32, w.h as i32);
@@ -1010,6 +1084,20 @@ impl Server {
                 target.fill(part.intersect(&clip), w.border_pixel);
             }
         }
+        self.paint_body(w, ox, oy, clip, target, level);
+    }
+
+    /// Interior de una ventana y sus hijas, recortados a `clip`.
+    fn paint_body(
+        &self,
+        w: &Window,
+        ox: i32,
+        oy: i32,
+        clip: Rect,
+        target: &mut Target,
+        level: (usize, usize),
+    ) {
+        let inner = Rect::new(ox, oy, w.w as i32, w.h as i32);
         let visible = inner.intersect(&clip);
         if visible.is_empty() {
             return;
@@ -1025,10 +1113,10 @@ impl Server {
                 continue;
             }
             let (cx, cy) = (ox + c.x + c.bw as i32, oy + c.y + c.bw as i32);
-            if id == ROOT && self.decorated(c) {
+            if w.id == ROOT && self.decorated(c) {
                 self.paint_decoration(c, visible, target);
             }
-            self.paint_level(*child, cx, cy, visible, target, level + 1);
+            self.paint_level(*child, cx, cy, visible, target, (level.0 + 1, level.1));
         }
     }
 
@@ -1201,15 +1289,10 @@ impl Server {
         {
             self.keyboard_grab = None;
         }
-        if let Some(drag) = self.wm_drag {
-            let window = match drag {
-                WmDrag::Move { window, .. }
-                | WmDrag::Resize { window, .. }
-                | WmDrag::Close { window } => window,
-            };
-            if gone(self, window) {
-                self.wm_drag = None;
-            }
+        if let Some(drag) = self.wm_drag
+            && gone(self, drag.window())
+        {
+            self.wm_drag = None;
         }
         if let Focus::Window(f) = self.focus
             && gone(self, f)
@@ -1247,6 +1330,8 @@ impl Server {
             let Some(w) = self.windows.remove(&id) else {
                 continue;
             };
+            self.render_window_destroyed(id);
+            self.randr_window_destroyed(id);
             let bytes: usize = w.props.iter().map(|p| p.data.len()).sum();
             self.property_bytes = self.property_bytes.saturating_sub(bytes);
             if let Some(parent) = self.windows.get_mut(&w.parent) {
@@ -1666,12 +1751,26 @@ impl Server {
         let property = if property == 0 { target } else { property };
         let k = &self.known;
         let prop = if target == k.targets {
-            let targets = [k.targets, k.utf8_string, A_STRING, k.text, k.timestamp];
+            let targets = [
+                k.targets,
+                k.utf8_string,
+                k.text_plain_utf8,
+                A_STRING,
+                k.text,
+                k.timestamp,
+            ];
             Property {
                 name: property,
                 kind: A_ATOM,
                 format: 32,
                 data: targets.iter().flat_map(|a| a.to_le_bytes()).collect(),
+            }
+        } else if target == k.text_plain_utf8 {
+            Property {
+                name: property,
+                kind: target,
+                format: 8,
+                data: text.into_bytes(),
             }
         } else if target == k.utf8_string || (target == k.text && !text.chars().all(latin1)) {
             Property {
@@ -1765,6 +1864,7 @@ impl Server {
         self.expose(ROOT, &[whole]);
         self.damage_screen(whole);
         self.notify_configure(ROOT);
+        self.randr_screen_changed();
         self.wm_keep_on_screen();
     }
 }

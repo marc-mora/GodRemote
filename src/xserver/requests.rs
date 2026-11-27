@@ -5,11 +5,14 @@
 use super::draw::{Image, Rect};
 use super::keymap::{KEYSYMS_PER_KEYCODE, MAX_KEYCODE, MIN_KEYCODE};
 use super::proto::*;
+use super::randr::{RANDR_FIRST_ERROR, RANDR_FIRST_EVENT, RANDR_OPCODE};
+use super::render::{RENDER_FIRST_ERROR, RENDER_OPCODE};
 use super::server::{
     Background, ClientId, DEFAULT_COLORMAP, Focus, KeyboardGrab, MAX_PROPERTY_BYTES,
     MAX_TREE_DEPTH, PassiveGrab, PointerGrab, Property, ROOT, ROOT_VISUAL, Server,
     swap_property_data,
 };
+use super::shape::{SHAPE_FIRST_EVENT, SHAPE_OPCODE};
 use super::wm::{FRAME, TITLE_H};
 use super::xkb::{XKB_FIRST_ERROR, XKB_FIRST_EVENT, XKB_OPCODE};
 
@@ -25,9 +28,25 @@ const MAX_ATOM_NAME: usize = 1024;
 /// Con la variable de entorno `GODREMOTE_X11_TRACE` se anota en la salida de
 /// errores cada petición y cada error X: sirve para depurar un cliente que
 /// se cierra sin dar explicaciones.
-fn tracing() -> bool {
+pub(super) fn tracing() -> bool {
     static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *TRACE.get_or_init(|| std::env::var_os("GODREMOTE_X11_TRACE").is_some())
+}
+
+/// Con `GODREMOTE_X11_DISABLE=RENDER,SHAPE…` el servidor deja de anunciar
+/// esas extensiones: sirve para averiguar si un fallo de dibujo de una
+/// aplicación viene de una de ellas (y para salir del paso si es así).
+fn disabled(name: &[u8]) -> bool {
+    static OFF: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+    OFF.get_or_init(|| {
+        std::env::var("GODREMOTE_X11_DISABLE")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().as_bytes().to_vec())
+            .collect()
+    })
+    .iter()
+    .any(|off| off == name)
 }
 
 impl Server {
@@ -41,8 +60,17 @@ impl Server {
         let (be, seq) = (c.be, c.seq);
         let trace = tracing();
         if trace {
+            // (Con `GODREMOTE_X11_TRACE=2`, además, el principio del cuerpo.)
+            static DETAIL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let detail = *DETAIL
+                .get_or_init(|| std::env::var("GODREMOTE_X11_TRACE").is_ok_and(|v| v == "2"));
+            let head = if detail {
+                format!(": {:02x?}", &body[..body.len().min(32)])
+            } else {
+                String::new()
+            };
             eprintln!(
-                "[x11] cliente {client} #{seq}: petición {opcode} ({data}), {} bytes",
+                "[x11] cliente {client} #{seq}: petición {opcode} ({data}), {} bytes{head}",
                 body.len()
             );
         }
@@ -385,27 +413,21 @@ impl Server {
                 rd.skip(2)?;
                 let name = rd.bytes(len)?;
                 // (presente, código de operación, primer evento, primer error)
-                let answer = match name {
-                    b"BIG-REQUESTS" => (1, BIG_REQUESTS_OPCODE, 0, 0),
-                    // Solo si se pidió, para xdotool: véase `xkb.rs`.
-                    b"XKEYBOARD" if self.xkb_compat => {
-                        (1, XKB_OPCODE, XKB_FIRST_EVENT, XKB_FIRST_ERROR)
-                    }
-                    _ => (0, 0, 0, 0),
-                };
+                let answer = self
+                    .extensions()
+                    .into_iter()
+                    .find(|e| e.0 == name)
+                    .map_or((0, 0, 0, 0), |e| (1, e.1, e.2, e.3));
                 let mut w = self.reply(c, 0);
                 w.u8(answer.0).u8(answer.1).u8(answer.2).u8(answer.3);
                 self.send_reply(c, w);
                 Ok(())
             }
             99 => {
-                let mut names: Vec<&[u8]> = vec![b"BIG-REQUESTS"];
-                if self.xkb_compat {
-                    names.push(b"XKEYBOARD");
-                }
+                let names = self.extensions();
                 let mut w = self.reply(c, names.len() as u8);
                 w.zeros(24);
-                for name in names {
+                for (name, ..) in names {
                     w.u8(name.len() as u8).bytes(name);
                 }
                 self.send_reply(c, w);
@@ -524,9 +546,33 @@ impl Server {
                 Ok(())
             }
             XKB_OPCODE if self.xkb_compat => self.dispatch_xkb(c, data, rd),
+            RENDER_OPCODE if self.has_extension(RENDER_OPCODE) => self.dispatch_render(c, data, rd),
+            SHAPE_OPCODE if self.has_extension(SHAPE_OPCODE) => self.dispatch_shape(c, data, rd),
+            RANDR_OPCODE if self.has_extension(RANDR_OPCODE) => self.dispatch_randr(c, data, rd),
             // Códigos sin asignar y extensiones que no existen.
             _ => Err(XError::new(BAD_REQUEST, 0)),
         }
+    }
+
+    /// Extensiones presentes: (nombre, código de operación, primer evento,
+    /// primer error).
+    fn extensions(&self) -> Vec<(&'static [u8], u8, u8, u8)> {
+        let mut all: Vec<(&'static [u8], u8, u8, u8)> = vec![
+            (b"BIG-REQUESTS", BIG_REQUESTS_OPCODE, 0, 0),
+            (b"RENDER", RENDER_OPCODE, 0, RENDER_FIRST_ERROR),
+            (b"SHAPE", SHAPE_OPCODE, SHAPE_FIRST_EVENT, 0),
+            (b"RANDR", RANDR_OPCODE, RANDR_FIRST_EVENT, RANDR_FIRST_ERROR),
+        ];
+        // Solo si se pidió, para xdotool: véase `xkb.rs`.
+        if self.xkb_compat {
+            all.push((b"XKEYBOARD", XKB_OPCODE, XKB_FIRST_EVENT, XKB_FIRST_ERROR));
+        }
+        all.retain(|e| !disabled(e.0));
+        all
+    }
+
+    fn has_extension(&self, opcode: u8) -> bool {
+        self.extensions().iter().any(|e| e.1 == opcode)
     }
 
     fn check_atom(&self, atom: Xid) -> XResult {
@@ -1061,6 +1107,14 @@ impl Server {
                 .u32(property)
                 .done()
         };
+        if tracing() {
+            eprintln!(
+                "[x11] cliente {c}: ConvertSelection de {} a {} (dueño: {:?})",
+                self.atoms.name(selection).unwrap_or("?"),
+                self.atoms.name(target).unwrap_or("?"),
+                self.selections.get(&selection).map(|s| s.client)
+            );
+        }
         match self.selections.get(&selection).copied() {
             // Nadie la tiene: se rechaza.
             None => self.send(c, notify(0)),
@@ -1110,6 +1164,21 @@ impl Server {
                 w
             }
         };
+        if tracing() {
+            let kind = match ev.code() {
+                CLIENT_MESSAGE => self.atoms.name(ev.u32_at(8)).unwrap_or("?"),
+                _ => "",
+            };
+            eprintln!(
+                "[x11] cliente {c}: SendEvent a {window:#x}, evento {} {kind}",
+                ev.code()
+            );
+        }
+        // Lo que las aplicaciones piden al gestor de ventanas va como
+        // mensaje a la raíz; si no hay uno de verdad, lo atiende el integrado.
+        if window == ROOT && self.wm_client.is_none() && ev.code() == CLIENT_MESSAGE {
+            self.wm_client_message(&ev);
+        }
         if mask == 0 {
             let owner = self.win(window)?.owner;
             self.send(owner, ev);

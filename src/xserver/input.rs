@@ -404,10 +404,13 @@ impl Server {
             }
             return;
         }
-        if self.wm_button_release(button) {
+        // (Un arrastre del gestor puede haber empezado con el botón ya
+        // entregado a la aplicación: el estado se limpia en todo caso.)
+        let consumed = self.wm_button_release(button);
+        self.buttons &= !bit;
+        if consumed {
             return;
         }
-        self.buttons &= !bit;
         if self.grab.is_some() {
             self.deliver_grabbed(BUTTON_RELEASE, button, M_BUTTON_RELEASE, state);
             if self.buttons == 0 && self.grab.as_ref().is_some_and(|g| g.by_button) {

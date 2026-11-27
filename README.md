@@ -35,7 +35,7 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 | **SSH** | Terminal integrado (xterm-256color, historial de 10 000 líneas, selección y copiar/pegar, ratón para `htop`, `mc`, `vim`…). Autenticación por contraseña, keyboard-interactive (PAM, códigos OTP), clave privada (OpenSSH, PEM, PuTTY `.ppk`) y agente SSH / Pageant. |
 | **Saltos (bastiones)** | Cada equipo tiene su lista ordenada de saltos SSH, como `ProxyJump a,b,c`. Vale para SSH, SFTP, Telnet, VNC y RDP integrado. |
 | **Túneles** | Reenvío local (`-L`), remoto (`-R`) y dinámico SOCKS5 (`-D`). Ligados a una sesión (se abren y se cierran con su terminal) o guardados en el **gestor de túneles**, que los inicia y los detiene sin abrir un terminal. |
-| **X11** | Servidor X propio, escrito en Rust e integrado: las aplicaciones gráficas remotas se ven en una pestaña sin instalar VcXsrv, Xming ni XQuartz. También puede usarse el servidor X del sistema. Reenvío por SSH con cookie de autenticación. |
+| **X11** | Servidor X propio, escrito en Rust e integrado: las aplicaciones gráficas remotas (clásicas, GTK 3, Qt 5, Tk, Motif, Java) se ven en una pestaña sin instalar VcXsrv, Xming ni XQuartz. También puede usarse el servidor X del sistema. Reenvío por SSH con cookie de autenticación. |
 | **Agente y proxy** | Reenvío del agente SSH a un equipo (como `ssh -A`) y salida a través de un proxy HTTP o SOCKS5 de empresa. |
 | **Verificación de host** | Usa `~/.ssh/known_hosts`, compartido con OpenSSH. Pregunta la primera vez y **rechaza** la conexión si la clave del servidor cambia. |
 | **Terminal** | Búsqueda en pantalla e historial, registro de la sesión en un fichero, reconexión automática si se cae la red y reapertura de las pestañas al arrancar. Enlaces que se abren con `Ctrl+clic` y palabras resaltadas (errores en rojo, avisos en amarillo…) con reglas propias. |
@@ -271,10 +271,13 @@ Con el integrado:
   arranca con la primera aplicación y se abre la pestaña **Servidor X**, con
   todas las ventanas dentro.
 - Cada ventana lleva su barra de título: se mueve arrastrándola, se
-  redimensiona por la esquina, se trae al frente con un clic y se cierra con
-  su aspa. El teclado va a la ventana que tiene el foco; el ratón, a la que
+  redimensiona por cualquier borde o esquina, se **maximiza** con su botón o
+  con doble clic en la barra (y se restaura igual), se trae al frente con un
+  clic y se cierra con su aspa. Los diálogos salen centrados sobre su
+  ventana. El teclado va a la ventana que tiene el foco; el ratón, a la que
   está debajo.
-- La pantalla se ajusta sola al tamaño de la pestaña.
+- La pantalla se ajusta sola al tamaño de la pestaña, y las ventanas
+  maximizadas la siguen.
 - El portapapeles va en los dos sentidos: lo que selecciones en una
   aplicación llega al portapapeles local, y el portapapeles local se
   entrega a las aplicaciones al entrar en la pestaña. Dentro se pega como
@@ -285,12 +288,24 @@ Con el integrado:
   `127.0.0.1`; la pestaña muestra el `DISPLAY` que hay que usar (por ejemplo,
   desde WSL o desde un terminal local).
 
-El servidor entiende el protocolo X11 básico (*core*): ventanas, dibujo,
-fuentes, colores, teclado, ratón y selecciones. Está probado con `xterm`,
-`xclock`, `xcalc`, `xeyes`, `xlogo`, `xmessage`, `xfontsel` y `xev`, y con las
-utilidades `xdpyinfo`, `xprop`, `xwininfo` y `xlsfonts`. Las aplicaciones que
-exigen extensiones modernas (RENDER, XKB, GLX: GTK 3/4, Qt 5/6, navegadores)
-necesitan, por ahora, el servidor X del sistema.
+El servidor entiende el protocolo X11 básico (*core*: ventanas, dibujo,
+fuentes, colores, teclado, ratón y selecciones) y las extensiones que piden
+las aplicaciones actuales: **RENDER** (composición con transparencia y texto
+suavizado: la usan GTK, Xft y Java), **SHAPE** (ventanas con forma) y
+**RANDR** (para que sepan el tamaño de la pantalla y cuándo cambia).
+
+| Aplicaciones | Estado |
+|--------------|--------|
+| Clásicas (`xterm` —también con `-fa`—, `xclock`, `xcalc`, `xeyes`, `xlogo`, `xmessage`, `xfontsel`, `xev`) y utilidades (`xdpyinfo`, `xprop`, `xwininfo`, `xlsfonts`, `xrandr`, `wmctrl`) | Probadas |
+| **GTK 3** | Probada: teclado (con Ñ y €), ratón, menús, portapapeles en los dos sentidos |
+| **Qt 5** | Probada: teclado, ratón y portapapeles |
+| **Tk**, **Motif** | Probadas: botones, menús, diálogos y tecleo |
+| **Java (Swing)** | Probada: botones y tecleo; el texto sale sin suavizar |
+| **GTK 4** | No arranca (exige XInput2 y XKB) |
+| Qt 6, navegadores (Chromium, Electron, Firefox), LibreOffice | Sin probar |
+| Lo que necesite OpenGL (GLX) | No funciona |
+
+Para lo que no funcione aquí sigue estando el servidor X del sistema.
 
 Las aplicaciones remotas no son de fiar, y el servidor está hecho contando
 con ello: una petición mal formada no puede tumbar GodRemote (como mucho se
@@ -644,23 +659,32 @@ recuperar; el resto de la configuración sigue intacta.
   solo admite texto Latin-1, como define el protocolo.
 - Escritorios remotos: la tecla Windows y Ctrl+Alt+Supr solo desde los
   botones; Ctrl+Alt a la vez se trata como AltGr.
-- **Servidor X integrado**: solo el protocolo básico de X11 y BIG-REQUESTS.
-  Sin RENDER (ni Xft: nada de `xterm -fa`), XKB, SHAPE (`xeyes` y `xclock`
-  salen rectangulares), MIT-SHM, XInput, RANDR, XFIXES, XTEST ni GLX, de
-  modo que las aplicaciones GTK 3/4, Qt 5/6, los navegadores y todo lo que
-  use OpenGL no arrancan o se ven mal: para ellas, el servidor X del
-  sistema. No se han probado Motif, Tk ni Java. Trabaja en una sola pantalla
-  dentro de su pestaña (las ventanas no salen al escritorio como ventanas
-  nativas), con un gestor de ventanas mínimo: mover, redimensionar por la
-  esquina, traer al frente y cerrar; sin maximizar ni minimizar. Los
-  cursores que piden las aplicaciones no se dibujan (se ve el del sistema).
-  El texto se dibuja con dos fuentes integradas (una de ancho fijo y otra
-  proporcional), sea cual sea la fuente X que pida la aplicación, así que
-  las medidas no coinciden al píxel con las de un servidor X tradicional.
-  Las selecciones grandes (más de 1 MB) no se transfieren. `xdotool` contra
-  este servidor falla (necesita XKB). Una aplicación hostil no puede tumbar
+- **Servidor X integrado**: protocolo básico de X11, BIG-REQUESTS, RENDER,
+  SHAPE y RANDR (este solo informa: no cambia resoluciones). Sin XKB,
+  XInput, XFIXES, MIT-SHM, Composite, DAMAGE, SYNC, XTEST ni GLX: las
+  aplicaciones **GTK 4** no arrancan, tampoco lo que use OpenGL, y no se han
+  probado Qt 6, Chromium/Electron, Firefox ni LibreOffice; para ellas, el
+  servidor X del sistema. De RENDER faltan piezas poco usadas (los
+  operadores «disjoint» y «conjoint» se tratan como los básicos, los filtros
+  de convolución como «nearest», y no hay mapas de alfa). No hay visual con
+  transparencia (ARGB), así que no hay ventanas translúcidas. Trabaja en una
+  sola pantalla dentro de su pestaña (las ventanas no salen al escritorio
+  como ventanas nativas), con un gestor de ventanas sencillo: mover,
+  redimensionar, maximizar, traer al frente y cerrar; **sin minimizar**, y
+  la pantalla completa y el arrastre desde las barras propias de GTK están
+  hechos pero sin probar con aplicaciones reales. Los cursores que piden las
+  aplicaciones no se dibujan (se ve el del sistema). El texto del protocolo
+  básico se dibuja con dos fuentes integradas (una de ancho fijo y otra
+  proporcional), sea cual sea la fuente X pedida, así que sus medidas no
+  coinciden al píxel con las de un servidor X tradicional (las aplicaciones
+  que traen sus propias letras por RENDER —GTK, Qt, `xterm -fa`— no lo
+  notan). En las aplicaciones Xlib clásicas (Tk, Motif) solo se ha probado
+  el tecleo Latin-1: el «€» no llegó en la prueba, hecha sin configuración
+  regional UTF-8. Qt avisa de que falta la extensión de teclado y sigue. Las
+  selecciones grandes (más de 1 MB) no se transfieren. `xdotool` contra este
+  servidor falla (necesita XKB). Una aplicación hostil no puede tumbar
   GodRemote ni agotar su memoria, pero sí tener ocupado el servidor X un
-  rato.
+  rato. El rendimiento solo se ha medido en local, no por una red real.
 - **Reenvío del agente**: solo con el agente de OpenSSH; Pageant (PuTTY) no
   se puede reenviar. En Windows no se ha probado.
 - **Proxy de salida**: HTTP `CONNECT` con autenticación básica y SOCKS5 sin
@@ -739,9 +763,11 @@ la edición «SSH reforzada», es decir, contra russh 0.65.4.
   SOCKS a través de un salto y remoto, sin terminal; parar y volver a
   iniciar, puerto ocupado, caída de la conexión y servidor apagado.
 - `tests/xserver_integration.rs`: el servidor X integrado contra clientes X
-  reales (`xterm`, `xclock`, `xeyes`, `xcalc`, `xlogo`, `xmessage`, `xev`,
-  `xprop`, `xwininfo`…): dibujo, teclado, ratón, portapapeles, gestor de
-  ventanas y autenticación por cookie.
+  reales —los clásicos (`xterm`, `xclock`, `xeyes`, `xcalc`, `xlogo`,
+  `xmessage`, `xev`…) y aplicaciones GTK 3, Qt 5, Tk, Motif y Java (Swing)—:
+  dibujo, RENDER, ventanas con forma, RANDR, teclado, ratón, portapapeles,
+  gestor de ventanas (mover, redimensionar, maximizar) y autenticación por
+  cookie.
 - `tests/agent_and_proxy.rs`: el equipo remoto lista las claves del agente
   local solo cuando se pide el reenvío, y SSH a través de un proxy HTTP con
   sus excepciones, contra un `sshd` real.

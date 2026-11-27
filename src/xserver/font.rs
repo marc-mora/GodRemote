@@ -308,14 +308,14 @@ impl OutlinePen for Outline {
 /// Acumulador de cobertura con signo (la técnica de font-rs): cada segmento
 /// suma el área que deja a su derecha y una suma acumulada por filas da la
 /// cobertura de cada píxel.
-struct Raster {
+pub(super) struct Raster {
     w: usize,
     h: usize,
     acc: Vec<f32>,
 }
 
 impl Raster {
-    fn new(w: usize, h: usize) -> Self {
+    pub(super) fn new(w: usize, h: usize) -> Self {
         Self {
             w,
             h,
@@ -323,7 +323,9 @@ impl Raster {
         }
     }
 
-    fn line(&mut self, p0: (f32, f32), p1: (f32, f32)) {
+    /// Añade un segmento. Lo que cae fuera del lienzo se recorta: a la
+    /// izquierda cuenta como borde en la columna 0 y a la derecha no cubre.
+    pub(super) fn line(&mut self, p0: (f32, f32), p1: (f32, f32)) {
         if (p0.1 - p1.1).abs() < f32::EPSILON {
             return;
         }
@@ -379,7 +381,7 @@ impl Raster {
         }
     }
 
-    fn coverage(&self) -> Vec<u8> {
+    pub(super) fn coverage(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.w * self.h);
         let mut sum = 0.0f32;
         for v in &self.acc[..self.w * self.h] {

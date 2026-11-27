@@ -1058,6 +1058,17 @@ pub fn decode_z32(data: &[u8], w: usize, h: usize) -> Option<Vec<u32>> {
     )
 }
 
+/// Decodifica una imagen ZPixmap de 8 bits por píxel (filas rellenas a 32).
+pub fn decode_z8(data: &[u8], w: usize, h: usize) -> Option<Vec<u32>> {
+    let stride = row_bytes(w, 8);
+    let data = data.get(..stride.checked_mul(h)?)?;
+    let mut out = Vec::with_capacity(w * h);
+    for row in data.chunks_exact(stride.max(1)).take(h) {
+        out.extend(row[..w].iter().map(|p| *p as u32));
+    }
+    (out.len() == w * h).then_some(out)
+}
+
 /// Decodifica un mapa de bits (un plano): filas rellenas a 32 bits, bit
 /// menos significativo primero, con `left_pad` bits iniciales sin usar.
 pub fn decode_bitmap(data: &[u8], w: usize, h: usize, left_pad: usize) -> Option<Vec<u32>> {

@@ -351,13 +351,35 @@ async fn handshake_and_queries_in_both_byte_orders() {
         assert_eq!(r[1], 24);
         assert_eq!((c.u16(&r[16..18]), c.u16(&r[18..20])), (640, 480));
 
-        // QueryExtension: BIG-REQUESTS sí; RENDER y XKEYBOARD no.
-        for (name, present) in [("BIG-REQUESTS", 1), ("RENDER", 0), ("XKEYBOARD", 0)] {
+        // QueryExtension: las que hay y, de las que no, las más pedidas.
+        for (name, present) in [
+            ("BIG-REQUESTS", 1),
+            ("RENDER", 1),
+            ("SHAPE", 1),
+            ("RANDR", 1),
+            ("XKEYBOARD", 0),
+            ("XFIXES", 0),
+            ("XInputExtension", 0),
+            ("MIT-SHM", 0),
+            ("GLX", 0),
+        ] {
             let mut b = c.body();
             b.u16(name.len() as u16).u16(0).bytes(name.as_bytes());
             c.request(98, 0, b).await;
             assert_eq!(c.reply().await[8], present, "{name}");
         }
+        // ListExtensions da las mismas.
+        let b = c.body();
+        c.request(99, 0, b).await;
+        let r = c.reply().await;
+        let mut names = vec![];
+        let mut rest = &r[32..];
+        for _ in 0..r[1] {
+            let (name, tail) = rest[1..].split_at(rest[0] as usize);
+            names.push(std::str::from_utf8(name).unwrap());
+            rest = tail;
+        }
+        assert_eq!(names, ["BIG-REQUESTS", "RENDER", "SHAPE", "RANDR"]);
         // GetKeyboardMapping: la tecla de la «a» da «a» y, con Mayús, «A».
         let code = lock(&server.inner.state).keymap.keycode(0x61).unwrap();
         let mut b = c.body();
@@ -1517,6 +1539,13 @@ impl Rng {
     }
 }
 
+#[path = "tests_ext.rs"]
+mod ext;
+
+const RENDER: u8 = super::render::RENDER_OPCODE;
+const SHAPE: u8 = super::shape::SHAPE_OPCODE;
+const RANDR: u8 = super::randr::RANDR_OPCODE;
+
 /// Bytes de una petición con su cabecera.
 fn raw_request(be: bool, opcode: u8, data: u8, mut body: Writer) -> Vec<u8> {
     body.pad();
@@ -1540,6 +1569,14 @@ struct FuzzIds {
     gc: u32,
     bitmap_gc: u32,
     font: u32,
+    // RENDER: un pixmap de cobertura, `Picture` de cada clase y glifos.
+    alpha: u32,
+    picture_top: u32,
+    picture_pixmap: u32,
+    picture_alpha: u32,
+    solid: u32,
+    gradient: u32,
+    glyphs: u32,
 }
 
 impl FuzzIds {
@@ -1553,6 +1590,13 @@ impl FuzzIds {
             gc: base | 0x106,
             bitmap_gc: base | 0x107,
             font: base | 0x108,
+            alpha: base | 0x109,
+            picture_top: base | 0x10a,
+            picture_pixmap: base | 0x10b,
+            picture_alpha: base | 0x10c,
+            solid: base | 0x10d,
+            gradient: base | 0x10e,
+            glyphs: base | 0x10f,
         }
     }
 
@@ -1608,7 +1652,228 @@ impl FuzzIds {
         let mut b = Writer::new(be);
         b.u32(self.font).u16(5).u16(0).bytes(b"fixed");
         out.extend(raw_request(be, 45, 0, b));
+        // RENDER.
+        let mut b = Writer::new(be);
+        b.u32(self.alpha).u32(ROOT).u16(24).u16(24);
+        out.extend(raw_request(be, 53, 8, b));
+        for (id, drawable, format) in [
+            (self.picture_top, self.top, 0x21),
+            (self.picture_pixmap, self.pixmap, 0x21),
+            (self.picture_alpha, self.alpha, 0x22),
+        ] {
+            let mut b = Writer::new(be);
+            b.u32(id).u32(drawable).u32(format).u32(0);
+            out.extend(raw_request(be, RENDER, 4, b));
+        }
+        let mut b = Writer::new(be);
+        b.u32(self.solid).u16(0x8000).u16(0).u16(0x4000).u16(0xc000);
+        out.extend(raw_request(be, RENDER, 33, b));
+        let mut b = Writer::new(be);
+        b.u32(self.gradient)
+            .u32(0)
+            .u32(0)
+            .u32(40 << 16)
+            .u32(20 << 16);
+        b.u32(2).u32(0).u32(1 << 16);
+        b.u16(0xffff).u16(0).u16(0).u16(0xffff);
+        b.u16(0).u16(0).u16(0xffff).u16(0x8000);
+        out.extend(raw_request(be, RENDER, 34, b));
+        let mut b = Writer::new(be);
+        b.u32(self.glyphs).u32(0x22);
+        out.extend(raw_request(be, RENDER, 17, b));
+        let mut b = Writer::new(be);
+        b.u32(self.glyphs).u32(3).u32(1).u32(2).u32(3);
+        for _ in 0..3 {
+            b.u16(4).u16(3).i16(0).i16(3).i16(5).i16(0);
+        }
+        for i in 0..36u8 {
+            b.u8(i.wrapping_mul(37));
+        }
+        out.extend(raw_request(be, RENDER, 20, b));
         out
+    }
+
+    fn picture(&self, rng: &mut Rng) -> u32 {
+        rng.pick(&[
+            self.picture_top,
+            self.picture_top,
+            self.picture_pixmap,
+            self.picture_alpha,
+            self.solid,
+            self.gradient,
+        ])
+    }
+
+    /// Cuerpo, bien formado en lo esencial, de una petición de RENDER.
+    fn render_request(
+        &self,
+        minor: u8,
+        fresh: u32,
+        rng: &mut Rng,
+        value: &dyn Fn(&mut Rng) -> u32,
+        b: &mut Writer,
+    ) {
+        let op = |rng: &mut Rng| match rng.below(8) {
+            0 => rng.next() as u8,
+            _ => rng.below(14) as u8,
+        };
+        let format = |rng: &mut Rng| rng.pick(&[0x20, 0x21, 0x22, 0x23, 0, 0x22, 7]);
+        match minor {
+            4 => {
+                let drawable = rng.pick(&[self.top, self.child, self.pixmap, self.alpha, ROOT]);
+                b.u32(fresh).u32(drawable).u32(format(rng));
+                b.u32(rng.below(1 << 13));
+            }
+            5 => {
+                b.u32(self.picture(rng)).u32(rng.below(1 << 13));
+            }
+            6 | 7 | 28 => {
+                // (Liberar, pocas veces: si no, no queda con qué jugar.)
+                let id = if minor == 7 && rng.chance(80) {
+                    fresh
+                } else {
+                    self.picture(rng)
+                };
+                b.u32(id);
+            }
+            8 => {
+                let mask = if rng.chance(50) { 0 } else { self.picture(rng) };
+                b.u8(op(rng)).zeros(3);
+                b.u32(self.picture(rng)).u32(mask).u32(self.picture(rng));
+            }
+            10..=13 => {
+                b.u8(op(rng)).zeros(3);
+                b.u32(self.picture(rng)).u32(self.picture(rng));
+                b.u32(rng.pick(&[0, 0x22, 0x23, 0x22]));
+                b.u16(value(rng) as u16).u16(value(rng) as u16);
+                // Coordenadas en coma fija, casi siempre cerca del destino.
+                for _ in 0..rng.below(40) {
+                    let v = match rng.below(6) {
+                        0 => value(rng),
+                        _ => rng.below(120 << 16).wrapping_sub(10 << 16),
+                    };
+                    b.u32(v);
+                }
+            }
+            17 => {
+                b.u32(fresh).u32(format(rng));
+            }
+            19 => {
+                b.u32(if rng.chance(80) { fresh } else { self.glyphs });
+            }
+            20 => {
+                let n = 1 + rng.below(3);
+                b.u32(self.glyphs).u32(n);
+                for _ in 0..n {
+                    b.u32(rng.below(12));
+                }
+                let mut bytes = 0;
+                for _ in 0..n {
+                    let (w, h) = (rng.below(9), rng.below(9));
+                    b.u16(w as u16).u16(h as u16);
+                    b.i16(rng.below(8) as i16 - 4).i16(rng.below(8) as i16 - 4);
+                    b.i16(rng.below(12) as i16 - 2).i16(rng.below(4) as i16 - 2);
+                    bytes += w.div_ceil(4) * 4 * h;
+                }
+                for _ in 0..bytes {
+                    b.u8(rng.next() as u8);
+                }
+            }
+            22 => {
+                b.u32(self.glyphs).u32(rng.below(12));
+            }
+            23..=25 => {
+                b.u8(op(rng)).zeros(3);
+                b.u32(self.picture(rng)).u32(self.picture(rng));
+                b.u32(rng.pick(&[0, 0x22, 0x22, 0x23]));
+                b.u32(self.glyphs);
+                b.u16(value(rng) as u16).u16(value(rng) as u16);
+                for _ in 0..rng.below(4) {
+                    let len = 1 + rng.below(5);
+                    b.u8(len as u8).zeros(3);
+                    b.i16(rng.below(100) as i16 - 10)
+                        .i16(rng.below(60) as i16 - 5);
+                    for _ in 0..len {
+                        match minor {
+                            23 => b.u8(rng.below(5) as u8),
+                            24 => b.u16(rng.below(5) as u16),
+                            _ => b.u32(rng.below(5)),
+                        };
+                    }
+                    b.pad();
+                }
+            }
+            26 => {
+                b.u8(op(rng)).zeros(3).u32(self.picture(rng));
+            }
+            30 => {
+                let name: &[u8] = [&b"bilinear"[..], b"nearest", b"best", b"convolution", b""]
+                    [rng.below(5) as usize];
+                b.u32(self.picture(rng)).u16(name.len() as u16).u16(0);
+                b.bytes(name).pad();
+            }
+            27 | 31 | 33..=36 => {
+                b.u32(fresh);
+                if minor >= 34 {
+                    // Puntos (y radios o ángulo) y unas pocas paradas.
+                    let words = [4, 6, 3][(minor - 34) as usize];
+                    for _ in 0..words {
+                        b.u32(rng.below(100 << 16));
+                    }
+                    let n = rng.below(4);
+                    b.u32(n);
+                    for i in 0..n {
+                        b.u32(i * 0x5000);
+                    }
+                    for _ in 0..n * 2 {
+                        b.u32(rng.next() as u32);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Cuerpo de una petición de SHAPE.
+    fn shape_request(&self, minor: u8, rng: &mut Rng, b: &mut Writer) {
+        let window = rng.pick(&[self.top, self.top, self.child, self.popup, ROOT]);
+        let (op, kind) = (rng.below(6) as u8, rng.below(4) as u8);
+        match minor {
+            1 => {
+                b.u8(op).u8(kind).u16(0).u32(window);
+                b.i16(rng.below(20) as i16 - 10)
+                    .i16(rng.below(20) as i16 - 10);
+                for _ in 0..rng.below(6) {
+                    b.i16(rng.below(140) as i16 - 20)
+                        .i16(rng.below(110) as i16 - 20);
+                    b.u16(rng.below(90) as u16).u16(rng.below(70) as u16);
+                }
+            }
+            2 | 3 => {
+                let source = match minor {
+                    2 => rng.pick(&[0, self.bitmap, self.bitmap, self.pixmap]),
+                    _ => rng.pick(&[self.top, self.child, self.popup]),
+                };
+                b.u8(op).u8(kind).u8(rng.below(4) as u8).u8(0).u32(window);
+                b.i16(rng.below(40) as i16 - 10)
+                    .i16(rng.below(40) as i16 - 10);
+                b.u32(source);
+            }
+            4 => {
+                // A veces, desplazamientos enormes: no deben acumularse
+                // hasta desbordar.
+                let far = |rng: &mut Rng| match rng.below(3) {
+                    0 => rng.pick(&[0x7fff, 0x8000]) as i16,
+                    _ => rng.below(20) as i16 - 10,
+                };
+                b.u8(kind).zeros(3).u32(window);
+                b.i16(far(rng)).i16(far(rng));
+            }
+            5..=8 => {
+                b.u32(window).u8(kind % 3).zeros(3);
+            }
+            _ => {}
+        }
     }
 
     fn window(&self, rng: &mut Rng) -> u32 {
@@ -1669,6 +1934,13 @@ async fn random_requests_never_panic() {
             ids.gc,
             ids.bitmap_gc,
             ids.font,
+            ids.alpha,
+            ids.picture_top,
+            ids.picture_pixmap,
+            ids.picture_alpha,
+            ids.solid,
+            ids.gradient,
+            ids.glyphs,
         ];
         let edges = [
             0,
@@ -1690,6 +1962,10 @@ async fn random_requests_never_panic() {
             0x8000_0000,
             0xffff_ffff,
         ];
+        let close_window = lock(&server.inner.state)
+            .atoms
+            .find("_NET_CLOSE_WINDOW")
+            .unwrap();
         let mut rng = Rng(seed);
         let value = |rng: &mut Rng| -> u32 {
             match rng.below(12) {
@@ -1739,6 +2015,9 @@ async fn random_requests_never_panic() {
             // la conexión de la propia prueba); a veces, de extensiones.
             let opcode = match rng.below(40) {
                 0 => 128 + rng.below(128) as u8,
+                1..=8 => RENDER,
+                9..=11 => SHAPE,
+                12 => RANDR,
                 _ => loop {
                     let op = 1 + rng.below(119) as u8;
                     if op != 113 {
@@ -1756,6 +2035,18 @@ async fn random_requests_never_panic() {
             if rng.chance(75) {
                 let fresh = base | (0x200 + rng.below(64));
                 match opcode {
+                    RENDER => {
+                        data = rng.below(37) as u8;
+                        ids.render_request(data, fresh, &mut rng, &value, &mut body);
+                    }
+                    SHAPE => {
+                        data = rng.below(9) as u8;
+                        ids.shape_request(data, &mut rng, &mut body);
+                    }
+                    RANDR => {
+                        data = rng.below(33) as u8;
+                        body.u32(rng.pick(&[ROOT, ids.top, 0x110, 0x111, 0x112]));
+                    }
                     1 => {
                         let parent = ids.window(&mut rng);
                         body.u32(fresh).u32(parent);
@@ -1774,6 +2065,28 @@ async fn random_requests_never_panic() {
                         body.u32(ids.window(&mut rng))
                             .u16(rng.below(128) as u16)
                             .u16(0);
+                    }
+                    25 => {
+                        // Un mensaje de cliente a la raíz, como los que se
+                        // mandan al gestor de ventanas (EWMH): los átomos
+                        // del gestor se crean al arrancar, tras los 68
+                        // predefinidos.
+                        body.u32(ROOT).u32(rng.below(1 << 25));
+                        body.u8(33).u8(32).u16(0);
+                        body.u32(rng.pick(&[ids.top, ids.top, ids.popup, ids.child]));
+                        // (Menos el de cerrar la ventana: a quien no
+                        // sabe cerrarse se le corta la conexión, y aquí
+                        // sería la de la propia prueba.)
+                        let kind = 69 + rng.below(60);
+                        body.u32(if kind == close_window { 1 } else { kind });
+                        for _ in 0..5 {
+                            let v = match rng.below(3) {
+                                0 => 69 + rng.below(60),
+                                1 => rng.below(12),
+                                _ => value(&mut rng),
+                            };
+                            body.u32(v);
+                        }
                     }
                     18 => {
                         let format = rng.pick(&[8, 16, 32]);
@@ -1943,6 +2256,15 @@ async fn random_requests_never_panic() {
             assert!(st.budget.used() <= BUDGET, "{}", st.budget.used());
             assert!(st.windows.contains_key(&ROOT));
             assert!(st.property_bytes <= super::server::MAX_PROPERTY_BYTES);
+            // Lo de RENDER y SHAPE, dentro de sus topes.
+            let glyph_bytes: usize = st.glyphsets.values().map(|g| g.bytes).sum();
+            assert_eq!(glyph_bytes, st.glyph_bytes);
+            assert!(st.zombie_pixmaps.len() <= st.pictures.len());
+            for w in st.windows.values() {
+                for region in [&w.shape, &w.input_shape].into_iter().flatten() {
+                    assert!(region.len() <= super::shape::MAX_SHAPE_RECTS);
+                }
+            }
         }
         // El servidor sigue atendiendo con normalidad.
         let mut fresh = TestClient::connect(&server, !be).await;

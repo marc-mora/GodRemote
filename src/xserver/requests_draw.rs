@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use super::colors;
 use super::draw::{
-    Clip, Gc, Image, MAX_PIXELS, Painter, Rect, decode_bitmap, decode_z32, encode_bitmap, row_bytes,
+    Clip, Gc, Image, MAX_PIXELS, Painter, Rect, decode_bitmap, decode_z8, decode_z32,
+    encode_bitmap, row_bytes,
 };
 use super::font::{self, CharInfo, Font};
 use super::proto::*;
@@ -106,7 +107,7 @@ impl Server {
                 let (w, h) = (rd.u16()? as u32, rd.u16()? as u32);
                 self.check_new_id(c, id)?;
                 self.drawable_bounds(drawable)?;
-                if !matches!(data, 1 | 24 | 32) || w == 0 || h == 0 {
+                if !matches!(data, 1 | 4 | 8 | 24 | 32) || w == 0 || h == 0 {
                     return Err(XError::new(BAD_VALUE, data as u32));
                 }
                 // Ni pixmaps desmesurados ni más memoria de imagen en total
@@ -129,10 +130,7 @@ impl Server {
             }
             54 => {
                 let id = rd.u32()?;
-                self.pixmaps
-                    .remove(&id)
-                    .map(|_| ())
-                    .ok_or(XError::new(BAD_PIXMAP, id))
+                self.free_pixmap(id)
             }
             55 => {
                 let (id, drawable, mask) = (rd.u32()?, rd.u32()?, rd.u32()?);
@@ -732,6 +730,7 @@ impl Server {
         let needed = match (format, depth) {
             (0, _) | (2, 1) => row_bytes(w + left_pad, 1) * h,
             (1, _) => row_bytes(w + left_pad, 1) * h * depth as usize,
+            (_, 4 | 8) => row_bytes(w, 8) * h,
             _ => w * h * 4,
         };
         if data.len() < needed {
@@ -776,10 +775,10 @@ impl Server {
                 if depth != dst_depth {
                     return Err(XError::new(BAD_MATCH, drawable));
                 }
-                if depth == 1 {
-                    decode_bitmap(data, w, h, 0).ok_or(short)?
-                } else {
-                    decode_z32(data, w, h).ok_or(short)?
+                match depth {
+                    1 => decode_bitmap(data, w, h, 0).ok_or(short)?,
+                    4 | 8 => decode_z8(data, w, h).ok_or(short)?,
+                    _ => decode_z32(data, w, h).ok_or(short)?,
                 }
             }
             other => return Err(XError::new(BAD_VALUE, other as u32)),
@@ -811,7 +810,13 @@ impl Server {
         // intermedias (pueden ser decenas de megas).
         let mut out = self.reply(c, depth);
         out.u32(if is_window { ROOT_VISUAL } else { 0 }).zeros(20);
-        if format == 2 && depth > 1 {
+        if format == 2 && matches!(depth, 4 | 8) {
+            // Un byte por píxel, filas rellenas a 4 bytes.
+            for row in block.chunks(w.max(1)) {
+                out.buf.extend(row.iter().map(|p| (p & plane_mask) as u8));
+                out.pad();
+            }
+        } else if format == 2 && depth > 1 {
             out.buf.reserve(block.len() * 4);
             for p in &block {
                 out.buf.extend_from_slice(&(p & plane_mask).to_le_bytes());

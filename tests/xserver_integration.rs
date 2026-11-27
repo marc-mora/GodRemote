@@ -82,11 +82,18 @@ impl Fixture {
     /// Lanza un cliente que se queda en marcha; su salida de errores va a
     /// un fichero para poder enseñarla si algo falla.
     fn spawn(&self, program: &str, args: &[&str]) -> Client {
-        let log = self.dir.path().join(format!("{program}.log"));
-        let out = self.dir.path().join(format!("{program}.out"));
+        self.spawn_env(program, program, args, &[])
+    }
+
+    /// Como `spawn`, con variables de entorno añadidas; `name` da nombre a
+    /// los ficheros de salida.
+    fn spawn_env(&self, name: &str, program: &str, args: &[&str], env: &[(&str, &str)]) -> Client {
+        let log = self.dir.path().join(format!("{name}.log"));
+        let out = self.dir.path().join(format!("{name}.out"));
         let child = self
             .command(program)
             .args(args)
+            .envs(env.iter().copied())
             .stdout(std::fs::File::create(&out).unwrap())
             .stderr(std::fs::File::create(&log).unwrap())
             .spawn()
@@ -131,6 +138,40 @@ impl Fixture {
                 y,
             });
         }
+    }
+
+    /// Pulsa y suelta una tecla.
+    fn key(&self, key: KeyCode) {
+        for pressed in [true, false] {
+            self.send(DesktopInput::Key { key, pressed });
+        }
+    }
+
+    /// Arrastra con el botón izquierdo de un punto a otro, en varios pasos.
+    fn drag(&self, from: (i32, i32), to: (i32, i32)) {
+        let point = |p: (i32, i32)| (p.0.max(0) as u16, p.1.max(0) as u16);
+        let (x, y) = point(from);
+        self.send(DesktopInput::PointerMove { x, y });
+        self.send(DesktopInput::PointerButton {
+            button: MouseButton::Left,
+            pressed: true,
+            x,
+            y,
+        });
+        for step in 1..=8 {
+            let (x, y) = point((
+                from.0 + (to.0 - from.0) * step / 8,
+                from.1 + (to.1 - from.1) * step / 8,
+            ));
+            self.send(DesktopInput::PointerMove { x, y });
+        }
+        let (x, y) = point(to);
+        self.send(DesktopInput::PointerButton {
+            button: MouseButton::Left,
+            pressed: false,
+            x,
+            y,
+        });
     }
 
     fn pixel(&self, x: i32, y: i32) -> [u8; 3] {
@@ -187,16 +228,21 @@ impl Fixture {
         eprintln!("pantalla guardada en {}", path.display());
     }
 
-    /// Identificador (`0x…`) de la primera ventana de primer nivel cuyo
-    /// nombre o clase, tal como los lista `xwininfo`, contiene el texto.
-    fn find_window(&self, text: &str) -> Option<String> {
+    /// Identificadores (`0x…`) de las ventanas de primer nivel cuyo nombre
+    /// o clase, tal como los lista `xwininfo`, contienen el texto.
+    fn find_windows(&self, text: &str) -> Vec<String> {
         let out = self.run("xwininfo", &["-root", "-children"]);
         String::from_utf8_lossy(&out.stdout)
             .lines()
             .map(str::trim_start)
-            .find(|l| l.starts_with("0x") && l.contains(text))
-            .and_then(|l| l.split_whitespace().next())
+            .filter(|l| l.starts_with("0x") && l.contains(text))
+            .filter_map(|l| l.split_whitespace().next())
             .map(str::to_string)
+            .collect()
+    }
+
+    fn find_window(&self, text: &str) -> Option<String> {
+        self.find_windows(text).into_iter().next()
     }
 
     /// Espera a que exista una ventana visible con esa clase (o nombre) y
@@ -204,11 +250,14 @@ impl Fixture {
     fn wait_window(&self, client: &mut Client, class: &str) -> (String, Geometry) {
         let deadline = Instant::now() + TIMEOUT;
         loop {
-            if let Some(id) = self.find_window(&format!("\"{class}\""))
-                && let Some(g) = self.geometry(&id)
-                && g.viewable
-            {
-                return (id, g);
+            // (GTK crea además una ventana «líder» con el mismo nombre que
+            // nunca se muestra.)
+            for id in self.find_windows(&format!("\"{class}\"")) {
+                if let Some(g) = self.geometry(&id)
+                    && g.viewable
+                {
+                    return (id, g);
+                }
             }
             client.assert_running();
             assert!(
@@ -311,6 +360,12 @@ fn wait_for(what: &str, mut condition: impl FnMut() -> bool) {
 fn explore() {
     let fx = Fixture::new();
     eprintln!("DISPLAY={}", fx.display);
+    // `EXPLORE_SIZE=1400x900` cambia el tamaño de la pantalla.
+    if let Ok(size) = std::env::var("EXPLORE_SIZE")
+        && let Some((w, h)) = size.split_once('x')
+    {
+        fx.server.resize(w.parse().unwrap(), h.parse().unwrap());
+    }
     let which = std::env::var("EXPLORE").unwrap_or_else(|_| "xlogo".into());
     let mut clients = vec![];
     for program in which.split(',') {
@@ -322,6 +377,16 @@ fn explore() {
     }
     if let Ok(text) = std::env::var("EXPLORE_TEXT") {
         fx.send(DesktopInput::Text(text));
+    }
+    // `EXPLORE_CLICKS="700,50;130,80"`: clics, con una captura tras cada uno.
+    if let Ok(clicks) = std::env::var("EXPLORE_CLICKS") {
+        for (i, click) in clicks.split(';').enumerate() {
+            let (x, y) = click.split_once(',').unwrap();
+            std::thread::sleep(Duration::from_millis(1500));
+            fx.click(x.parse().unwrap(), y.parse().unwrap());
+            std::thread::sleep(Duration::from_millis(1500));
+            fx.snapshot(&format!("clic{}", i + 1));
+        }
     }
     // `EXPLORE_WAIT=30` deja tiempo para lanzar más cosas a mano.
     let wait = std::env::var("EXPLORE_WAIT")
@@ -357,7 +422,17 @@ fn query_tools_see_the_server_and_its_windows() {
     }
 
     // --- Propiedades de la raíz ---------------------------------------------
-    assert_eq!(fx.stdout("xprop", &["-root"]).trim(), "");
+    // De entrada solo están las del gestor de ventanas integrado (EWMH).
+    let props = fx.stdout("xprop", &["-root"]);
+    assert!(
+        props.contains("_NET_SUPPORTING_WM_CHECK(WINDOW)"),
+        "{props}"
+    );
+    assert!(
+        props.contains("_NET_WORKAREA(CARDINAL) = 0, 0, 800, 600"),
+        "{props}"
+    );
+    assert!(!props.contains("PRUEBA"), "{props}");
     fx.stdout(
         "xprop",
         &["-root", "-f", "PRUEBA", "8s", "-set", "PRUEBA", "hola"],
@@ -365,7 +440,7 @@ fn query_tools_see_the_server_and_its_windows() {
     let props = fx.stdout("xprop", &["-root"]);
     assert!(props.contains("PRUEBA(STRING) = \"hola\""), "{props}");
     fx.stdout("xprop", &["-root", "-remove", "PRUEBA"]);
-    assert_eq!(fx.stdout("xprop", &["-root"]).trim(), "");
+    assert!(!fx.stdout("xprop", &["-root"]).contains("PRUEBA"));
 
     // --- Una ventana de verdad ----------------------------------------------
     let tree = fx.stdout("xwininfo", &["-root", "-tree"]);
@@ -1086,4 +1161,885 @@ fn xdotool_works_with_the_xkb_compatibility_switch() {
         std::fs::read_to_string(&typed).unwrap_or_default() == "Con XKB: aB1!\n"
     });
     assert!(xterm.wait_exit().success(), "{}", xterm.errors());
+}
+
+// --- Aplicaciones GTK, Qt, Tk y Motif ----------------------------------------
+
+/// Texto con el que se prueba el teclado: ASCII, Latin-1 y un símbolo de
+/// fuera de Latin-1.
+const TYPED: &str = "Hola, señor Ñu: 5 €";
+const UTF8: [(&str, &str); 1] = [("LC_ALL", "C.UTF-8")];
+
+/// La aplicación no se ha quejado de errores X.
+fn assert_no_x_errors(client: &Client) {
+    let log = client.errors();
+    for bad in [
+        "X Error",
+        "X Window System error",
+        "BadRequest",
+        "BadImplementation",
+        "BadMatch",
+        "BadValue",
+        "BadLength",
+        "BadDrawable",
+        "BadPicture",
+        "BadGlyph",
+    ] {
+        assert!(
+            !log.contains(bad),
+            "«{bad}» en la salida de errores:\n{log}"
+        );
+    }
+}
+
+/// Espera a que la salida estándar de un cliente contenga una línea que
+/// empiece por `prefix` y devuelve los números que la siguen.
+fn wait_numbers(client: &mut Client, prefix: &str) -> Vec<i32> {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let out = client.output();
+        if let Some(line) = out
+            .lines()
+            .find(|l| l.starts_with(prefix) && out.contains(&format!("{l}\n")))
+        {
+            return line[prefix.len()..]
+                .split_whitespace()
+                .filter_map(|n| n.parse().ok())
+                .collect();
+        }
+        client.assert_running();
+        assert!(
+            Instant::now() < deadline,
+            "no llegó «{prefix}»: {out}\n{}",
+            client.errors()
+        );
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+fn wait_output(client: &mut Client, text: &str) {
+    let deadline = Instant::now() + TIMEOUT;
+    while !client.output().contains(text) {
+        assert!(
+            Instant::now() < deadline,
+            "no llegó «{text}»: {}\n{}",
+            client.output(),
+            client.errors()
+        );
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+/// Lo que queda escrito tras [`type_with_shortcuts`].
+const PASTED_AND_TYPED: &str = "pegado: Hola, señor Ñu: 5 €";
+
+/// Escribe en la entrada (vacía) que tenga el foco, pasando por el
+/// portapapeles en los dos sentidos, atajos con Ctrl y teclas de edición, y
+/// pulsa Intro. `start` es la zona donde empieza el texto de la entrada.
+fn type_with_shortcuts(fx: &Fixture, start: Geometry) {
+    let ctrl = |letter: u8| {
+        for (key, pressed) in [
+            (KeyCode::Control, true),
+            (KeyCode::Letter(letter), true),
+            (KeyCode::Letter(letter), false),
+            (KeyCode::Control, false),
+        ] {
+            fx.send(DesktopInput::Key { key, pressed });
+        }
+    };
+    // Pegar (Ctrl+V) lo que hay en el portapapeles local. (Se espera a
+    // verlo: GTK pega cuando le llega el texto, y lo que se tecleara
+    // mientras tanto quedaría delante.)
+    assert_eq!(fx.colors_in(start), 1, "la entrada no está vacía");
+    fx.send(DesktopInput::ClipboardText("xpegado: ".into()));
+    ctrl(b'v');
+    wait_for("texto pegado", || fx.colors_in(start) > 1);
+    fx.send(DesktopInput::Text(format!("{TYPED}!!")));
+    fx.key(KeyCode::Backspace);
+    fx.key(KeyCode::Backspace);
+    fx.key(KeyCode::Home);
+    fx.key(KeyCode::Delete);
+    // Seleccionarlo todo (Ctrl+A) y copiarlo (Ctrl+C) lo lleva al
+    // portapapeles local.
+    ctrl(b'a');
+    ctrl(b'c');
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match fx.backend.events.recv_timeout(left) {
+            Ok(DesktopEvent::ClipboardText(text)) if text == PASTED_AND_TYPED => break,
+            Ok(_) => {}
+            Err(_) => panic!("no llegó al portapapeles local lo copiado"),
+        }
+    }
+    fx.key(KeyCode::Enter);
+}
+
+#[test]
+fn gtk3_dialogs_draw_and_take_keyboard_and_mouse() {
+    if missing(&["yad", "xwininfo"]) {
+        return;
+    }
+    let fx = Fixture::new();
+    // Teclado: lo escrito en la entrada sale por la salida estándar al
+    // pulsar Intro.
+    let mut entry = fx.spawn_env(
+        "entrada",
+        "yad",
+        &["--entry", "--title=Entrada", "--text=Nombre:"],
+        &UTF8,
+    );
+    let (_, g) = fx.wait_window(&mut entry, "Entrada");
+    // Texto suavizado, degradados de los botones…: muchos colores.
+    wait_for("yad pinta su diálogo", || fx.colors_in(g) > 40);
+    fx.snapshot("gtk3-entrada");
+    // (La entrada va bajo la etiqueta, a todo lo ancho.)
+    let start = Geometry {
+        x: g.x + 30,
+        y: g.y + 32,
+        w: 60,
+        h: 16,
+        viewable: true,
+    };
+    type_with_shortcuts(&fx, start);
+    let status = entry.wait_exit();
+    assert!(status.success(), "{status}: {}", entry.errors());
+    assert_eq!(entry.output().trim_end(), PASTED_AND_TYPED);
+    assert_no_x_errors(&entry);
+
+    // Ratón: cada botón termina el programa con un código distinto.
+    let mut buttons = fx.spawn_env(
+        "botones",
+        "yad",
+        &[
+            "--title=Botones",
+            "--text=Elige uno",
+            "--width=320",
+            "--button=Uno:3",
+            "--button=Dos:7",
+        ],
+        &UTF8,
+    );
+    let (_, g) = fx.wait_window(&mut buttons, "Botones");
+    wait_for("yad pinta sus botones", || fx.colors_in(g) > 40);
+    fx.snapshot("gtk3-botones");
+    // Los botones van abajo, repartidos a lo ancho: el segundo, a la derecha.
+    fx.click(g.x + g.w * 3 / 4, g.y + g.h - 20);
+    let status = buttons.wait_exit();
+    assert_eq!(status.code(), Some(7), "{}", buttons.errors());
+    assert_no_x_errors(&buttons);
+    wait_for("baja de los clientes", || fx.server.client_count() == 0);
+}
+
+#[test]
+fn gtk3_widget_factory_paints_with_render() {
+    if missing(&["gtk3-widget-factory", "xwininfo"]) {
+        return;
+    }
+    let fx = Fixture::new();
+    fx.server.resize(1400, 800);
+    let started = Instant::now();
+    let mut app = fx.spawn("gtk3-widget-factory", &[]);
+    let (id, g) = fx.wait_window(&mut app, "gtk3-widget-factory");
+    // Un escaparate de todos los controles de GTK: cientos de colores.
+    wait_for("gtk3-widget-factory pinta", || fx.colors_in(g) > 400);
+    eprintln!(
+        "gtk3-widget-factory: {}x{} pintada a los {} ms",
+        g.w,
+        g.h,
+        started.elapsed().as_millis()
+    );
+    fx.snapshot("gtk3-widget-factory");
+    // La barra de título la pinta la propia aplicación: el gestor integrado
+    // no le pone la suya, pero la coloca dentro de la pantalla.
+    assert!(
+        g.x >= 0 && g.y >= 0 && g.x + g.w <= 1400 && g.y + g.h <= 800,
+        "{g:?}"
+    );
+    assert_ne!(fx.pixel(g.x + 40, g.y - 5), fx.pixel(g.x + 40, g.y + 5));
+    assert_eq!(fx.pixel(g.x + 40, g.y - 5), fx.pixel(1390, 790));
+    // Un clic en la segunda pestaña de arriba cambia el contenido.
+    // (Se mira una zona sin animaciones: la primera entrada de la página.)
+    let page = Geometry {
+        x: g.x + 20,
+        y: g.y + 60,
+        w: 300,
+        h: 40,
+        viewable: true,
+    };
+    let before = fx.checksum(page);
+    fx.click(g.x + g.w / 2, g.y + 26);
+    wait_for("cambio de página", || fx.checksum(page) != before);
+    fx.snapshot("gtk3-widget-factory-pagina2");
+    // Y su botón de maximizar (el segundo por la derecha) pide el estado al
+    // gestor de ventanas, que la agranda a toda la pantalla.
+    fx.click(g.x + g.w - 68, g.y + 26);
+    wait_for("ventana maximizada", || {
+        fx.geometry(&id)
+            .is_some_and(|n| (n.x, n.y, n.w, n.h) == (0, 0, 1400, 800))
+    });
+    // …y la aplicación se redibuja al tamaño nuevo, hasta el borde derecho
+    // (donde antes no llegaba).
+    let edge = Geometry {
+        x: 1380,
+        y: 60,
+        w: 20,
+        h: 700,
+        viewable: true,
+    };
+    wait_for("redibujada a pantalla completa", || fx.colors_in(edge) > 2);
+    fx.snapshot("gtk3-widget-factory-maximizada");
+    app.assert_running();
+    assert_no_x_errors(&app);
+}
+
+const QT_SCRIPT: &str = r#"
+import sys
+from PyQt5.QtCore import QTimer
+from PyQt5.QtWidgets import (QApplication, QLabel, QLineEdit, QPushButton,
+                             QVBoxLayout, QWidget)
+
+app = QApplication(sys.argv)
+w = QWidget()
+w.setWindowTitle("Prueba Qt")
+lay = QVBoxLayout(w)
+lay.addWidget(QLabel("Escribe algo:"))
+e = QLineEdit()
+lay.addWidget(e)
+b = QPushButton("Aceptar")
+lay.addWidget(b)
+b.clicked.connect(lambda: print("boton", flush=True))
+
+
+def done():
+    print("texto: " + e.text(), flush=True)
+    app.exit(5)
+
+
+def geometry():
+    p = b.mapToGlobal(b.rect().topLeft())
+    print("geometria", p.x(), p.y(), b.width(), b.height(), flush=True)
+
+
+e.returnPressed.connect(done)
+w.resize(320, 160)
+w.show()
+e.setFocus()
+QTimer.singleShot(600, geometry)
+sys.exit(app.exec_())
+"#;
+
+/// Intérprete de Python que tiene PyQt5, si hay alguno.
+fn python_with_pyqt5() -> Option<&'static str> {
+    ["python3", "/usr/bin/python3", "/usr/bin/python3.12"]
+        .into_iter()
+        .find(|python| {
+            Command::new(python)
+                .args(["-c", "import PyQt5.QtWidgets"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        })
+}
+
+#[test]
+fn qt5_application_draws_and_takes_keyboard_and_mouse() {
+    let Some(python) = python_with_pyqt5() else {
+        eprintln!("OMITIDA: falta PyQt5");
+        return;
+    };
+    if missing(&["xwininfo"]) {
+        return;
+    }
+    let fx = Fixture::new();
+    let script = fx.dir.path().join("prueba_qt.py");
+    std::fs::write(&script, QT_SCRIPT).unwrap();
+    let mut app = fx.spawn_env("qt", python, &[script.to_str().unwrap()], &UTF8);
+    let (_, g) = fx.wait_window(&mut app, "Prueba Qt");
+    wait_for("Qt pinta su ventana", || fx.colors_in(g) > 20);
+    // Ratón: un clic en el botón.
+    let b = wait_numbers(&mut app, "geometria");
+    fx.snapshot("qt5");
+    fx.click(b[0] + b[2] / 2, b[1] + b[3] / 2);
+    wait_output(&mut app, "boton\n");
+    // Teclado: el foco vuelve a la entrada con un clic y se escribe en ella.
+    fx.click(g.x + g.w / 2, b[1] - 20);
+    // (La entrada va justo encima del botón.)
+    let start = Geometry {
+        x: g.x + 30,
+        y: b[1] - 24,
+        w: 60,
+        h: 12,
+        viewable: true,
+    };
+    type_with_shortcuts(&fx, start);
+    let status = app.wait_exit();
+    assert_eq!(status.code(), Some(5), "{}", app.errors());
+    assert!(
+        app.output()
+            .contains(&format!("texto: {PASTED_AND_TYPED}\n")),
+        "{}",
+        app.output()
+    );
+    assert_no_x_errors(&app);
+}
+
+const TK_SCRIPT: &str = r##"
+wm title . "Prueba Tk"
+wm geometry . 280x170+60+80
+. configure -background "#cc2222"
+menubutton .m -text "Menu" -menu .m.menu -relief raised
+menu .m.menu -tearoff 0
+.m.menu add command -label "Primera opcion" -command { puts uno; flush stdout }
+.m.menu add command -label "Segunda opcion" -command { puts dos; flush stdout }
+entry .e -width 24
+button .b -text "Aceptar" -command { puts boton; flush stdout }
+pack .m -side top -anchor w
+pack .e -side top -fill x -padx 6 -pady 6
+pack .b -side bottom -padx 6 -pady 6
+bind .e <Return> { puts "texto: [.e get]"; flush stdout; exit 3 }
+focus -force .e
+# Un diálogo de la ventana principal y una ventana sin gestor (como un
+# menú o un aviso emergente).
+toplevel .d -background "#22aa22" -width 140 -height 70
+wm title .d "Dialogo"
+wm transient .d .
+toplevel .o -background "#2222cc" -width 60 -height 40
+wm overrideredirect .o 1
+wm geometry .o 60x40+400+300
+proc geo {w} { return "[winfo rootx $w] [winfo rooty $w] [winfo width $w] [winfo height $w]" }
+after 700 {
+    puts "menu [geo .m]"
+    puts "boton [geo .b]"
+    puts "dialogo [geo .d]"
+    puts "principal [geo .]"
+    flush stdout
+}
+"##;
+
+#[test]
+fn tk_application_with_menu_dialog_and_popup() {
+    if missing(&["wish", "xwininfo"]) {
+        return;
+    }
+    let fx = Fixture::new();
+    let script = fx.dir.path().join("prueba.tcl");
+    std::fs::write(&script, TK_SCRIPT).unwrap();
+    let mut app = fx.spawn_env("tk", "wish", &[script.to_str().unwrap()], &UTF8);
+    let (_, g) = fx.wait_window(&mut app, "Prueba Tk");
+    let menu = wait_numbers(&mut app, "menu");
+    let button = wait_numbers(&mut app, "boton");
+    let dialog = wait_numbers(&mut app, "dialogo");
+    let main = wait_numbers(&mut app, "principal");
+    wait_for("Tk pinta su ventana", || fx.colors_in(g) > 5);
+    fx.snapshot("tk");
+    const RED: [u8; 3] = [0xcc, 0x22, 0x22];
+    const GREEN: [u8; 3] = [0x22, 0xaa, 0x22];
+    const BLUE: [u8; 3] = [0x22, 0x22, 0xcc];
+
+    // La ventana sin gestor no lleva marco: justo encima de ella se ve el
+    // fondo del escritorio, no una barra de título.
+    assert_eq!(fx.pixel(430, 320), BLUE);
+    assert_eq!(fx.pixel(430, 295), fx.pixel(790, 590));
+    // El diálogo sale centrado sobre su ventana, con barra de título, y por
+    // encima de ella.
+    let center = (dialog[0] + dialog[2] / 2, dialog[1] + dialog[3] / 2);
+    assert_eq!(fx.pixel(center.0, center.1), GREEN);
+    let main_center = (main[0] + main[2] / 2, main[1] + main[3] / 2);
+    assert!(
+        (center.0 - main_center.0).abs() <= 2 && (center.1 - main_center.1).abs() <= 2,
+        "diálogo en {dialog:?}, principal en {main:?}"
+    );
+    assert_ne!(fx.pixel(center.0, dialog[1] - 11), RED);
+    // Activar la ventana principal (un clic en su fondo) no tapa el diálogo.
+    fx.click(main[0] + 8, main[1] + main[3] - 8);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(fx.pixel(center.0, center.1), GREEN);
+    fx.snapshot("tk-dialogo");
+    // El diálogo se lleva, arrastrándolo por su barra de título, hasta
+    // debajo de la ventana sin gestor: esta sigue viéndose entera, encima.
+    let bar = (center.0, dialog[1] - 11);
+    fx.drag(bar, (430, 320 - dialog[3] / 2 - 11));
+    wait_for("diálogo movido", || fx.pixel(430 - 50, 320) == GREEN);
+    for (x, y) in [(401, 301), (430, 320), (458, 338)] {
+        assert_eq!(fx.pixel(x, y), BLUE, "en ({x}, {y})");
+    }
+    fx.snapshot("tk-apilado");
+
+    // Ratón: el botón, y una opción del menú desplegable (una ventana sin
+    // gestor que tiene que quedar por encima de todo).
+    fx.click(button[0] + button[2] / 2, button[1] + button[3] / 2);
+    wait_output(&mut app, "boton\n");
+    fx.click(menu[0] + menu[2] / 2, menu[1] + menu[3] / 2);
+    // El menú tapa el fondo rojo que hay bajo la entrada.
+    let under = (menu[0] + 40, menu[1] + menu[3] + 36);
+    assert_eq!(fx.pixel(under.0, under.1), RED);
+    wait_for("menú desplegado", || fx.pixel(under.0, under.1) != RED);
+    fx.snapshot("tk-menu");
+    fx.click(under.0, under.1);
+    wait_output(&mut app, "dos\n");
+    wait_for("menú recogido", || fx.pixel(under.0, under.1) == RED);
+
+    // Teclado. (Las aplicaciones de Xlib traducen las teclas según su
+    // configuración regional, y la «C» de estas pruebas no pasa de Latin-1.)
+    let typed = "Hola, señor Ñu: ¿5?";
+    fx.click(g.x + g.w / 2, button[1] - 25);
+    fx.send(DesktopInput::Text(typed.into()));
+    fx.key(KeyCode::Enter);
+    let status = app.wait_exit();
+    assert_eq!(status.code(), Some(3), "{}", app.errors());
+    assert!(
+        app.output().contains(&format!("texto: {typed}\n")),
+        "{}",
+        app.output()
+    );
+    assert_no_x_errors(&app);
+}
+
+#[test]
+fn motif_editor_starts_and_takes_typing() {
+    if missing(&["nedit", "xwininfo"]) {
+        return;
+    }
+    let fx = Fixture::new();
+    let mut app = fx.spawn("nedit", &["-geometry", "60x12"]);
+    let (_, g) = fx.wait_window(&mut app, "NEdit");
+    // Barra de menús, relieves y texto.
+    wait_for("nedit pinta su ventana", || fx.colors_in(g) > 5);
+    std::thread::sleep(Duration::from_millis(300));
+    fx.snapshot("nedit");
+    // Lo tecleado aparece en la primera línea de la zona de texto (bajo la
+    // barra de menús; se mira a la derecha del cursor, que parpadea).
+    let line = Geometry {
+        x: g.x + 20,
+        y: g.y + 28,
+        w: 90,
+        h: 20,
+        viewable: true,
+    };
+    assert_eq!(fx.colors_in(line), 1, "la primera línea no está vacía");
+    fx.click(g.x + g.w / 2, g.y + g.h / 2);
+    fx.send(DesktopInput::Text("Hola desde Motif".into()));
+    wait_for("texto en el editor", || fx.colors_in(line) > 1);
+    fx.snapshot("nedit-texto");
+    app.assert_running();
+    assert_no_x_errors(&app);
+}
+
+// --- Gestor de ventanas integrado: maximizar, restaurar, redimensionar -------
+
+/// Filas y columnas que el xterm dice tener (lo que ve el programa de dentro).
+fn terminal_size(path: &std::path::Path) -> Option<(i32, i32)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut parts = text.split_whitespace().map(|n| n.parse().ok());
+    Some((parts.next()??, parts.next()??))
+}
+
+#[test]
+fn built_in_window_manager_maximizes_restores_and_resizes() {
+    if missing(&["xterm", "xwininfo", "xprop", "stty"]) {
+        return;
+    }
+    let fx = Fixture::new();
+    // Un xterm cuyo intérprete apunta cada poco el tamaño de su terminal:
+    // así se comprueba el tamaño que de verdad le llega al cliente.
+    let size_file = fx.dir.path().join("tamano");
+    let report = format!(
+        "while :; do stty size > '{0}.tmp' && mv '{0}.tmp' '{0}'; sleep 0.05; done",
+        size_file.display()
+    );
+    let mut term = fx.spawn(
+        "xterm",
+        &[
+            "-title",
+            "Tallas",
+            "-fn",
+            "fixed",
+            "-geometry",
+            "40x10+100+120",
+            "-e",
+            "sh",
+            "-c",
+            &report,
+        ],
+    );
+    let (id, g) = fx.wait_window(&mut term, "Tallas");
+    wait_for("tamaño inicial del terminal", || {
+        terminal_size(&size_file) == Some((10, 40))
+    });
+    // El xterm declara en WM_NORMAL_HINTS el tamaño de sus celdas y el
+    // margen interior; `xwininfo` da la esquina exterior y Xt pone un borde
+    // de un píxel a cada lado.
+    let hints = fx.stdout("xprop", &["-id", &id, "WM_NORMAL_HINTS"]);
+    let pair = |label: &str| -> (i32, i32) {
+        let line = hints
+            .lines()
+            .find(|l| l.contains(label))
+            .unwrap_or_else(|| panic!("falta «{label}» en {hints}"));
+        let mut numbers = line
+            .split(|c: char| !c.is_ascii_digit())
+            .filter_map(|n| n.parse().ok());
+        (numbers.next().unwrap(), numbers.next().unwrap())
+    };
+    let (cell_w, cell_h) = pair("resize increment");
+    let (extra_w, extra_h) = pair("base size");
+    let border = 1;
+    assert_eq!((g.w, g.h), (extra_w + 40 * cell_w, extra_h + 10 * cell_h));
+    let title = |g: Geometry| (g.x + 40, g.y - 11);
+    // Tamaño de la zona útil de una ventana maximizada: la pantalla menos
+    // el marco (3 px), la barra de título (22 px) y el borde.
+    let full = (
+        WIDTH as i32 - 2 * 3 - 2 * border,
+        HEIGHT as i32 - 22 - 3 - 2 * border,
+    );
+    let cells = |w: i32, h: i32| ((h - extra_h) / cell_h, (w - extra_w) / cell_w);
+    let maximized = |fx: &Fixture| {
+        fx.geometry(&id)
+            .is_some_and(|n| (n.x, n.y, n.w, n.h) == (3, 22, full.0, full.1))
+            && terminal_size(&size_file) == Some(cells(full.0, full.1))
+    };
+    let restored = |fx: &Fixture| {
+        fx.geometry(&id)
+            .is_some_and(|n| (n.x, n.y, n.w, n.h) == (g.x, g.y, g.w, g.h))
+            && terminal_size(&size_file) == Some((10, 40))
+    };
+    let state = |fx: &Fixture| fx.stdout("xprop", &["-id", &id, "_NET_WM_STATE"]);
+
+    // Doble clic en la barra de título: maximiza; otro: restaura.
+    let at = title(g);
+    fx.click(at.0, at.1);
+    fx.click(at.0, at.1);
+    wait_for("maximizada con doble clic", || maximized(&fx));
+    assert!(
+        state(&fx).contains("_NET_WM_STATE_MAXIMIZED_VERT"),
+        "{}",
+        state(&fx)
+    );
+    assert!(
+        state(&fx).contains("_NET_WM_STATE_MAXIMIZED_HORZ"),
+        "{}",
+        state(&fx)
+    );
+    fx.snapshot("maximizada");
+    std::thread::sleep(Duration::from_millis(500));
+    fx.click(200, 11);
+    fx.click(200, 11);
+    wait_for("restaurada con doble clic", || restored(&fx));
+    assert!(!state(&fx).contains("MAXIMIZED"), "{}", state(&fx));
+
+    // El botón de maximizar de la barra (a la izquierda del de cerrar).
+    std::thread::sleep(Duration::from_millis(500));
+    let button = (g.x + g.w + 2 * border + 3 - 2 * 20 + 8, g.y - 11);
+    fx.click(button.0, button.1);
+    wait_for("maximizada con el botón", || maximized(&fx));
+    fx.click(WIDTH as i32 - 2 * 20 + 8, 11);
+    wait_for("restaurada con el botón", || restored(&fx));
+
+    // Lo mismo, pedido por otro programa con los mensajes de EWMH.
+    if find_program("wmctrl").is_some() {
+        let toggle = |action: &str| {
+            fx.stdout("wmctrl", &["-r", "Tallas", "-b", action]);
+        };
+        toggle("add,maximized_vert");
+        wait_for("maximizada a lo alto", || {
+            fx.geometry(&id)
+                .is_some_and(|n| (n.x, n.y, n.w, n.h) == (g.x, 22, g.w, full.1))
+                && terminal_size(&size_file) == Some((cells(g.w, full.1).0, 40))
+        });
+        toggle("add,maximized_horz");
+        wait_for("maximizada del todo", || maximized(&fx));
+        toggle("remove,maximized_vert,maximized_horz");
+        wait_for("restaurada por mensaje", || restored(&fx));
+        // Y la lista de ventanas del gestor.
+        let list = fx.stdout("wmctrl", &["-l"]);
+        assert!(list.contains("Tallas"), "{list}");
+    }
+
+    // Tirar del borde izquierdo: cambia el ancho de celda en celda (nueve
+    // celdas y pico son nueve celdas) y el borde derecho no se mueve.
+    let left = (g.x - 2, g.y + g.h / 2);
+    fx.drag(left, (left.0 - 9 * cell_w - 3, left.1 + 5));
+    wait_for("más ancha por la izquierda", || {
+        fx.geometry(&id)
+            .is_some_and(|n| (n.x, n.y, n.w, n.h) == (g.x - 9 * cell_w, g.y, g.w + 9 * cell_w, g.h))
+            && terminal_size(&size_file) == Some((10, 49))
+    });
+    // Tirar del borde de arriba (por encima de la barra de título): cambia
+    // el alto y el borde de abajo no se mueve.
+    let wide = fx.geometry(&id).unwrap();
+    let top = (wide.x + wide.w / 2, wide.y - 22);
+    fx.drag(top, (top.0, top.1 - 3 * cell_h - 5));
+    wait_for("más alta por arriba", || {
+        fx.geometry(&id).is_some_and(|n| {
+            (n.x, n.y, n.w, n.h) == (wide.x, wide.y - 3 * cell_h, wide.w, wide.h + 3 * cell_h)
+        }) && terminal_size(&size_file) == Some((13, 49))
+    });
+    // Encoger sin medida desde la esquina inferior derecha: se queda en el
+    // tamaño mínimo que declara la aplicación (una celda).
+    let tall = fx.geometry(&id).unwrap();
+    let corner = (
+        tall.x + tall.w + 2 * border + 1,
+        tall.y + tall.h + 2 * border + 1,
+    );
+    fx.drag(corner, (tall.x - 200, tall.y - 200));
+    // (El gestor no deja las ventanas tan estrechas que no se puedan
+    // agarrar: el ancho se queda en dos celdas.)
+    wait_for("en su tamaño mínimo", || {
+        fx.geometry(&id).is_some_and(|n| {
+            (n.x, n.y, n.w, n.h) == (tall.x, tall.y, extra_w + 2 * cell_w, extra_h + cell_h)
+        }) && terminal_size(&size_file) == Some((1, 2))
+    });
+    fx.snapshot("minima");
+    term.assert_running();
+}
+
+// --- RANDR y SHAPE ------------------------------------------------------------
+
+#[test]
+fn randr_reports_the_screen_and_its_changes() {
+    if missing(&["xrandr", "xev"]) {
+        return;
+    }
+    let fx = Fixture::new();
+    let info = fx.stdout("xrandr", &[]);
+    assert!(info.contains("current 800 x 600"), "{info}");
+    assert!(
+        info.contains("GodRemote-0 connected primary 800x600+0+0"),
+        "{info}"
+    );
+    // Un cliente apuntado a los avisos se entera de que la pestaña (la
+    // pantalla) cambia de tamaño.
+    let mut xev = fx.spawn("xev", &["-root", "-event", "randr"]);
+    wait_for("xev conectado", || fx.server.client_count() == 1);
+    std::thread::sleep(Duration::from_millis(500));
+    fx.server.resize(1024, 700);
+    wait_output(&mut xev, "RRScreenChangeNotify event");
+    wait_output(&mut xev, "width 1024, height 700");
+    wait_output(&mut xev, "RRNotify event");
+    let info = fx.stdout("xrandr", &[]);
+    assert!(info.contains("current 1024 x 700"), "{info}");
+    assert!(info.contains("1024x700+0+0"), "{info}");
+    xev.assert_running();
+}
+
+#[test]
+fn shaped_windows_show_what_is_behind_them() {
+    if missing(&["xeyes", "xwininfo"]) {
+        return;
+    }
+    let fx = Fixture::new();
+    let mut eyes = fx.spawn("xeyes", &["-geometry", "200x120+100+100"]);
+    let (_, g) = fx.wait_window(&mut eyes, "XEyes");
+    let desktop = fx.pixel(790, 590);
+    // Los ojos se ven (blanco y negro)…
+    wait_for("xeyes pinta", || {
+        fx.pixel(g.x + g.w / 4, g.y + g.h / 2) != desktop
+    });
+    // …y entre ellos, y en las esquinas, se ve el fondo del escritorio.
+    for (x, y) in [
+        (g.x + 2, g.y + 2),
+        (g.x + g.w - 3, g.y + g.h - 3),
+        (g.x + g.w / 2, g.y + 3),
+    ] {
+        assert_eq!(fx.pixel(x, y), desktop, "en ({x}, {y})");
+    }
+    fx.snapshot("xeyes-forma");
+    eyes.assert_running();
+}
+
+// --- Medidas ------------------------------------------------------------------
+
+/// Espera (sondeando cada milisegundo) a que cambie una zona de la pantalla
+/// y devuelve lo que ha tardado.
+fn time_to_change(fx: &Fixture, zone: Geometry, before: u64) -> Duration {
+    let start = Instant::now();
+    while fx.checksum(zone) == before {
+        assert!(start.elapsed() < TIMEOUT, "la pantalla no cambia");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    start.elapsed()
+}
+
+/// Medidas de rendimiento con GTK 3 (no comprueban nada: se lanzan a mano).
+///
+///   cargo test --release --test xserver_integration measure -- --ignored --nocapture
+#[test]
+#[ignore]
+fn measure_gtk3_responsiveness() {
+    if missing(&["yad", "gtk3-widget-factory", "xwininfo"]) {
+        return;
+    }
+    // Eco de las teclas en una entrada de texto.
+    let fx = Fixture::new();
+    let mut entry = fx.spawn_env("entrada", "yad", &["--entry", "--title=Entrada"], &UTF8);
+    let (_, g) = fx.wait_window(&mut entry, "Entrada");
+    wait_for("yad pinta su diálogo", || fx.colors_in(g) > 40);
+    std::thread::sleep(Duration::from_millis(500));
+    // (Todo menos los botones de abajo. El cursor parpadea ahí dentro, pero
+    // es difícil que lo haga justo en los milisegundos que tarda el eco.)
+    let text = Geometry { h: g.h - 45, ..g };
+    let mut echoes = vec![];
+    for letter in "El veloz murciélago hindú comía".chars() {
+        let before = fx.checksum(text);
+        fx.send(DesktopInput::Text(letter.into()));
+        echoes.push(time_to_change(&fx, text, before));
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    echoes.sort();
+    eprintln!(
+        "eco de una tecla en una entrada GTK 3: mediana {:.1} ms, máximo {:.1} ms",
+        echoes[echoes.len() / 2].as_secs_f64() * 1000.0,
+        echoes[echoes.len() - 1].as_secs_f64() * 1000.0
+    );
+    fx.snapshot("medida-eco");
+    drop(entry);
+
+    // Primer pintado de una ventana grande y respuesta a un clic.
+    let fx = Fixture::new();
+    fx.server.resize(1400, 800);
+    let started = Instant::now();
+    let mut app = fx.spawn("gtk3-widget-factory", &[]);
+    let (_, g) = fx.wait_window(&mut app, "gtk3-widget-factory");
+    wait_for("gtk3-widget-factory pinta", || fx.colors_in(g) > 400);
+    eprintln!(
+        "gtk3-widget-factory ({}x{}): pintada a los {} ms de lanzarla",
+        g.w,
+        g.h,
+        started.elapsed().as_millis()
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    // El menú de la cabecera se despliega con una animación.
+    let menu = Geometry {
+        x: g.x + g.w - 240,
+        y: g.y + 70,
+        w: 160,
+        h: 150,
+        viewable: true,
+    };
+    let before = fx.checksum(menu);
+    fx.click(g.x + g.w - 156, g.y + 26);
+    let first = time_to_change(&fx, menu, before);
+    // Hasta que deja de cambiar (300 ms seguidos igual).
+    let start = Instant::now();
+    let (mut last, mut last_change, mut frames) = (fx.checksum(menu), Instant::now(), 0);
+    while last_change.elapsed() < Duration::from_millis(300) {
+        let now = fx.checksum(menu);
+        if now != last {
+            (last, last_change, frames) = (now, Instant::now(), frames + 1);
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    eprintln!(
+        "menú de la cabecera: primer cambio a los {:.0} ms del clic; desplegado del todo {:.0} ms \
+         después, en {frames} pasos",
+        first.as_secs_f64() * 1000.0,
+        (start.elapsed() - Duration::from_millis(300)).as_secs_f64() * 1000.0
+    );
+    fx.snapshot("medida-menu");
+}
+
+// --- Java (Swing) -------------------------------------------------------------
+
+const JAVA_PROGRAM: &str = r#"
+import java.awt.FlowLayout;
+import java.awt.Point;
+import javax.swing.JButton;
+import javax.swing.JFrame;
+import javax.swing.JLabel;
+import javax.swing.JTextField;
+import javax.swing.Timer;
+
+public class Prueba {
+    public static void main(String[] args) {
+        JFrame frame = new JFrame("Prueba Java");
+        JTextField text = new JTextField(20);
+        JButton button = new JButton("Aceptar");
+        button.addActionListener(e -> System.out.println("boton"));
+        text.addActionListener(e -> {
+            System.out.println("texto: " + text.getText());
+            System.exit(4);
+        });
+        frame.setLayout(new FlowLayout());
+        frame.add(new JLabel("Escribe algo:"));
+        frame.add(text);
+        frame.add(button);
+        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        frame.setSize(360, 140);
+        frame.setVisible(true);
+        Timer timer = new Timer(800, e -> {
+            Point b = button.getLocationOnScreen();
+            Point t = text.getLocationOnScreen();
+            System.out.println("boton en " + b.x + " " + b.y + " " + button.getWidth() + " " + button.getHeight());
+            System.out.println("entrada en " + t.x + " " + t.y + " " + text.getWidth() + " " + text.getHeight());
+        });
+        timer.setRepeats(false);
+        timer.start();
+    }
+}
+"#;
+
+#[test]
+fn java_swing_application_draws_and_takes_keyboard_and_mouse() {
+    // (Hace falta un JDK: el programa se lanza desde su fuente.)
+    if missing(&["java", "javac", "xwininfo"]) {
+        return;
+    }
+    let fx = Fixture::new();
+    let source = fx.dir.path().join("Prueba.java");
+    std::fs::write(&source, JAVA_PROGRAM).unwrap();
+    let mut app = fx.spawn_env(
+        "java",
+        "java",
+        &["-Dfile.encoding=UTF-8", source.to_str().unwrap()],
+        &UTF8,
+    );
+    // La máquina virtual tarda lo suyo en arrancar y compilar.
+    let slow = Instant::now() + 3 * TIMEOUT;
+    while fx.find_windows("\"Prueba Java\"").is_empty() {
+        app.assert_running();
+        assert!(Instant::now() < slow, "no arrancó: {}", app.errors());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (_, g) = fx.wait_window(&mut app, "Prueba Java");
+    let button = wait_numbers(&mut app, "boton en");
+    let entry = wait_numbers(&mut app, "entrada en");
+    // La entrada y su etiqueta quedan dentro de la ventana, arriba (y no
+    // descuadradas por la barra de título, como pasa si Java cree que el
+    // gestor ha metido su ventana dentro de otra).
+    assert!(
+        entry[1] >= g.y && entry[1] < g.y + 20 && entry[0] > g.x + 60,
+        "entrada en {entry:?}, ventana en {g:?}"
+    );
+    let inside = Geometry {
+        x: entry[0],
+        y: entry[1],
+        w: entry[2],
+        h: entry[3],
+        viewable: true,
+    };
+    let label = Geometry {
+        x: g.x + 4,
+        w: entry[0] - g.x - 8,
+        ..inside
+    };
+    wait_for("Java pinta la etiqueta", || fx.colors_in(label) >= 2);
+    wait_for("Java pinta la entrada", || fx.colors_in(inside) >= 2);
+    fx.snapshot("java");
+    // Ratón.
+    fx.click(button[0] + button[2] / 2, button[1] + button[3] / 2);
+    wait_output(&mut app, "boton\n");
+    // Teclado.
+    fx.click(entry[0] + entry[2] / 2, entry[1] + entry[3] / 2);
+    fx.send(DesktopInput::Text(TYPED.into()));
+    fx.key(KeyCode::Enter);
+    let status = app.wait_exit();
+    assert_eq!(status.code(), Some(4), "{}", app.errors());
+    assert!(
+        app.output().contains(&format!("texto: {TYPED}\n")),
+        "{}",
+        app.output()
+    );
+    assert_no_x_errors(&app);
 }

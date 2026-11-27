@@ -63,6 +63,11 @@ jobs:
           # El servidor RDP de pruebas no está en todas las versiones de Ubuntu:
           # sin él, su prueba se omite sola.
           sudo apt-get install -y --no-install-recommends freerdp3-shadow-x11 || true
+          # Aplicaciones GTK, Qt, Tk, Motif y Java con las que se prueba el
+          # servidor X propio. Igual: la que falte solo omite su prueba.
+          sudo apt-get install -y --no-install-recommends \
+            xdotool wmctrl x11-xserver-utils yad gtk-3-examples adwaita-icon-theme \
+            fonts-dejavu-core tk nedit python3-pyqt5 openjdk-21-jdk || true
       - name: Formato
         run: cargo fmt --check
       - name: Pruebas, edición completa

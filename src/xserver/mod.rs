@@ -5,11 +5,18 @@
 //! pantalla con todas las ventanas de los clientes dentro, que la interfaz
 //! pinta y maneja como cualquier otro escritorio remoto ([`DesktopBackend`]).
 //!
-//! Implementa el protocolo básico (*core*) de X11 y la extensión
-//! BIG-REQUESTS. No hay RENDER, XKB, SHAPE, MIT-SHM, XInput ni GLX: las
-//! aplicaciones Xlib/Xt/Athena clásicas se apañan sin ellas. (Hay un
-//! XKEYBOARD mínimo, desactivado por defecto, solo para poder usar `xdotool`:
-//! véase [`XServer::set_xkb_compat`].)
+//! Implementa el protocolo básico (*core*) de X11 y las extensiones
+//! BIG-REQUESTS, RENDER (lo que usan GTK, Qt, Xft y Java para pintar con
+//! alfa), SHAPE (ventanas no rectangulares) y un RANDR mínimo (para avisar
+//! de los cambios de tamaño de la pantalla). No hay XKB, XFIXES, XInput,
+//! MIT-SHM ni GLX: GTK 3, Qt 5, Tk, Motif y Java se apañan sin ellas; GTK 4,
+//! no. (Hay un XKEYBOARD mínimo, desactivado por defecto, solo para poder
+//! usar `xdotool`: véase [`XServer::set_xkb_compat`].)
+//!
+//! Para depurar, con la variable de entorno `GODREMOTE_X11_TRACE` se anotan
+//! en la salida de errores las peticiones, los eventos y los errores, y con
+//! `GODREMOTE_X11_DISABLE=RENDER,SHAPE,RANDR` se dejan de anunciar esas
+//! extensiones.
 //!
 //! Organización:
 //!
@@ -44,9 +51,12 @@ mod font;
 mod input;
 mod keymap;
 mod proto;
+mod randr;
+mod render;
 mod requests;
 mod requests_draw;
 mod server;
+mod shape;
 #[cfg(test)]
 mod tests;
 mod wm;
@@ -658,7 +668,15 @@ fn apply_input(st: &mut Server, input: DesktopInput) {
 fn setup_reply(st: &Server, be: bool, client: ClientId) -> Vec<u8> {
     const VENDOR: &[u8] = b"GodRemote";
     // (profundidad, bits por píxel, relleno de fila)
-    const FORMATS: [(u8, u8, u8); 3] = [(1, 1, 32), (24, 32, 32), (32, 32, 32)];
+    // (La 4 está solo porque libXrender exige poder crear pixmaps de 1, 4,
+    // 8, 24 y 32 antes de dar RENDER por bueno.)
+    const FORMATS: [(u8, u8, u8); 5] = [
+        (1, 1, 32),
+        (4, 8, 32),
+        (8, 8, 32),
+        (24, 32, 32),
+        (32, 32, 32),
+    ];
     let mm = |px: u32| (px as f32 * 25.4 / 96.0).round() as u16;
     let root_masks = st.windows.get(&ROOT).map_or(0, |w| w.all_masks());
     let mut body = Writer::new(be);
@@ -699,7 +717,7 @@ fn setup_reply(st: &Server, be: bool, client: ClientId) -> Vec<u8> {
         .u8(0)
         .u8(24)
         .u8(FORMATS.len() as u8);
-    // Profundidad 24 con su visual TrueColor; 1 y 32 solo para pixmaps.
+    // Profundidad 24 con su visual TrueColor; las demás, solo para pixmaps.
     body.u8(24).u8(0).u16(1).u32(0);
     body.u32(ROOT_VISUAL)
         .u8(4)
@@ -709,8 +727,9 @@ fn setup_reply(st: &Server, be: bool, client: ClientId) -> Vec<u8> {
         .u32(0x0000_ff00)
         .u32(0x0000_00ff)
         .u32(0);
-    body.u8(1).u8(0).u16(0).u32(0);
-    body.u8(32).u8(0).u16(0).u32(0);
+    for depth in [1, 4, 8, 32] {
+        body.u8(depth).u8(0).u16(0).u32(0);
+    }
     let mut w = Writer::new(be);
     w.u8(1)
         .u8(0)
