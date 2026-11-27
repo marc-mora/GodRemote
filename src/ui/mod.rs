@@ -1359,13 +1359,21 @@ impl App {
                          Es la primera vez que te conectas a este servidor."
                     ));
                     ui.add_space(4.0);
-                    ui.label(format!("Huella de la clave {algorithm}:"));
+                    let is_certificate = algorithm.starts_with("certificado");
+                    if is_certificate {
+                        ui.label("Huella del certificado TLS:");
+                    } else {
+                        ui.label(format!("Huella de la clave {algorithm}:"));
+                    }
                     ui.label(RichText::new(fingerprint.as_str()).monospace().strong());
                     ui.add_space(4.0);
-                    ui.weak(
+                    ui.weak(if is_certificate {
                         "Comprueba la huella con el administrador del servidor. Si confías, \
-                         se guardará en known_hosts y se avisará si cambia.",
-                    );
+                         se recordará y la conexión se rechazará si cambia."
+                    } else {
+                        "Comprueba la huella con el administrador del servidor. Si confías, \
+                         se guardará en known_hosts y se avisará si cambia."
+                    });
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if ui.button("Confiar y conectar").clicked() {
@@ -1645,18 +1653,7 @@ fn spawn_embedded_rdp(
     size: (u16, u16),
     prompter: Prompter,
 ) -> DesktopBackend {
-    // PROVISIONAL hasta integrar el cliente RDP: cierra con un aviso.
-    let _ = (rt, session, password, size, prompter);
-    let (input, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (tx, events) = std::sync::mpsc::channel();
-    let _ = tx.send(crate::desktop::DesktopEvent::Closed(Some(
-        "cliente RDP integrado pendiente de integrar".into(),
-    )));
-    DesktopBackend {
-        input,
-        events,
-        frame: crate::desktop::Framebuffer::shared(1, 1),
-    }
+    crate::rdp_client::spawn(rt, session, password, size, prompter)
 }
 
 /// Punto de estado (verde / ámbar / rojo).

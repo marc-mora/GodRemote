@@ -558,6 +558,7 @@ async fn auth_key(
     to_save: &mut Vec<(String, String)>,
 ) -> Result<()> {
     let path = crate::paths::expand_tilde(&session.key_path);
+    let target = format!("{user}@{}", session.host.trim());
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("No se pudo leer la clave {}", path.display()))?;
 
@@ -570,9 +571,12 @@ async fn auth_key(
                 Some(p) => (p, false),
                 None => {
                     let msg = if attempt == 0 {
-                        format!("Passphrase de la clave {}", path.display())
+                        format!("Passphrase de la clave {} (para {target})", path.display())
                     } else {
-                        format!("Passphrase incorrecta. Passphrase de {}", path.display())
+                        format!(
+                            "Passphrase incorrecta. Passphrase de {} (para {target})",
+                            path.display()
+                        )
                     };
                     match prompter.secret("Clave privada", &msg, false, true).await {
                         Some(a) => (a.value, a.save),

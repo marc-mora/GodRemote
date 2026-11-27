@@ -204,6 +204,27 @@ impl DesktopView {
         }
     }
 
+    /// Deja pulsados en el equipo remoto exactamente estos modificadores.
+    fn sync_modifiers(&mut self, modifiers: egui::Modifiers) {
+        for (key, wanted) in wanted_modifiers(modifiers) {
+            if wanted != self.pressed.contains(&key.keysym()) {
+                self.key(key, wanted);
+            }
+        }
+    }
+
+    /// Envía Ctrl+letra, pulsando Ctrl si aún no lo está en el equipo remoto.
+    fn ctrl_shortcut(&mut self, letter: u8) {
+        let held = self.pressed.contains(&KeyCode::Control.keysym());
+        if !held {
+            self.key(KeyCode::Control, true);
+        }
+        self.send_combo(&[KeyCode::Letter(letter)]);
+        if !held {
+            self.key(KeyCode::Control, false);
+        }
+    }
+
     /// Suelta todo lo que esté pulsado en el equipo remoto.
     fn release_all(&mut self) {
         for key in std::mem::take(&mut self.pressed_keys) {
@@ -370,15 +391,10 @@ impl DesktopView {
             self.release_all();
         }
 
-        // --- Modificadores ----------------------------------------------------
+        // Los modificadores se sincronizan justo antes de cada tecla (con el
+        // estado que tenían en ese instante) y otra vez al final: así una
+        // combinación tecleada muy rápido no pierde su Ctrl o su Mayús.
         let modifiers = ui.input(|i| i.modifiers);
-        if has_focus {
-            for (key, wanted) in wanted_modifiers(modifiers) {
-                if wanted != self.pressed.contains(&key.keysym()) {
-                    self.key(key, wanted);
-                }
-            }
-        }
 
         // --- Eventos de ratón y teclado ----------------------------------------
         let over = response.contains_pointer();
@@ -466,6 +482,7 @@ impl DesktopView {
                         self.key(code, false);
                         continue;
                     }
+                    self.sync_modifiers(modifiers);
                     let altgr = modifiers.ctrl && modifiers.alt;
                     let shortcut = (modifiers.ctrl || modifiers.alt || modifiers.mac_cmd) && !altgr;
                     if !is_text_key(code) || shortcut {
@@ -474,16 +491,19 @@ impl DesktopView {
                 }
                 // egui convierte Ctrl+C / Ctrl+X / Ctrl+V en estos eventos: se
                 // reenvían como la tecla correspondiente (Ctrl ya está pulsado).
-                Event::Copy if has_focus => self.send_combo(&[KeyCode::Letter(b'c')]),
-                Event::Cut if has_focus => self.send_combo(&[KeyCode::Letter(b'x')]),
+                Event::Copy if has_focus => self.ctrl_shortcut(b'c'),
+                Event::Cut if has_focus => self.ctrl_shortcut(b'x'),
                 Event::Paste(text) if has_focus => {
                     if self.clipboard {
                         self.send(DesktopInput::ClipboardText(text));
                     }
-                    self.send_combo(&[KeyCode::Letter(b'v')]);
+                    self.ctrl_shortcut(b'v');
                 }
                 _ => {}
             }
+        }
+        if has_focus {
+            self.sync_modifiers(modifiers);
         }
     }
 }

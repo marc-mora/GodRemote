@@ -6,6 +6,7 @@ pub mod macros;
 pub mod model;
 pub mod paths;
 pub mod rdp;
+pub mod rdp_client;
 pub mod serial;
 pub mod sftp;
 pub mod ssh;

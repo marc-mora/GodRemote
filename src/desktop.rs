@@ -367,7 +367,8 @@ pub enum DesktopInput {
 pub enum DesktopEvent {
     /// Mensaje de progreso mientras conecta.
     Status(String),
-    /// Sesión establecida; el [`Framebuffer`] ya tiene el tamaño definitivo.
+    /// Sesión establecida; el [`Framebuffer`] ya tiene el tamaño negociado
+    /// (el servidor aún puede cambiarlo después: cambia entonces su `epoch`).
     Connected,
     /// El portapapeles remoto contiene este texto.
     ClipboardText(String),
