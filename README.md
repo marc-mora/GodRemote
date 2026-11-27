@@ -3,10 +3,13 @@
 Gestor de conexiones remotas escrito en Rust, al estilo de MobaXterm: un árbol
 jerárquico de equipos, terminales con pestañas (SSH, Telnet, puerto serie),
 explorador SFTP, escritorios remotos integrados (RDP y VNC), túneles, gestor de
-claves, macros, temas personalizables y un baúl cifrado para las credenciales.
+claves, snippets con atajos, escritura simultánea en varios terminales, temas
+personalizables y un baúl cifrado para las credenciales.
 
 ![Terminal SSH](docs/terminal.png)
 ![Barra de información del servidor y fondo del terminal](docs/barra-y-fondo.png)
+![Escribir en varios terminales a la vez](docs/difusion.png)
+![Snippets con atajos de teclado](docs/snippets.png)
 ![Escritorio remoto integrado](docs/escritorio.png)
 ![Temas](docs/temas.png)
 
@@ -24,7 +27,8 @@ claves, macros, temas personalizables y un baúl cifrado para las credenciales.
 | **RDP** | Cliente integrado en una pestaña, o el cliente externo del sistema (FreeRDP / `mstsc`). |
 | **VNC** | Cliente integrado (RFB 3.3–3.8; Raw, CopyRect, Hextile, ZRLE; contraseña VNC). |
 | **Telnet y serie** | Terminales para Telnet y para puertos serie (`COM3`, `/dev/ttyUSB0`…). |
-| **Macros** | Graba lo que tecleas en un terminal, edítalo y reprodúcelo en cualquier otro. |
+| **Snippets** | Textos y órdenes con nombre que se envían al terminal desde el menú o con un atajo de teclado propio (`Ctrl+Alt+D`, `F6`…). Se escriben a mano o se graban tecleando. |
+| **Difusión** | Lo que escribes en un terminal se envía a la vez a todos los terminales abiertos o solo a los que elijas. |
 | **Barra de información** | Bajo cada terminal SSH: nombre del servidor, sistema, tiempo encendido, CPU, memoria, disco, red… Se elige qué se muestra, en qué orden y cada cuánto se actualiza. |
 | **Temas** | Cinco temas integrados y editor en vivo de colores, tamaños de letra, interlineados, separaciones y bordes. Importar y exportar en JSON. |
 | **Fondo del terminal** | Un texto, un dibujo ASCII o una imagen detrás del texto, con la opacidad que se quiera. Por tema o por equipo. |
@@ -168,12 +172,40 @@ tema: en la ficha de la sesión, «Terminal: barra de información y fondo» →
 «Fondo propio para este equipo». Sirve para distinguir de un vistazo los
 servidores delicados.
 
-### Macros
+### Snippets y atajos
 
-**⏺ Macros → Grabar en el terminal activo**, teclea, y pulsa **Detener**. La
-macro se guarda con un nombre y aparece en el menú. En **Gestionar macros** se
-pueden escribir a mano: cada línea es una orden, y `\e`, `\t` o `\x03`
-representan teclas especiales.
+Un snippet es un texto o una serie de órdenes con nombre que se envía al
+terminal activo. **⚡ Snippets** los lista (con su atajo al lado) y permite:
+
+- **Nuevo snippet…**: nombre, texto y atajo. Cada salto de línea es Intro; si
+  el texto no acaba en salto de línea, queda escrito a la espera de que lo
+  completes. `\e`, `\t` o `\x03` representan teclas especiales.
+- **Grabar tecleando en el terminal activo**: lo que teclees hasta pulsar
+  **Detener** se guarda como snippet.
+- **Gestionar snippets y atajos…**: editar, lanzar y eliminar.
+
+Para asignar un atajo, pulsa **Asignar…** y a continuación la combinación de
+teclas. Vale cualquiera con Ctrl o Alt y las teclas de función (F1–F12),
+solas o con Mayús; no valen una letra sola ni Ctrl+C, Ctrl+V y Ctrl+X, y dos
+snippets no pueden compartir atajo. Los atajos actúan cuando el teclado está
+en un terminal conectado, y tienen prioridad sobre lo que esa combinación
+signifique en la shell (por eso convienen Ctrl+Alt+letra, Ctrl+Mayús+letra o
+las teclas de función, que no chocan con nada).
+
+### Escribir en varios terminales a la vez
+
+El botón **📡 Difusión** de la cabecera de cada terminal abre sus opciones:
+
+- **Escribir a la vez en varios terminales** la activa.
+- **En todos los terminales abiertos**, o **solo en los que elija**,
+  marcándolos en la lista.
+
+Con la difusión activa, lo que teclees, pegues o lances con un snippet en un
+terminal del grupo se envía también a los demás: escribes `hola` y aparece
+en todos. Mientras escribes para varios, el terminal lleva un marco de color,
+la cabecera dice en cuántos estás escribiendo y sus pestañas cambian de
+color. Un terminal que no está en el grupo sigue funcionando por separado.
+La difusión se desactiva sola al cerrar la aplicación.
 
 ## Dónde se guardan los datos
 
@@ -188,7 +220,7 @@ Linux, `%APPDATA%\godremote` en Windows; se puede cambiar con la variable
 | `keys/` | Claves generadas o importadas desde la aplicación. |
 | `themes/` | Temas del usuario. |
 | `settings.json` | Tema elegido y ajustes de la barra de información. |
-| `macros.json` | Macros de terminal. |
+| `macros.json` | Snippets y sus atajos. |
 | `tls_known_hosts.json` | Huellas de los certificados RDP aceptados. |
 | `rdp/` | Registros de la última ejecución del cliente RDP externo. |
 
@@ -233,6 +265,11 @@ recuperar; el resto de la configuración sigue intacta.
   Un servidor que limite a una las sesiones por conexión (`MaxSessions 1`)
   no deja abrir el canal que necesita.
 - Fondo del terminal: de un GIF animado se usa solo el primer fotograma.
+- Snippets: los atajos solo actúan con el teclado en un terminal (no en un
+  escritorio remoto ni en SFTP).
+- Difusión: se repite el teclado, lo pegado y los snippets, no el ratón. Cada
+  terminal recibe las mismas teclas, pero lo que hagan depende de lo que
+  tenga en pantalla: conviene que todos estén en el mismo punto.
 - Saltos: como máximo ocho encadenados; cada salto se autentica con su
   propia sesión (no hay reenvío del agente SSH entre saltos).
 - Sin Mosh, FTP ni editor de texto remoto.
@@ -246,7 +283,8 @@ cargo test
 ```
 
 - Pruebas unitarias del modelo, baúl, claves, terminal, temas, fondos,
-  barra de información, macros, Telnet, X11, túneles, VNC y RDP.
+  barra de información, snippets y atajos, difusión, Telnet, X11, túneles,
+  VNC y RDP.
 - `tests/auth_methods.rs`: contraseña y keyboard-interactive contra un
   servidor SSH en el propio proceso.
 - `tests/ssh_integration.rs`: clave con passphrase, verificación de host,
@@ -289,6 +327,6 @@ src/
   theme.rs        temas
   backdrop.rs     fondo del terminal (texto, ASCII, imagen)
   monitor.rs      consulta del estado del servidor
-  macros.rs       macros de terminal
+  macros.rs       snippets de terminal y sus atajos
   ui/             interfaz (egui)
 ```

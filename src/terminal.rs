@@ -36,6 +36,20 @@ pub enum TermEvent {
     Closed(Option<String>),
 }
 
+/// Algo que el usuario introduce en un terminal, antes de traducirlo a
+/// bytes. Se guarda así para poder repetirlo en otros terminales (difusión):
+/// cada uno lo traduce según su propio estado (modo de las flechas, pegado
+/// entre corchetes…).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TermInput {
+    /// Texto tecleado o bytes ya preparados (un snippet).
+    Bytes(Vec<u8>),
+    /// Tecla especial (flechas, Intro, Ctrl+letra…).
+    Key(Key, egui::Modifiers),
+    /// Texto pegado del portapapeles.
+    Paste(String),
+}
+
 /// Extremos de comunicación con una shell (local o remota).
 pub struct TermBackend {
     pub cmd: mpsc::UnboundedSender<TermCmd>,
@@ -321,6 +335,11 @@ pub struct TerminalView {
     mouse_cell: (u16, u16),
     /// Teclas grabadas para una macro (si se está grabando).
     recording: Option<Vec<u8>>,
+    /// Si es `Some`, lo que el usuario introduce se va anotando aquí para
+    /// repetirlo en otros terminales (lo recoge la aplicación).
+    pub mirror: Option<Vec<TermInput>>,
+    /// El terminal tenía el foco del teclado la última vez que se dibujó.
+    pub has_focus: bool,
     /// Fondo propio de la sesión (y el identificador de su imagen); si no
     /// hay, se usa el del tema.
     pub backdrop: Option<(Arc<Backdrop>, u64)>,
@@ -351,6 +370,8 @@ impl TerminalView {
             mouse_down: None,
             mouse_cell: (0, 0),
             recording: None,
+            mirror: None,
+            has_focus: false,
             backdrop: None,
             monitor: None,
         }
@@ -430,6 +451,30 @@ impl TerminalView {
     /// Envía una secuencia de teclas ya preparada (macros).
     pub fn send_macro(&mut self, bytes: Vec<u8>) {
         self.send_raw(bytes);
+    }
+
+    /// Entrada del usuario en este terminal: se aplica y, si hay difusión,
+    /// se anota para los demás.
+    fn input(&mut self, input: TermInput) {
+        self.apply_input(&input);
+        if let Some(mirror) = &mut self.mirror {
+            mirror.push(input);
+        }
+    }
+
+    /// Aplica una entrada (propia o difundida desde otro terminal),
+    /// traduciéndola según el estado de este terminal.
+    pub fn apply_input(&mut self, input: &TermInput) {
+        match input {
+            TermInput::Bytes(bytes) => self.send(bytes.clone()),
+            TermInput::Key(key, modifiers) => {
+                let app_cursor = self.parser.screen().application_cursor();
+                if let Some(bytes) = key_bytes(*key, *modifiers, app_cursor) {
+                    self.send(bytes);
+                }
+            }
+            TermInput::Paste(text) => self.paste(text),
+        }
     }
 
     pub fn is_connected(&self) -> bool {
@@ -619,6 +664,7 @@ impl TerminalView {
         }
 
         let has_focus = response.has_focus();
+        self.has_focus = has_focus;
         if has_focus {
             ui.memory_mut(|m| {
                 m.set_focus_lock_filter(
@@ -683,7 +729,6 @@ impl TerminalView {
         // --- Teclado ------------------------------------------------------
         if has_focus {
             let events = ui.input(|i| i.events.clone());
-            let app_cursor = self.parser.screen().application_cursor();
             for event in events {
                 match event {
                     Event::Text(text) => {
@@ -692,18 +737,18 @@ impl TerminalView {
                         if mods.alt && !mods.ctrl && text.is_ascii() {
                             continue;
                         }
-                        self.send(text.into_bytes());
+                        self.input(TermInput::Bytes(text.into_bytes()));
                     }
-                    Event::Paste(text) => self.paste(&text),
+                    Event::Paste(text) => self.input(TermInput::Paste(text)),
                     Event::Copy => match self.selected_text() {
                         Some(text) => {
                             ui.ctx().copy_text(text);
                             self.selection = None;
                         }
                         // Sin selección, Ctrl+C es la interrupción habitual.
-                        None => self.send(vec![0x03]),
+                        None => self.input(TermInput::Bytes(vec![0x03])),
                     },
-                    Event::Cut => self.send(vec![0x18]),
+                    Event::Cut => self.input(TermInput::Bytes(vec![0x18])),
                     Event::Key {
                         key,
                         pressed: true,
@@ -720,8 +765,8 @@ impl TerminalView {
                             self.parser
                                 .screen_mut()
                                 .set_scrollback(cur.saturating_sub(rows as usize / 2));
-                        } else if let Some(bytes) = key_bytes(key, modifiers, app_cursor) {
-                            self.send(bytes);
+                        } else {
+                            self.input(TermInput::Key(key, modifiers));
                         }
                     }
                     _ => {}
@@ -1011,6 +1056,87 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// Terminal conectado a una shell de mentira: devuelve lo que se le
+    /// envía y deja inyectarle la salida de la «aplicación remota».
+    fn fake_terminal() -> (
+        TerminalView,
+        mpsc::UnboundedReceiver<TermCmd>,
+        std::sync::mpsc::Sender<TermEvent>,
+    ) {
+        let (cmd, sent) = mpsc::unbounded_channel();
+        let (remote, events) = std::sync::mpsc::channel();
+        let mut view = TerminalView::new(TermBackend { cmd, events });
+        remote.send(TermEvent::Connected(None)).unwrap();
+        view.poll();
+        (view, sent, remote)
+    }
+
+    fn sent_bytes(sent: &mut mpsc::UnboundedReceiver<TermCmd>) -> Vec<Vec<u8>> {
+        let mut out = vec![];
+        while let Ok(cmd) = sent.try_recv() {
+            if let TermCmd::Input(bytes) = cmd {
+                out.push(bytes);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn mirrored_input_is_translated_by_each_terminal() {
+        let (mut a, mut sent_a, _remote_a) = fake_terminal();
+        let (mut b, mut sent_b, remote_b) = fake_terminal();
+        // En el segundo hay una aplicación a pantalla completa: flechas en
+        // modo aplicación y pegado entre corchetes.
+        remote_b
+            .send(TermEvent::Data(b"\x1b[?1h\x1b[?2004h".to_vec()))
+            .unwrap();
+        b.poll();
+
+        // Sin difusión no se anota nada.
+        a.input(TermInput::Bytes(b"solo aqui".to_vec()));
+        assert!(a.mirror.is_none());
+        assert_eq!(sent_bytes(&mut sent_a), vec![b"solo aqui".to_vec()]);
+
+        // Con difusión, lo tecleado en el primero se repite en el segundo.
+        a.mirror = Some(vec![]);
+        a.input(TermInput::Bytes(b"hola".to_vec()));
+        a.input(TermInput::Key(Key::ArrowUp, egui::Modifiers::NONE));
+        a.input(TermInput::Key(Key::Enter, egui::Modifiers::NONE));
+        a.input(TermInput::Paste("uno\ndos".into()));
+        let mirrored = a.mirror.take().unwrap();
+        assert_eq!(mirrored.len(), 4);
+        for input in &mirrored {
+            b.apply_input(input);
+        }
+        assert_eq!(
+            sent_bytes(&mut sent_a),
+            vec![
+                b"hola".to_vec(),
+                b"\x1b[A".to_vec(),
+                b"\r".to_vec(),
+                b"uno\rdos".to_vec()
+            ]
+        );
+        // Mismo contenido, pero traducido a su manera.
+        assert_eq!(
+            sent_bytes(&mut sent_b),
+            vec![
+                b"hola".to_vec(),
+                b"\x1bOA".to_vec(),
+                b"\r".to_vec(),
+                b"\x1b[200~uno\rdos\x1b[201~".to_vec()
+            ]
+        );
+        // Lo que llega por difusión no se vuelve a difundir.
+        assert!(b.mirror.is_none());
+
+        // Un terminal desconectado no recibe nada.
+        remote_b.send(TermEvent::Closed(None)).unwrap();
+        b.poll();
+        b.apply_input(&TermInput::Bytes(b"perdido".to_vec()));
+        assert!(sent_bytes(&mut sent_b).is_empty());
+    }
+
     #[test]
     fn local_shell_runs_commands() {
         let waker: Waker = std::sync::Arc::new(|| {});

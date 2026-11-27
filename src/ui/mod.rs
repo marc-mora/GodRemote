@@ -24,7 +24,7 @@ use crate::macros::MacroStore;
 use crate::model::{AuthMethod, Node, Protocol, Session, Tree};
 use crate::sftp::SftpSource;
 use crate::ssh::{Credentials, Endpoint, PromptRequest, Prompter, SecretAnswer, SshHandle, Waker};
-use crate::terminal::{ConnState, INITIAL_COLS, INITIAL_ROWS, TerminalView};
+use crate::terminal::{ConnState, INITIAL_COLS, INITIAL_ROWS, TermInput, TerminalView};
 use crate::theme::{Settings, ThemeStore};
 use crate::theme::{ok_color, warn_color};
 use crate::tunnels::TunnelStatus;
@@ -163,6 +163,33 @@ pub struct App {
     content_size: egui::Vec2,
     toast: Option<(String, bool, Instant)>,
     quick_connect: String,
+    broadcast: Broadcast,
+}
+
+/// Difusión: lo que se escribe en un terminal se repite en otros.
+struct Broadcast {
+    enabled: bool,
+    /// A todos los terminales abiertos (también a los que se abran después).
+    all: bool,
+    /// Pestañas elegidas, por identificador (si no es a todos).
+    chosen: std::collections::BTreeSet<u64>,
+}
+
+impl Default for Broadcast {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            all: true,
+            chosen: Default::default(),
+        }
+    }
+}
+
+impl Broadcast {
+    /// `true` si la pestaña participa en la difusión.
+    fn includes(&self, tab: u64) -> bool {
+        self.enabled && (self.all || self.chosen.contains(&tab))
+    }
 }
 
 struct RecordedMacro {
@@ -243,6 +270,7 @@ impl App {
             content_size: egui::vec2(1024.0, 700.0),
             toast,
             quick_connect: String::new(),
+            broadcast: Broadcast::default(),
         }
     }
 
@@ -682,13 +710,19 @@ impl App {
         let mut run = None;
         let mut toggle_recording = false;
         let mut manage = false;
-        ui.menu_button("⏺ Macros", |ui| {
+        let mut create = false;
+        ui.menu_button("⚡ Snippets", |ui| {
+            ui.set_min_width(260.0);
             if self.macros.macros.is_empty() {
-                ui.weak("Aún no hay macros");
+                ui.weak("Aún no hay snippets");
             }
             for m in &self.macros.macros {
+                let mut button = egui::Button::new(format!("▶ {}", m.name));
+                if let Some(shortcut) = &m.shortcut {
+                    button = button.shortcut_text(shortcut.to_string());
+                }
                 if ui
-                    .add_enabled(can_run, egui::Button::new(format!("▶ {}", m.name)))
+                    .add_enabled(can_run, button)
                     .on_disabled_hover_text("Abre un terminal conectado")
                     .clicked()
                 {
@@ -697,10 +731,14 @@ impl App {
                 }
             }
             ui.separator();
+            if ui.button("➕ Nuevo snippet…").clicked() {
+                create = true;
+                ui.close();
+            }
             let label = if recording {
                 "⏹ Detener y guardar…"
             } else {
-                "⏺ Grabar en el terminal activo"
+                "⏺ Grabar tecleando en el terminal activo"
             };
             if ui
                 .add_enabled(can_run, egui::Button::new(label))
@@ -710,11 +748,13 @@ impl App {
                 toggle_recording = true;
                 ui.close();
             }
-            if ui.button("Gestionar macros…").clicked() {
+            if ui.button("Gestionar snippets y atajos…").clicked() {
                 manage = true;
                 ui.close();
             }
-        });
+        })
+        .response
+        .on_hover_text("Textos y órdenes que se envían al terminal desde aquí o con un atajo");
         if let Some(id) = run {
             self.run_macro(id);
         }
@@ -735,6 +775,9 @@ impl App {
         if manage {
             self.macros_window = Some(MacrosWindow::new(&self.macros, None));
         }
+        if create {
+            self.macros_window = Some(MacrosWindow::new_snippet());
+        }
     }
 
     fn recorded_macro_ui(&mut self, ctx: &egui::Context) {
@@ -745,8 +788,8 @@ impl App {
         let mut close = false;
         egui::Modal::new(egui::Id::unique("recorded_macro")).show(ctx, |ui| {
             ui.set_width(420.0);
-            ui.heading("Guardar macro");
-            ui.label("Nombre de la macro grabada:");
+            ui.heading("Guardar snippet");
+            ui.label("Nombre de lo que acabas de grabar:");
             let resp =
                 ui.add(egui::TextEdit::singleline(&mut recorded.name).desired_width(f32::INFINITY));
             if !recorded.focused {
@@ -780,14 +823,18 @@ impl App {
         });
         if save {
             if let Some(recorded) = self.recorded_macro.take() {
-                self.macros
+                let id = self
+                    .macros
                     .add(&recorded.name, crate::macros::encode(&recorded.bytes));
                 match self.macros.save(&crate::paths::macros_file()) {
-                    Ok(()) => self.notify("Macro guardada", false),
-                    Err(e) => self.notify(format!("No se pudo guardar la macro: {e:#}"), true),
+                    // Se abre la ventana de snippets con el nuevo, por si se
+                    // le quiere retocar o asignar un atajo.
+                    Ok(()) => {
+                        self.macros_window = Some(MacrosWindow::new(&self.macros, Some(id)));
+                    }
+                    Err(e) => self.notify(format!("No se pudo guardar el snippet: {e:#}"), true),
                 }
             }
-            self.focus_active_terminal();
         } else if close {
             self.recorded_macro = None;
             self.focus_active_terminal();
@@ -910,10 +957,20 @@ impl App {
                         ui.scope(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             status_dot(ui, color);
-                            let resp = ui.selectable_label(
-                                self.active == i,
-                                format!("{icon} {}", tab.title),
-                            );
+                            let in_group = matches!(tab.kind, TabKind::Terminal(_))
+                                && self.broadcast.includes(tab.id);
+                            let mut label = RichText::new(format!("{icon} {}", tab.title));
+                            if in_group {
+                                label = label.color(warn_color());
+                            }
+                            let resp = ui.selectable_label(self.active == i, label);
+                            let resp = if in_group {
+                                resp.on_hover_text(
+                                    "Recibe lo que se escriba con la difusión activa",
+                                )
+                            } else {
+                                resp
+                            };
                             if resp.clicked() {
                                 self.active = i;
                             }
@@ -931,7 +988,8 @@ impl App {
                 });
             });
         if let Some(i) = close {
-            self.tabs.remove(i);
+            let closed = self.tabs.remove(i);
+            self.broadcast.chosen.remove(&closed.id);
             if self.active >= i && self.active > 0 {
                 self.active -= 1;
             }
@@ -955,6 +1013,26 @@ impl App {
         }
     }
 
+    /// Repite en los demás terminales del grupo de difusión lo que se ha
+    /// introducido en la pestaña `source`.
+    fn mirror_to_group(&mut self, source: u64, inputs: &[TermInput]) {
+        if inputs.is_empty() || !self.broadcast.includes(source) {
+            return;
+        }
+        for tab in &mut self.tabs {
+            if tab.id == source || !self.broadcast.includes(tab.id) {
+                continue;
+            }
+            if let TabKind::Terminal(term) = &mut tab.kind {
+                for input in inputs {
+                    term.apply_input(input);
+                }
+            }
+        }
+    }
+
+    /// Envía un snippet al terminal activo (y, con la difusión activa, a
+    /// los demás terminales del grupo).
     fn run_macro(&mut self, id: Uuid) {
         let Some(text) = self
             .macros
@@ -965,12 +1043,39 @@ impl App {
         else {
             return;
         };
+        let bytes = crate::macros::decode(&text);
+        let source = self.tabs.get(self.active).map(|t| t.id);
         match self.active_terminal() {
             Some(term) => {
-                term.send_macro(crate::macros::decode(&text));
+                term.send_macro(bytes.clone());
                 term.request_focus();
             }
-            None => self.notify("Abre un terminal conectado para ejecutar la macro", true),
+            None => {
+                return self.notify("Abre un terminal conectado para lanzar el snippet", true);
+            }
+        }
+        if let Some(source) = source {
+            self.mirror_to_group(source, &[TermInput::Bytes(bytes)]);
+        }
+    }
+
+    /// Lanza el snippet cuyo atajo se acaba de pulsar. Solo con el foco en
+    /// un terminal conectado: en un diálogo o un campo de texto las teclas
+    /// son de quien las está usando.
+    fn dispatch_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.macros_window.is_some() || self.recorded_macro.is_some() {
+            return;
+        }
+        let in_terminal = matches!(
+            self.tabs.get(self.active).map(|t| &t.kind),
+            Some(TabKind::Terminal(t)) if t.is_connected() && t.has_focus
+        );
+        if !in_terminal {
+            return;
+        }
+        let triggered = ctx.input_mut(|i| self.macros.triggered(&mut i.events));
+        if let Some(id) = triggered {
+            self.run_macro(id);
         }
     }
 
@@ -1016,6 +1121,23 @@ impl App {
         let mut reconnect = false;
         let mut recorded: Option<Vec<u8>> = None;
         let mut open_bar_settings = false;
+        // Terminales abiertos (para el menú de difusión) y cuántos reciben
+        // ahora mismo lo que se escriba.
+        let terminals: Vec<(u64, String, bool)> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tab)| match &tab.kind {
+                // Con el número de pestaña, para distinguir títulos iguales.
+                TabKind::Terminal(t) => Some((
+                    tab.id,
+                    format!("{}. {}", i + 1, tab.title),
+                    t.is_connected(),
+                )),
+                _ => None,
+            })
+            .collect();
+        let mut mirrored: Vec<TermInput> = vec![];
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
@@ -1085,11 +1207,12 @@ impl App {
                     }
                     if term.is_recording() {
                         status_dot(ui, ui.visuals().error_fg_color);
-                        ui.label("Grabando macro");
+                        ui.label("Grabando snippet");
                         if ui.button("⏹ Detener").clicked() {
                             recorded = Some(term.stop_recording());
                         }
                     }
+                    broadcast_button(ui, &mut self.broadcast, &terminals, tab_id);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .small_button("A+")
@@ -1120,8 +1243,27 @@ impl App {
                 };
                 let mut term_rect = area;
                 term_rect.max.y -= bar_height;
+                // Con la difusión activa, lo que se escriba aquí se anota para
+                // repetirlo en los demás terminales del grupo.
+                let receivers = terminals
+                    .iter()
+                    .filter(|(id, ..)| self.broadcast.includes(*id))
+                    .count();
+                let sending = self.broadcast.includes(tab_id) && receivers > 1;
+                term.mirror = sending.then(Vec::new);
                 // Sin diálogos abiertos, el teclado es del terminal.
                 ui.scope_builder(egui::UiBuilder::new().max_rect(term_rect), |ui| term.ui(ui));
+                mirrored = term.mirror.take().unwrap_or_default();
+                if sending {
+                    // Un marco bien visible: escribir en varios servidores a
+                    // la vez no debe pasar inadvertido.
+                    ui.painter().rect_stroke(
+                        term_rect,
+                        0.0,
+                        egui::Stroke::new(2.0, warn_color()),
+                        egui::StrokeKind::Inside,
+                    );
+                }
                 if let Some(session) = bar {
                     let mut bar_rect = area;
                     bar_rect.min.y = term_rect.max.y;
@@ -1184,6 +1326,8 @@ impl App {
             }
         });
 
+        self.mirror_to_group(tab_id, &mirrored);
+
         if reconnect && let Some(session) = self.tabs[self.active].session.clone() {
             if matches!(self.tabs[self.active].kind, TabKind::Desktop(_)) {
                 match self.new_desktop(&session) {
@@ -1210,7 +1354,7 @@ impl App {
 
     fn finish_recording(&mut self, bytes: Vec<u8>) {
         if bytes.is_empty() {
-            self.notify("No se tecleó nada: la macro no se ha guardado", true);
+            self.notify("No se tecleó nada: no se ha guardado ningún snippet", true);
         } else {
             self.recorded_macro = Some(RecordedMacro {
                 name: String::new(),
@@ -1866,6 +2010,10 @@ fn tree_ui(
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Los atajos de los snippets se miran antes de que el terminal vea
+        // las teclas.
+        self.dispatch_shortcuts(ui.ctx());
+
         // --- Eventos de fondo ---------------------------------------------
         while let Ok(req) = self.prompt_rx.try_recv() {
             self.prompts.push_back(match req {
@@ -2057,6 +2205,80 @@ impl eframe::App for App {
         self.vault_dialog_ui(&ctx);
         self.prompt_ui(&ctx);
     }
+}
+
+/// Botón de la cabecera del terminal que abre el menú de difusión.
+fn broadcast_button(
+    ui: &mut egui::Ui,
+    broadcast: &mut Broadcast,
+    terminals: &[(u64, String, bool)],
+    current: u64,
+) {
+    use egui::containers::menu::{MenuButton, MenuConfig};
+    let receivers = terminals
+        .iter()
+        .filter(|(id, ..)| broadcast.includes(*id))
+        .count();
+    let label = if !broadcast.enabled {
+        RichText::new("📡 Difusión")
+    } else if broadcast.includes(current) && receivers > 1 {
+        RichText::new(format!("📡 Escribiendo en {receivers} terminales"))
+            .color(warn_color())
+            .strong()
+    } else if broadcast.includes(current) {
+        RichText::new("📡 Difusión: no hay más terminales").color(warn_color())
+    } else {
+        RichText::new("📡 Difusión activa (este terminal no)").color(warn_color())
+    };
+    // El menú no se cierra al marcar casillas: se suelen marcar varias.
+    let config = MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    let (response, _) = MenuButton::new(label).config(config).ui(ui, |ui| {
+        ui.set_min_width(300.0);
+        ui.set_max_width(340.0);
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+        ui.checkbox(
+            &mut broadcast.enabled,
+            "Escribir a la vez en varios terminales",
+        );
+        ui.weak(
+            "Lo que teclees, pegues o lances con un snippet en uno de ellos se envía también a \
+             los demás.",
+        );
+        ui.add_enabled_ui(broadcast.enabled, |ui| {
+            ui.radio_value(&mut broadcast.all, true, "En todos los terminales abiertos");
+            ui.radio_value(&mut broadcast.all, false, "Solo en los que elija:");
+            ui.add_enabled_ui(!broadcast.all, |ui| {
+                ui.indent("broadcast_tabs", |ui| {
+                    for (id, title, connected) in terminals {
+                        let mut on = broadcast.chosen.contains(id);
+                        let mut text = title.clone();
+                        if *id == current {
+                            text.push_str(" (este)");
+                        }
+                        if !connected {
+                            text.push_str(" · sin conexión");
+                        }
+                        if ui.checkbox(&mut on, text).changed() {
+                            if on {
+                                broadcast.chosen.insert(*id);
+                            } else {
+                                broadcast.chosen.remove(id);
+                            }
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Todos").clicked() {
+                            broadcast.chosen = terminals.iter().map(|(id, ..)| *id).collect();
+                        }
+                        if ui.small_button("Ninguno").clicked() {
+                            broadcast.chosen.clear();
+                        }
+                    });
+                });
+            });
+        });
+    });
+    response.on_hover_text("Enviar lo que escribes a varios terminales a la vez");
 }
 
 /// `true` si el terminal de esta sesión lleva la barra de información del
