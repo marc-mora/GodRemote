@@ -1152,6 +1152,10 @@ pub struct Settings {
     /// Barra de información del servidor bajo los terminales SSH.
     #[serde(rename = "barra_servidor")]
     pub server_bar: ServerBar,
+    /// Abrir RDP con el cliente integrado (si la edición lo incluye y la
+    /// sesión lo pide) o siempre con el cliente externo del sistema.
+    #[serde(rename = "rdp_integrado")]
+    pub rdp_embedded: bool,
 }
 
 impl Default for Settings {
@@ -1159,6 +1163,7 @@ impl Default for Settings {
         Self {
             theme: BASE_NAME.into(),
             server_bar: ServerBar::default(),
+            rdp_embedded: true,
         }
     }
 }
@@ -1364,6 +1369,7 @@ mod tests {
                 disks: vec!["/".into(), "/home".into()],
                 ..Default::default()
             },
+            rdp_embedded: false,
         };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);

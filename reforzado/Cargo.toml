@@ -1,0 +1,95 @@
+# Edición «SSH reforzada» de GodRemote: el mismo código, sin el cliente RDP
+# integrado y, gracias a eso, con la última versión de la librería SSH.
+#
+# Las dependencias del RDP integrado (IronRDP → sspi/picky) fijan versiones
+# preliminares de `rsa` que impiden a Cargo elegir russh 0.65.2 o posterior,
+# y un Cargo.lock incluye también las dependencias opcionales. La única forma
+# de tener las dos combinaciones es con dos manifiestos, cada uno con su
+# Cargo.lock. Este comparte el código de `../src`.
+#
+#   cargo build --release --manifest-path reforzado/Cargo.toml --target-dir target
+#
+# La lista de dependencias debe ser la del manifiesto principal menos las del
+# RDP integrado: lo comprueba la prueba `editions_share_dependencies`.
+
+[package]
+name = "godremote"
+version = "0.4.0"
+edition = "2024"
+description = "Gestor de conexiones remotas (edición SSH reforzada, sin RDP integrado)"
+license = "MIT"
+build = "../build.rs"
+
+[lib]
+path = "../src/lib.rs"
+
+# Con otro nombre, para que las dos ediciones puedan convivir en la misma
+# carpeta de compilación (`--target-dir target`) y en el mismo equipo.
+[[bin]]
+name = "godremote-reforzado"
+path = "../src/main.rs"
+
+[dependencies]
+anyhow = "1"
+argon2 = "0.6"
+base64 = "0.23"
+chacha20poly1305 = "0.11"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+des = "0.9.0"
+dirs = "7"
+eframe = { version = "0.37", default-features = false, features = ["glow", "x11", "wayland", "default_fonts", "clipboard"] }
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
+flate2 = "1.1.11"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
+portable-pty = "0.9"
+rand = "0.10"
+rfd = "0.18.0"
+russh = "0.65"
+russh-sftp = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serialport = { version = "4.10.1", default-features = false }
+sha2 = "0.11.2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "fs", "net", "time"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+vt100 = "0.18"
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# Solo para pruebas: permite EFRAME_SCREENSHOT_TO=archivo.png
+screenshot = ["eframe/__screenshot"]
+
+# El código pregunta por `rdp-integrado`, que esta edición no tiene.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("rdp-integrado"))'] }
+
+[[test]]
+name = "auth_methods"
+path = "../tests/auth_methods.rs"
+
+[[test]]
+name = "ssh_integration"
+path = "../tests/ssh_integration.rs"
+
+[[test]]
+name = "ssh_features"
+path = "../tests/ssh_features.rs"
+
+[[test]]
+name = "monitor_integration"
+path = "../tests/monitor_integration.rs"
+
+[[test]]
+name = "vnc_integration"
+path = "../tests/vnc_integration.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2

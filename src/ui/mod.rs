@@ -6,6 +6,7 @@ pub mod editor;
 pub mod keys_view;
 pub mod macros_view;
 pub mod server_bar;
+pub mod settings_view;
 pub mod sftp_view;
 pub mod themes_view;
 pub mod util;
@@ -34,6 +35,7 @@ use editor::{EditorResult, SessionEditor};
 use keys_view::KeysWindow;
 use macros_view::{MacroRequest, MacrosWindow};
 use server_bar::ServerBarWindow;
+use settings_view::SettingsWindow;
 use sftp_view::{SftpState, SftpView};
 use themes_view::ThemesWindow;
 
@@ -155,6 +157,7 @@ pub struct App {
     settings: Settings,
     themes_window: Option<ThemesWindow>,
     server_bar_window: Option<ServerBarWindow>,
+    settings_window: Option<SettingsWindow>,
     macros: MacroStore,
     macros_window: Option<MacrosWindow>,
     /// Macro recién grabada, a la espera de nombre.
@@ -264,6 +267,7 @@ impl App {
             settings,
             themes_window: None,
             server_bar_window: None,
+            settings_window: None,
             macros: MacroStore::load(&crate::paths::macros_file()).unwrap_or_default(),
             macros_window: None,
             recorded_macro: None,
@@ -411,6 +415,7 @@ impl App {
     }
 
     /// Tamaño (en píxeles) que se pedirá para un escritorio RDP integrado.
+    #[cfg(feature = "rdp-integrado")]
     fn desktop_size(&self, session: &Session) -> (u16, u16) {
         if session.rdp.fit_window {
             // El alto descuenta la barra de la pestaña.
@@ -440,6 +445,7 @@ impl App {
                 via,
                 self.prompter.clone(),
             ),
+            #[cfg(feature = "rdp-integrado")]
             _ => crate::rdp_client::spawn_via(
                 self.rt.handle(),
                 session.clone(),
@@ -448,6 +454,11 @@ impl App {
                 via,
                 self.prompter.clone(),
             ),
+            #[cfg(not(feature = "rdp-integrado"))]
+            _ => {
+                let _ = (password, via);
+                return Err("Esta edición no incluye el cliente RDP integrado".into());
+            }
         };
         let clipboard = session.protocol == Protocol::Vnc || session.rdp.clipboard;
         Ok(DesktopView::new(backend, clipboard))
@@ -519,12 +530,20 @@ impl App {
         }
     }
 
+    /// `true` si las sesiones RDP pueden abrirse con el cliente integrado:
+    /// la edición lo incluye y los ajustes no lo desactivan.
+    fn embedded_rdp_enabled(&self) -> bool {
+        crate::HAS_EMBEDDED_RDP && self.settings.rdp_embedded
+    }
+
     /// Abre una sesión con el protocolo indicado (o el suyo propio).
     fn connect(&mut self, session: Session, protocol: Option<Protocol>) {
         match protocol.unwrap_or(session.protocol) {
             Protocol::Ssh | Protocol::Telnet | Protocol::Serial => self.open_terminal(session),
             Protocol::Sftp => self.open_sftp(session, None),
-            Protocol::Rdp if session.rdp.embedded => self.open_desktop(session),
+            Protocol::Rdp if session.rdp.embedded && self.embedded_rdp_enabled() => {
+                self.open_desktop(session)
+            }
             Protocol::Rdp => self.open_rdp(session),
             Protocol::Vnc => self.open_desktop(session),
         }
@@ -545,7 +564,16 @@ impl App {
                     }
                 }
                 TreeAction::OpenRdp(id, embedded) => {
-                    if let Some(mut s) = self.tree.session(id).cloned() {
+                    if embedded && !self.embedded_rdp_enabled() {
+                        self.notify(
+                            if crate::HAS_EMBEDDED_RDP {
+                                "El cliente RDP integrado está desactivado en Ajustes"
+                            } else {
+                                "Esta edición no incluye el cliente RDP integrado"
+                            },
+                            true,
+                        );
+                    } else if let Some(mut s) = self.tree.session(id).cloned() {
                         s.rdp.embedded = embedded;
                         self.connect(s, None);
                     }
@@ -662,11 +690,13 @@ impl App {
                 self.themes_window = Some(ThemesWindow::new(&self.settings.theme));
             }
             if ui
-                .button("📊 Barra de estado")
-                .on_hover_text("Información del servidor bajo los terminales: CPU, memoria, disco…")
+                .button("⚙ Ajustes")
+                .on_hover_text(
+                    "Cliente RDP, barra de información del servidor y otras preferencias",
+                )
                 .clicked()
             {
-                self.server_bar_window = Some(ServerBarWindow::new(&self.settings.server_bar));
+                self.settings_window = Some(SettingsWindow);
             }
             let vault_exists = Vault::exists(&crate::paths::vault_file());
             ui.menu_button("🔐 Baúl", |ui| {
@@ -2130,6 +2160,7 @@ impl eframe::App for App {
         // --- Ventanas y diálogos ------------------------------------------
         let ctx = ui.ctx().clone();
         if let Some(editor) = &mut self.editor {
+            editor.embedded_rdp = crate::HAS_EMBEDDED_RDP && self.settings.rdp_embedded;
             match editor.show(&ctx, &mut self.tree, &mut self.vault) {
                 EditorResult::Open => {}
                 EditorResult::Cancelled => self.editor = None,
@@ -2167,6 +2198,22 @@ impl eframe::App for App {
         {
             self.themes_window = None;
             self.focus_active_terminal();
+        }
+        if let Some(win) = &mut self.settings_window {
+            let (open, changed, request) = win.show(&ctx, &mut self.settings);
+            if changed && let Err(e) = self.settings.save(&crate::paths::settings_file()) {
+                self.notify(
+                    format!("No se pudieron guardar las preferencias: {e:#}"),
+                    true,
+                );
+            }
+            if request.open_server_bar {
+                self.server_bar_window = Some(ServerBarWindow::new(&self.settings.server_bar));
+            }
+            if !open {
+                self.settings_window = None;
+                self.focus_active_terminal();
+            }
         }
         if let Some(win) = &mut self.server_bar_window {
             let (open, changed) = win.show(&ctx, &mut self.settings.server_bar);

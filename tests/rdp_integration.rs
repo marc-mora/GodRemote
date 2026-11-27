@@ -5,7 +5,7 @@
 //! Se omite si falta `freerdp-shadow-cli3`, `Xvfb` o alguna de las
 //! utilidades de X que se usan para comprobar el resultado (`xterm`,
 //! `xdotool`, `xev`).
-#![cfg(unix)]
+#![cfg(all(unix, feature = "rdp-integrado"))]
 
 mod common;
 

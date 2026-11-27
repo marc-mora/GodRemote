@@ -23,6 +23,9 @@ pub struct SessionEditor {
     keys: Vec<KeyInfo>,
     serial_ports: Vec<String>,
     backdrop: super::backdrop_view::BackdropEditor,
+    /// El cliente RDP integrado está disponible (lo incluye la edición y
+    /// no está desactivado en los ajustes). Lo fija la aplicación.
+    pub embedded_rdp: bool,
 }
 
 pub enum EditorResult {
@@ -72,6 +75,7 @@ impl SessionEditor {
             keys: crate::keys::list(),
             serial_ports: crate::serial::available_ports(),
             backdrop: Default::default(),
+            embedded_rdp: crate::HAS_EMBEDDED_RDP,
         }
     }
 
@@ -141,6 +145,7 @@ impl SessionEditor {
     }
 
     fn form(&mut self, ui: &mut egui::Ui, tree: &Tree, vault: Option<&Vault>) {
+        let embedded_rdp = self.embedded_rdp;
         let s = &mut self.session;
         egui::Grid::new("session_form")
             .num_columns(2)
@@ -329,11 +334,21 @@ impl SessionEditor {
                 if s.protocol == Protocol::Rdp {
                     ui.label("Cliente");
                     ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(&mut s.rdp.embedded, true, "Integrado (pestaña)");
-                            ui.selectable_value(&mut s.rdp.embedded, false, "Externo");
-                        });
-                        if !s.rdp.embedded {
+                        if embedded_rdp {
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(
+                                    &mut s.rdp.embedded,
+                                    true,
+                                    "Integrado (pestaña)",
+                                );
+                                ui.selectable_value(&mut s.rdp.embedded, false, "Externo");
+                            });
+                        } else if crate::HAS_EMBEDDED_RDP {
+                            ui.weak("Externo: el cliente integrado está desactivado en Ajustes.");
+                        } else {
+                            ui.weak("Externo: esta edición no incluye el cliente integrado.");
+                        }
+                        if !(s.rdp.embedded && embedded_rdp) {
                             ui.weak(format!("Se usará {}", crate::rdp::client_description()));
                         }
                     });
@@ -341,7 +356,7 @@ impl SessionEditor {
 
                     ui.label("Pantalla");
                     ui.vertical(|ui| {
-                        let fixed_size = if s.rdp.embedded {
+                        let fixed_size = if s.rdp.embedded && embedded_rdp {
                             ui.checkbox(&mut s.rdp.fit_window, "Usar el tamaño de la pestaña");
                             !s.rdp.fit_window
                         } else {
@@ -596,7 +611,7 @@ impl SessionEditor {
                             ui.colored_label(ui.visuals().error_fg_color, e);
                         }
                     }
-                    if s.protocol == Protocol::Rdp && !s.rdp.embedded {
+                    if s.protocol == Protocol::Rdp && !(s.rdp.embedded && self.embedded_rdp) {
                         ui.colored_label(
                             crate::theme::warn_color(),
                             "Los saltos solo funcionan con el cliente RDP integrado.",
