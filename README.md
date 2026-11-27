@@ -116,9 +116,11 @@ ediciones del mismo código:
 | **Completa** (`godremote`) | Sí | russh 0.65.1 | `cargo build --release` |
 | **SSH reforzada** (`godremote-reforzado`) | No (RDP con el cliente externo) | russh 0.65.4 | `cargo build --release --manifest-path reforzado/Cargo.toml --target-dir target` |
 
-Para Windows, ya compiladas: `dist/GodRemote-windows-x64.zip` (completa) y
-`dist/GodRemote-ssh-reforzado-windows-x64.zip` (SSH reforzada). Las dos usan
-la misma carpeta de configuración, así que se puede pasar de una a otra.
+Para Windows, ya compiladas (versión 0.7.0): `dist/GodRemote-windows-x64.zip`
+(completa) y `dist/GodRemote-ssh-reforzado-windows-x64.zip` (SSH reforzada).
+Las de Linux y macOS —y las de cada versión publicada— salen de GitHub
+Actions, como se explica arriba. Las dos ediciones usan la misma carpeta de
+configuración, así que se puede pasar de una a otra.
 
 A la 0.65.1 le faltan varios endurecimientos frente a servidores SSH
 maliciosos publicados entre la 0.65.2 y la 0.65.4. Si no usas el RDP
@@ -731,8 +733,11 @@ recuperar; el resto de la configuración sigue intacta.
 - Saltos: como máximo ocho encadenados; cada salto se autentica con su
   propia sesión (no hay reenvío del agente SSH entre saltos).
 - Sin Mosh ni FTP.
-- Solo se ha probado en Linux (X11). El ejecutable de Windows se compila
-  desde Linux y no se ha podido ejecutar en el entorno de desarrollo.
+- A mano solo se ha usado en Linux (X11). En Windows y macOS se compila y
+  pasa sus pruebas automáticas en cada cambio (entre ellas la del terminal
+  local), pero la interfaz no se ha manejado allí: quedan sin comprobar a
+  mano, por ejemplo, la detección de shells, arrastrar ficheros desde el
+  explorador y el reenvío del agente en Windows.
 
 ## Pruebas
 
