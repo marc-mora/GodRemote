@@ -311,6 +311,35 @@ pub fn mouse_report(
     }
 }
 
+/// Búsqueda abierta sobre el contenido del terminal (pantalla e historial).
+#[derive(Default)]
+struct Search {
+    query: String,
+    /// Coincidencia actual: línea contada desde la última (0) y columna.
+    current: Option<(usize, usize)>,
+    /// Posición de la coincidencia actual y total de coincidencias.
+    position: (usize, usize),
+    /// Hay que dar el foco al campo de texto.
+    focus: bool,
+}
+
+/// Posiciones (en caracteres) donde aparece `needle` en `line`, sin
+/// distinguir mayúsculas. `needle` ya viene en minúsculas.
+fn find_all(line: &[char], needle: &[char]) -> Vec<usize> {
+    if needle.is_empty() || line.len() < needle.len() {
+        return vec![];
+    }
+    let lower = |c: char| c.to_lowercase().next().unwrap_or(c);
+    (0..=line.len() - needle.len())
+        .filter(|&start| {
+            line[start..start + needle.len()]
+                .iter()
+                .zip(needle)
+                .all(|(a, b)| lower(*a) == *b)
+        })
+        .collect()
+}
+
 /// Una pestaña de terminal: estado del emulador + conexión con la shell.
 pub struct TerminalView {
     parser: vt100::Parser,
@@ -335,6 +364,10 @@ pub struct TerminalView {
     mouse_cell: (u16, u16),
     /// Teclas grabadas para una macro (si se está grabando).
     recording: Option<Vec<u8>>,
+    /// Registro de la sesión en un fichero, si está activo.
+    pub log: Option<crate::session_log::SessionLog>,
+    /// Búsqueda en curso, si la barra de búsqueda está abierta.
+    search: Option<Search>,
     /// Si es `Some`, lo que el usuario introduce se va anotando aquí para
     /// repetirlo en otros terminales (lo recoge la aplicación).
     pub mirror: Option<Vec<TermInput>>,
@@ -370,6 +403,8 @@ impl TerminalView {
             mouse_down: None,
             mouse_cell: (0, 0),
             recording: None,
+            log: None,
+            search: None,
             mirror: None,
             has_focus: false,
             backdrop: None,
@@ -405,7 +440,12 @@ impl TerminalView {
                     self.ssh = handle;
                     self.state = ConnState::Connected;
                 }
-                TermEvent::Data(data) => self.parser.process(&data),
+                TermEvent::Data(data) => {
+                    if let Some(log) = &mut self.log {
+                        log.feed(&data);
+                    }
+                    self.parser.process(&data);
+                }
                 TermEvent::SaveSecrets(s) => self.secrets_to_save.extend(s),
                 TermEvent::Tunnel { index, status } => {
                     if let crate::tunnels::TunnelStatus::Failed(e) = &status {
@@ -420,6 +460,12 @@ impl TerminalView {
                     match &err {
                         Some(e) => self.note(31, &format!("Error: {e}")),
                         None => self.note(33, "[Sesión finalizada]"),
+                    }
+                    if let Some(log) = &mut self.log {
+                        match &err {
+                            Some(e) => log.note(&format!("Conexión cerrada: {e}")),
+                            None => log.note("Sesión finalizada"),
+                        }
                     }
                     self.ssh = None;
                     self.monitor = None;
@@ -451,6 +497,135 @@ impl TerminalView {
     /// Envía una secuencia de teclas ya preparada (macros).
     pub fn send_macro(&mut self, bytes: Vec<u8>) {
         self.send_raw(bytes);
+    }
+
+    /// Abre la barra de búsqueda (o le devuelve el foco).
+    pub fn open_search(&mut self) {
+        let search = self.search.get_or_insert_with(Search::default);
+        search.focus = true;
+    }
+
+    pub fn is_searching(&self) -> bool {
+        self.search.is_some()
+    }
+
+    fn close_search(&mut self) {
+        self.search = None;
+        self.want_focus = true;
+    }
+
+    /// Todas las líneas del terminal, de la más antigua a la última: el
+    /// historial y la pantalla.
+    fn history_lines(&mut self) -> Vec<Vec<char>> {
+        let saved = self.parser.screen().scrollback();
+        self.parser.screen_mut().set_scrollback(usize::MAX);
+        let max = self.parser.screen().scrollback();
+        let rows = self.rows as usize;
+        let total = max + rows;
+        let mut lines: Vec<Vec<char>> = Vec::with_capacity(total);
+        let mut offset = max;
+        loop {
+            self.parser.screen_mut().set_scrollback(offset);
+            // Esta página cubre las líneas [total - rows - offset, total - offset).
+            let first = total - rows - offset;
+            let page: Vec<String> = self.parser.screen().rows(0, self.cols).collect();
+            for line in page.into_iter().skip(lines.len().saturating_sub(first)) {
+                lines.push(line.chars().collect());
+            }
+            if offset == 0 {
+                break;
+            }
+            offset = offset.saturating_sub(rows);
+        }
+        self.parser.screen_mut().set_scrollback(saved);
+        lines
+    }
+
+    /// Salta a la coincidencia anterior (más antigua) o a la siguiente y
+    /// desplaza el historial para que se vea.
+    fn search_step(&mut self, older: bool) {
+        let Some(query) = self.search.as_ref().map(|s| s.query.to_lowercase()) else {
+            return;
+        };
+        let needle: Vec<char> = query.chars().collect();
+        let lines = self.history_lines();
+        let total_lines = lines.len();
+        // (línea desde abajo, columna), de la más antigua a la más reciente.
+        let matches: Vec<(usize, usize)> = lines
+            .iter()
+            .enumerate()
+            .flat_map(|(i, line)| {
+                find_all(line, &needle)
+                    .into_iter()
+                    .map(move |col| (total_lines - 1 - i, col))
+            })
+            .collect();
+        let rows = self.rows as usize;
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        if matches.is_empty() {
+            search.current = None;
+            search.position = (0, 0);
+            return;
+        }
+        let index = match search
+            .current
+            .and_then(|c| matches.iter().position(|m| *m == c))
+        {
+            Some(i) if older => (i + matches.len() - 1) % matches.len(),
+            Some(i) => (i + 1) % matches.len(),
+            // Sin posición previa se empieza por la más reciente.
+            None => matches.len() - 1,
+        };
+        let current = matches[index];
+        search.current = Some(current);
+        search.position = (index + 1, matches.len());
+        // La línea encontrada, hacia el centro de la pantalla.
+        let offset = current.0.saturating_sub(rows / 2);
+        self.parser.screen_mut().set_scrollback(offset);
+        self.selection = None;
+    }
+
+    /// Coincidencias de la búsqueda en las filas visibles: por fila, los
+    /// tramos de columnas [inicio, fin) y si es la coincidencia actual.
+    fn visible_matches(&self, rows: u16, cols: u16) -> Vec<Vec<(u16, u16, bool)>> {
+        let mut out = vec![vec![]; rows as usize];
+        let Some(search) = &self.search else {
+            return out;
+        };
+        let needle: Vec<char> = search.query.to_lowercase().chars().collect();
+        if needle.is_empty() {
+            return out;
+        }
+        let screen = self.parser.screen();
+        let offset = screen.scrollback();
+        for row in 0..rows {
+            // Texto de la fila y la columna de cada carácter (los de ancho
+            // doble ocupan dos columnas).
+            let mut chars = vec![];
+            let mut columns = vec![];
+            for col in 0..cols {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                if cell.is_wide_continuation() {
+                    continue;
+                }
+                let contents = cell.contents();
+                chars.push(contents.chars().next().unwrap_or(' '));
+                columns.push(col);
+            }
+            let from_bottom = offset + (rows - 1 - row) as usize;
+            for start in find_all(&chars, &needle) {
+                let end = start + needle.len();
+                let first = columns[start];
+                let last = columns.get(end).copied().unwrap_or(cols);
+                let current = search.current == Some((from_bottom, start));
+                out[row as usize].push((first, last, current));
+            }
+        }
+        out
     }
 
     /// Entrada del usuario en este terminal: se aplica y, si hay difusión,
@@ -774,6 +949,8 @@ impl TerminalView {
                             self.parser
                                 .screen_mut()
                                 .set_scrollback(cur.saturating_sub(rows as usize / 2));
+                        } else if modifiers.ctrl && modifiers.shift && key == Key::F {
+                            self.open_search();
                         } else {
                             self.input(TermInput::Key(key, modifiers));
                         }
@@ -839,6 +1016,20 @@ impl TerminalView {
         let in_selection = |row: u16, col: u16| -> bool {
             selection.is_some_and(|(s, e)| (row, col) >= s && (row, col) <= e)
         };
+
+        // Coincidencias de la búsqueda, por debajo del texto.
+        let warn = crate::theme::warn_color();
+        for (row, spans) in self.visible_matches(rows, cols).iter().enumerate() {
+            let y = origin.y + row as f32 * cell_h;
+            for (start, end, current) in spans {
+                let span = Rect::from_min_max(
+                    Pos2::new(origin.x + *start as f32 * cell_w, y),
+                    Pos2::new(origin.x + *end as f32 * cell_w, y + cell_h),
+                );
+                let alpha = if *current { 0.75 } else { 0.3 };
+                painter.rect_filled(span, 2.0, warn.gamma_multiply(alpha));
+            }
+        }
 
         let screen = self.parser.screen();
         for row in 0..rows {
@@ -979,6 +1170,84 @@ impl TerminalView {
                 FontId::proportional(12.0),
                 crate::theme::warn_color(),
             );
+        }
+        self.search_bar(ui, rect);
+    }
+
+    /// Barra de búsqueda, superpuesta en la esquina superior derecha.
+    fn search_bar(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        let width = 380.0_f32.min(rect.width() - 16.0);
+        let bar = Rect::from_min_size(
+            Pos2::new(rect.right() - width - 8.0, rect.top() + 22.0),
+            Vec2::new(width, 30.0),
+        );
+        let mut step = None;
+        let mut close = false;
+        let mut changed = false;
+        ui.scope_builder(egui::UiBuilder::new().max_rect(bar), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("🔍");
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut search.query)
+                            .hint_text("Buscar en el terminal")
+                            .desired_width(width - 190.0),
+                    );
+                    if search.focus {
+                        field.request_focus();
+                        search.focus = false;
+                    }
+                    changed = field.changed();
+                    if field.lost_focus() {
+                        if ui.input(|i| i.key_pressed(Key::Enter)) {
+                            // Intro: anterior; Mayús+Intro: siguiente.
+                            step = Some(!ui.input(|i| i.modifiers.shift));
+                            search.focus = true;
+                        } else if ui.input(|i| i.key_pressed(Key::Escape)) {
+                            close = true;
+                        }
+                    }
+                    let (at, of) = search.position;
+                    let count = if search.query.is_empty() {
+                        String::new()
+                    } else if of == 0 {
+                        "sin resultados".to_string()
+                    } else {
+                        format!("{at} de {of}")
+                    };
+                    ui.weak(count);
+                    if ui
+                        .small_button("⬆")
+                        .on_hover_text("Anterior (Intro)")
+                        .clicked()
+                    {
+                        step = Some(true);
+                    }
+                    if ui
+                        .small_button("⬇")
+                        .on_hover_text("Siguiente (Mayús+Intro)")
+                        .clicked()
+                    {
+                        step = Some(false);
+                    }
+                    if ui.small_button("×").on_hover_text("Cerrar (Esc)").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        if changed {
+            // Al cambiar el texto se vuelve a la coincidencia más reciente.
+            search.current = None;
+            self.search_step(true);
+        } else if let Some(older) = step {
+            self.search_step(older);
+        }
+        if close {
+            self.close_search();
         }
     }
 }
@@ -1144,6 +1413,66 @@ mod tests {
         b.poll();
         b.apply_input(&TermInput::Bytes(b"perdido".to_vec()));
         assert!(sent_bytes(&mut sent_b).is_empty());
+    }
+
+    #[test]
+    fn search_walks_through_screen_and_history() {
+        let (mut view, _sent, remote) = fake_terminal();
+        view.resize(40, 5);
+        // 30 líneas en un terminal de 5 filas: casi todo queda en el historial.
+        let mut output = String::new();
+        for i in 1..=30 {
+            let word = if i % 10 == 0 { "ERROR" } else { "ok" };
+            output.push_str(&format!("linea {i:02} {word}\r\n"));
+        }
+        output.push_str("fin error error");
+        remote.send(TermEvent::Data(output.into_bytes())).unwrap();
+        view.poll();
+        let lines = view.history_lines();
+        assert_eq!(lines.len(), 31);
+        assert_eq!(lines[0].iter().collect::<String>(), "linea 01 ok");
+        assert_eq!(lines[30].iter().collect::<String>(), "fin error error");
+        // Leer el historial no mueve la vista.
+        assert_eq!(view.parser.screen().scrollback(), 0);
+
+        view.open_search();
+        view.search.as_mut().unwrap().query = "Error".into();
+        // Empieza por la más reciente (la segunda de la última línea)…
+        view.search_step(true);
+        let s = view.search.as_ref().unwrap();
+        assert_eq!((s.current, s.position), (Some((0, 10)), (5, 5)));
+        // …y hacia atrás: la primera de esa línea, luego la línea 30.
+        view.search_step(true);
+        assert_eq!(view.search.as_ref().unwrap().current, Some((0, 4)));
+        view.search_step(true);
+        let s = view.search.as_ref().unwrap();
+        assert_eq!((s.current, s.position), (Some((1, 9)), (3, 5)));
+        // La línea 10 está en el historial: la vista se desplaza hasta ella.
+        view.search_step(true);
+        view.search_step(true);
+        let s = view.search.as_ref().unwrap();
+        assert_eq!((s.current, s.position), (Some((21, 9)), (1, 5)));
+        assert!(view.parser.screen().scrollback() >= 17);
+        let shown = view.visible_matches(5, 40);
+        assert!(
+            shown
+                .iter()
+                .flatten()
+                .any(|(start, end, current)| { (*start, *end, *current) == (9, 14, true) })
+        );
+        // Desde la primera se da la vuelta; hacia delante también.
+        view.search_step(true);
+        assert_eq!(view.search.as_ref().unwrap().position, (5, 5));
+        view.search_step(false);
+        assert_eq!(view.search.as_ref().unwrap().position, (1, 5));
+
+        // Sin resultados.
+        view.search.as_mut().unwrap().query = "no está".into();
+        view.search_step(true);
+        let s = view.search.as_ref().unwrap();
+        assert_eq!((s.current, s.position), (None, (0, 0)));
+        view.close_search();
+        assert!(!view.is_searching());
     }
 
     #[test]

@@ -7,6 +7,8 @@ use crate::theme::Settings;
 pub struct SettingsRequest {
     /// Abrir los ajustes de la barra de información del servidor.
     pub open_server_bar: bool,
+    /// Abrir esta carpeta en el explorador de archivos.
+    pub open_folder: Option<std::path::PathBuf>,
 }
 
 #[derive(Default)]
@@ -32,6 +34,8 @@ impl SettingsWindow {
                 ui.set_width(520.0);
                 rdp_section(ui, settings);
                 ui.separator();
+                log_section(ui, settings, &mut request);
+                ui.separator();
                 ui.strong("Barra de información del servidor");
                 ui.horizontal(|ui| {
                     ui.checkbox(
@@ -45,6 +49,46 @@ impl SettingsWindow {
             });
         (open, *settings != before, request)
     }
+}
+
+/// Registro de las sesiones de terminal en ficheros.
+fn log_section(ui: &mut egui::Ui, settings: &mut Settings, request: &mut SettingsRequest) {
+    ui.strong("Registro de sesiones");
+    ui.checkbox(
+        &mut settings.log.always,
+        "Guardar siempre en un fichero lo que muestran los terminales",
+    )
+    .on_hover_text("Sin marcar, cada terminal se registra solo si pulsas su botón «Registrar»");
+    ui.checkbox(
+        &mut settings.log.timestamps,
+        "Anteponer la hora a cada línea",
+    );
+    ui.horizontal(|ui| {
+        ui.label("Carpeta");
+        ui.add(
+            egui::TextEdit::singleline(&mut settings.log.folder)
+                .desired_width(300.0)
+                .hint_text(crate::paths::logs_dir().display().to_string()),
+        );
+        if ui.button("📂").on_hover_text("Elegir carpeta").clicked()
+            && let Some(dir) = rfd::FileDialog::new()
+                .set_title("Carpeta de los registros")
+                .pick_folder()
+        {
+            settings.log.folder = dir.display().to_string();
+        }
+        if ui
+            .button("Abrir")
+            .on_hover_text("Ver los registros guardados")
+            .clicked()
+        {
+            request.open_folder = Some(settings.log.dir());
+        }
+    });
+    ui.weak(
+        "Los registros son texto sin colores ni secuencias de escape. Contienen todo lo que \
+         aparece en pantalla: cuidado con las contraseñas que se muestren.",
+    );
 }
 
 /// Cliente RDP y, ligada a él, la versión de la librería SSH.

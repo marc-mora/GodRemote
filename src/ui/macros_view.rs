@@ -165,7 +165,7 @@ impl MacrosWindow {
             .show(ctx, |ui| {
                 ui.set_width(700.0);
                 ui.allocate_ui_with_layout(
-                    egui::vec2(700.0, 390.0),
+                    egui::vec2(700.0, 420.0),
                     egui::Layout::left_to_right(egui::Align::TOP),
                     |ui| {
                         ui.vertical(|ui| {
@@ -174,7 +174,7 @@ impl MacrosWindow {
                             let mut pick = None;
                             egui::ScrollArea::vertical()
                                 .id_salt("macro_list")
-                                .max_height(310.0)
+                                .max_height(340.0)
                                 .auto_shrink([false, true])
                                 .show(ui, |ui| {
                                     if store.macros.is_empty() {
@@ -221,6 +221,11 @@ impl MacrosWindow {
                                 "Cada salto de línea es Intro: sin salto al final, el texto se \
                                  escribe y queda a la espera. Teclas especiales: \\e (Escape), \
                                  \\t (tabulador), \\x03 (Ctrl+C), \\x04 (Ctrl+D)…",
+                            );
+                            ui.weak(
+                                "Variables: {{host}}, {{usuario}}, {{puerto}}, {{nombre}}, \
+                                 {{fecha}}, {{hora}}. Con {{?Pregunta}} o {{?Pregunta=valor}} se \
+                                 pide un dato al lanzarlo.",
                             );
                             ui.add_space(4.0);
                             self.shortcut_row(ui);

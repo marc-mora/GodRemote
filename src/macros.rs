@@ -251,6 +251,146 @@ impl MacroStore {
     }
 }
 
+/// Datos del terminal al que se envía un snippet, para sus variables.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SnippetContext {
+    pub host: String,
+    pub port: String,
+    pub user: String,
+    /// Nombre de la sesión (o de la pestaña).
+    pub name: String,
+}
+
+/// Un trozo de un snippet: texto tal cual o una variable `{{…}}`.
+enum Piece<'a> {
+    Text(&'a str),
+    /// Variable conocida.
+    Variable(&'static str),
+    /// `{{?Pregunta}}` o `{{?Pregunta=valor por defecto}}`.
+    Question {
+        label: &'a str,
+        default: &'a str,
+    },
+}
+
+/// Nombres de las variables (en español y en inglés) → nombre canónico.
+fn variable(name: &str) -> Option<&'static str> {
+    Some(match name.to_lowercase().as_str() {
+        "host" | "equipo" | "servidor" => "host",
+        "puerto" | "port" => "puerto",
+        "usuario" | "user" => "usuario",
+        "nombre" | "name" | "sesion" | "sesión" => "nombre",
+        "fecha" | "date" => "fecha",
+        "hora" | "time" => "hora",
+        _ => return None,
+    })
+}
+
+/// Parte un snippet en texto y variables. Lo que va entre `{{` y `}}` y no
+/// es una variable conocida se deja como está: las plantillas de otras
+/// herramientas (`docker ps --format '{{.Names}}'`) siguen funcionando.
+fn pieces(text: &str) -> Vec<Piece<'_>> {
+    let mut out = vec![];
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let end = after.find("}}");
+        let token = end.map(|e| &after[..e]);
+        let piece = token
+            .filter(|t| !t.contains('\n') && t.len() <= 200)
+            .and_then(|t| {
+                let t = t.trim();
+                match t.strip_prefix('?') {
+                    Some(question) => {
+                        let (label, default) = question.split_once('=').unwrap_or((question, ""));
+                        let label = label.trim();
+                        (!label.is_empty()).then_some(Piece::Question {
+                            label,
+                            default: default.trim(),
+                        })
+                    }
+                    None => variable(t).map(Piece::Variable),
+                }
+            });
+        match (piece, end) {
+            (Some(piece), Some(end)) => {
+                if start > 0 {
+                    out.push(Piece::Text(&rest[..start]));
+                }
+                out.push(piece);
+                rest = &after[end + 2..];
+            }
+            // No es una variable: las llaves se quedan como texto.
+            _ => {
+                out.push(Piece::Text(&rest[..start + 2]));
+                rest = after;
+            }
+        }
+    }
+    if !rest.is_empty() {
+        out.push(Piece::Text(rest));
+    }
+    out
+}
+
+/// Preguntas (`{{?…}}`) de un snippet, sin repetir y en orden, con su valor
+/// por defecto.
+pub fn questions(text: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = vec![];
+    for piece in pieces(text) {
+        if let Piece::Question { label, default } = piece
+            && !out.iter().any(|(l, _)| l == label)
+        {
+            out.push((label.to_string(), default.to_string()));
+        }
+    }
+    out
+}
+
+/// Un valor insertado no debe interpretarse como teclas especiales: se
+/// quitan los caracteres de control y se protegen las barras invertidas.
+fn literal(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .replace('\\', "\\\\")
+}
+
+/// Sustituye las variables de un snippet: los datos del terminal de
+/// destino, la fecha y la hora, y las respuestas a sus preguntas. El
+/// resultado sigue en forma editable (se pasa después por [`decode`]).
+pub fn expand(
+    text: &str,
+    context: &SnippetContext,
+    answers: &[(String, String)],
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    for piece in pieces(text) {
+        match piece {
+            Piece::Text(text) => out.push_str(text),
+            Piece::Variable(name) => out.push_str(&literal(&match name {
+                "host" => context.host.clone(),
+                "puerto" => context.port.clone(),
+                "usuario" => context.user.clone(),
+                "nombre" => context.name.clone(),
+                "fecha" => now.format("%Y-%m-%d").to_string(),
+                _ => now.format("%H:%M:%S").to_string(),
+            })),
+            Piece::Question { label, default } => {
+                let answer = answers
+                    .iter()
+                    .find(|(l, _)| l == label)
+                    .map(|(_, value)| value.as_str())
+                    .unwrap_or(default);
+                out.push_str(&literal(answer));
+            }
+        }
+    }
+    out
+}
+
 /// Convierte teclas grabadas en texto editable: Intro es un salto de línea,
 /// `\e` es Escape, `\t` el tabulador y `\xNN` cualquier otro byte de control.
 pub fn encode(bytes: &[u8]) -> String {
@@ -342,6 +482,60 @@ mod tests {
         assert_eq!(decode("fin\\x04"), b"fin\x04");
         assert_eq!(decode("a\\zb \\x4"), b"a\\zb \\x4");
         assert_eq!(decode("linea\r\n"), b"linea\r");
+    }
+
+    #[test]
+    fn variables_are_replaced_per_terminal() {
+        use chrono::TimeZone as _;
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 11, 27, 9, 5, 7)
+            .unwrap();
+        let web = SnippetContext {
+            host: "10.0.0.5".into(),
+            port: "2222".into(),
+            user: "deploy".into(),
+            name: "web-01".into(),
+        };
+        let text = "echo {{usuario}}@{{host}}:{{puerto}} ({{ Nombre }}) {{fecha}} {{hora}}\n";
+        assert_eq!(
+            expand(text, &web, &[], now),
+            "echo deploy@10.0.0.5:2222 (web-01) 2026-11-27 09:05:07\n"
+        );
+        // En inglés también, y cada terminal con sus datos.
+        let db = SnippetContext {
+            host: "db.interno".into(),
+            ..web.clone()
+        };
+        assert_eq!(expand("ping {{HOST}}", &db, &[], now), "ping db.interno");
+
+        // Lo que no es una variable se respeta: plantillas de otras
+        // herramientas, llaves de la shell, awk…
+        let untouched =
+            "docker ps --format '{{.Names}}'; awk '{print $1}' x; echo ${host} {{ {{raro";
+        assert_eq!(expand(untouched, &web, &[], now), untouched);
+        assert!(questions(untouched).is_empty());
+
+        // Preguntas: sin repetir, con valor por defecto, y la misma
+        // respuesta en todas sus apariciones.
+        let ask = "systemctl {{?Acción=status}} {{?Servicio}}; journalctl -u {{?Servicio}}\n";
+        assert_eq!(
+            questions(ask),
+            vec![
+                ("Acción".to_string(), "status".to_string()),
+                ("Servicio".to_string(), String::new())
+            ]
+        );
+        let answers = vec![("Servicio".to_string(), "nginx".to_string())];
+        assert_eq!(
+            expand(ask, &web, &answers, now),
+            "systemctl status nginx; journalctl -u nginx\n"
+        );
+
+        // Un valor no puede colar teclas especiales: ni saltos de línea ni
+        // secuencias con barra invertida.
+        let tricky = vec![("Ruta".to_string(), "C:\\new\\x03\rrm".to_string())];
+        let expanded = expand("cd {{?Ruta}}", &web, &tricky, now);
+        assert_eq!(decode(&expanded), b"cd C:\\new\\x03rm");
     }
 
     fn key_event(key: Key, modifiers: Modifiers, repeat: bool) -> Event {

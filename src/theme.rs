@@ -1179,6 +1179,9 @@ pub struct Settings {
     /// sesión lo pide) o siempre con el cliente externo del sistema.
     #[serde(rename = "rdp_integrado")]
     pub rdp_embedded: bool,
+    /// Registro de las sesiones de terminal en ficheros.
+    #[serde(rename = "registro")]
+    pub log: crate::session_log::LogSettings,
 }
 
 impl Default for Settings {
@@ -1187,6 +1190,7 @@ impl Default for Settings {
             theme: BASE_NAME.into(),
             server_bar: ServerBar::default(),
             rdp_embedded: true,
+            log: Default::default(),
         }
     }
 }
@@ -1397,6 +1401,11 @@ mod tests {
                 ..Default::default()
             },
             rdp_embedded: false,
+            log: crate::session_log::LogSettings {
+                always: true,
+                folder: "~/registros".into(),
+                timestamps: true,
+            },
         };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);

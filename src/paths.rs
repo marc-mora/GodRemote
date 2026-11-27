@@ -1,6 +1,6 @@
 //! Rutas de configuración de la aplicación.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Directorio de datos. Se puede forzar con la variable `GODREMOTE_HOME`.
 pub fn data_dir() -> PathBuf {
@@ -33,6 +33,11 @@ pub fn tls_known_hosts_file() -> PathBuf {
 /// Carpeta con los temas del usuario.
 pub fn themes_dir() -> PathBuf {
     data_dir().join("themes")
+}
+
+/// Registros de las sesiones de terminal.
+pub fn logs_dir() -> PathBuf {
+    data_dir().join("logs")
 }
 
 /// Preferencias (tema elegido…).
@@ -89,4 +94,29 @@ pub fn expand_tilde(path: &str) -> PathBuf {
         return home_dir().join(rest);
     }
     PathBuf::from(path)
+}
+
+/// Abre un fichero o una carpeta con la aplicación que el sistema tenga
+/// asociada (el explorador de archivos, el editor de texto…).
+pub fn open_with_system(path: &Path) -> std::io::Result<()> {
+    let mut command = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        // El primer argumento entre comillas de `start` es el título.
+        c.args(["/C", "start", ""]).arg(path);
+        c
+    } else if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg(path);
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
 }

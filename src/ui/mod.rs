@@ -162,6 +162,7 @@ pub struct App {
     macros_window: Option<MacrosWindow>,
     /// Macro recién grabada, a la espera de nombre.
     recorded_macro: Option<RecordedMacro>,
+    snippet_prompt: Option<SnippetPrompt>,
     /// Espacio disponible para el contenido de una pestaña (en puntos).
     content_size: egui::Vec2,
     toast: Option<(String, bool, Instant)>,
@@ -193,6 +194,15 @@ impl Broadcast {
     fn includes(&self, tab: u64) -> bool {
         self.enabled && (self.all || self.chosen.contains(&tab))
     }
+}
+
+/// Snippet a la espera de los valores de sus preguntas.
+struct SnippetPrompt {
+    id: Uuid,
+    name: String,
+    /// Pregunta → respuesta (empieza con el valor por defecto).
+    answers: Vec<(String, String)>,
+    focused: bool,
 }
 
 struct RecordedMacro {
@@ -271,6 +281,7 @@ impl App {
             macros: MacroStore::load(&crate::paths::macros_file()).unwrap_or_default(),
             macros_window: None,
             recorded_macro: None,
+            snippet_prompt: None,
             content_size: egui::vec2(1024.0, 700.0),
             toast,
             quick_connect: String::new(),
@@ -373,7 +384,30 @@ impl App {
         };
         let mut view = TerminalView::new(backend);
         view.set_backdrop(session.backdrop.as_ref());
+        view.log = self.automatic_log(&session.display_name(), &session.target());
         Ok(view)
+    }
+
+    /// Registro de sesión para un terminal nuevo, si los ajustes piden
+    /// registrar siempre.
+    fn automatic_log(&self, name: &str, target: &str) -> Option<crate::session_log::SessionLog> {
+        if !self.settings.log.always {
+            return None;
+        }
+        match crate::session_log::SessionLog::start(
+            &self.settings.log.dir(),
+            name,
+            target,
+            self.settings.log.timestamps,
+        ) {
+            Ok(log) => Some(log),
+            Err(e) => {
+                let _ = self
+                    .notice_tx
+                    .send((format!("No se pudo registrar la sesión: {e:#}"), true));
+                None
+            }
+        }
     }
 
     fn open_terminal(&mut self, session: Session) {
@@ -389,11 +423,15 @@ impl App {
 
     fn open_local_terminal(&mut self) {
         match crate::terminal::spawn_local_shell(self.waker.clone(), INITIAL_COLS, INITIAL_ROWS) {
-            Ok(backend) => self.push_tab(
-                "Terminal local".into(),
-                None,
-                TabKind::Terminal(Box::new(TerminalView::new(backend))),
-            ),
+            Ok(backend) => {
+                let mut view = TerminalView::new(backend);
+                view.log = self.automatic_log("Terminal local", "");
+                self.push_tab(
+                    "Terminal local".into(),
+                    None,
+                    TabKind::Terminal(Box::new(view)),
+                )
+            }
             Err(e) => self.notify(format!("No se pudo abrir la shell local: {e:#}"), true),
         }
     }
@@ -1061,9 +1099,32 @@ impl App {
         }
     }
 
-    /// Envía un snippet al terminal activo (y, con la difusión activa, a
-    /// los demás terminales del grupo).
+    /// Lanza un snippet. Si tiene preguntas (`{{?…}}`) se piden antes sus
+    /// valores.
     fn run_macro(&mut self, id: Uuid) {
+        if self.active_terminal().is_none() {
+            return self.notify("Abre un terminal conectado para lanzar el snippet", true);
+        }
+        let Some(snippet) = self.macros.macros.iter().find(|m| m.id == id) else {
+            return;
+        };
+        let questions = crate::macros::questions(&snippet.text);
+        if questions.is_empty() {
+            self.launch_snippet(id, &[]);
+        } else {
+            self.snippet_prompt = Some(SnippetPrompt {
+                id,
+                name: snippet.name.clone(),
+                answers: questions,
+                focused: false,
+            });
+        }
+    }
+
+    /// Envía un snippet al terminal activo y, con la difusión activa, a los
+    /// demás terminales del grupo. Las variables se sustituyen con los
+    /// datos de cada terminal.
+    fn launch_snippet(&mut self, id: Uuid, answers: &[(String, String)]) {
         let Some(text) = self
             .macros
             .macros
@@ -1073,19 +1134,74 @@ impl App {
         else {
             return;
         };
-        let bytes = crate::macros::decode(&text);
-        let source = self.tabs.get(self.active).map(|t| t.id);
-        match self.active_terminal() {
-            Some(term) => {
-                term.send_macro(bytes.clone());
-                term.request_focus();
+        let now = chrono::Local::now();
+        let Some(source) = self.tabs.get(self.active).map(|t| t.id) else {
+            return;
+        };
+        let broadcasting = self.broadcast.includes(source);
+        for tab in &mut self.tabs {
+            let is_source = tab.id == source;
+            if !is_source && !(broadcasting && self.broadcast.includes(tab.id)) {
+                continue;
             }
-            None => {
-                return self.notify("Abre un terminal conectado para lanzar el snippet", true);
+            let context = snippet_context(tab);
+            let TabKind::Terminal(term) = &mut tab.kind else {
+                continue;
+            };
+            let expanded = crate::macros::expand(&text, &context, answers, now);
+            let bytes = crate::macros::decode(&expanded);
+            if is_source {
+                term.send_macro(bytes);
+                term.request_focus();
+            } else {
+                term.apply_input(&TermInput::Bytes(bytes));
             }
         }
-        if let Some(source) = source {
-            self.mirror_to_group(source, &[TermInput::Bytes(bytes)]);
+    }
+
+    /// Diálogo que pide los valores de las preguntas de un snippet.
+    fn snippet_prompt_ui(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = &mut self.snippet_prompt else {
+            return;
+        };
+        let mut launch = false;
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::unique("snippet_prompt")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.heading(format!("Lanzar «{}»", prompt.name));
+            egui::Grid::new("snippet_prompt_grid")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    for (i, (label, value)) in prompt.answers.iter_mut().enumerate() {
+                        ui.label(label.as_str());
+                        let response =
+                            ui.add(egui::TextEdit::singleline(value).desired_width(280.0));
+                        if i == 0 && !prompt.focused {
+                            response.request_focus();
+                            prompt.focused = true;
+                        }
+                        ui.end_row();
+                    }
+                });
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.horizontal(|ui| {
+                if ui.button("▶ Lanzar").clicked() || enter {
+                    launch = true;
+                }
+                if ui.button("Cancelar").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    cancel = true;
+                }
+            });
+        });
+        if launch {
+            if let Some(prompt) = self.snippet_prompt.take() {
+                self.launch_snippet(prompt.id, &prompt.answers);
+            }
+            self.focus_active_terminal();
+        } else if cancel {
+            self.snippet_prompt = None;
+            self.focus_active_terminal();
         }
     }
 
@@ -1093,7 +1209,10 @@ impl App {
     /// un terminal conectado: en un diálogo o un campo de texto las teclas
     /// son de quien las está usando.
     fn dispatch_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.macros_window.is_some() || self.recorded_macro.is_some() {
+        if self.macros_window.is_some()
+            || self.recorded_macro.is_some()
+            || self.snippet_prompt.is_some()
+        {
             return;
         }
         let in_terminal = matches!(
@@ -1168,6 +1287,7 @@ impl App {
             })
             .collect();
         let mut mirrored: Vec<TermInput> = vec![];
+        let mut notice: Option<(String, bool)> = None;
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
@@ -1257,6 +1377,66 @@ impl App {
                             .clicked()
                         {
                             term.font_delta = (term.font_delta - 1.0).max(-8.0);
+                        }
+                        if ui
+                            .small_button("🔍")
+                            .on_hover_text("Buscar en el terminal y su historial (Ctrl+Mayús+F)")
+                            .clicked()
+                        {
+                            term.open_search();
+                        }
+                        // Registro de la sesión en un fichero.
+                        let (label, hover) = match &term.log {
+                            Some(log) => (
+                                RichText::new("⏺ Registrando").color(ui.visuals().error_fg_color),
+                                format!(
+                                    "Guardando lo que muestra este terminal en\n{}\n\
+                                     Pulsa para dejar de registrar.",
+                                    log.path().display()
+                                ),
+                            ),
+                            None => (
+                                RichText::new("⏺ Registrar"),
+                                "Guardar en un fichero de texto lo que muestre este terminal"
+                                    .to_string(),
+                            ),
+                        };
+                        if ui.small_button(label).on_hover_text(hover).clicked() {
+                            match term.log.take() {
+                                Some(log) => {
+                                    notice = Some((
+                                        format!("Registro guardado en {}", log.path().display()),
+                                        false,
+                                    ));
+                                }
+                                None => {
+                                    let target = tab
+                                        .session
+                                        .as_ref()
+                                        .map(|s| s.target())
+                                        .unwrap_or_default();
+                                    match crate::session_log::SessionLog::start(
+                                        &self.settings.log.dir(),
+                                        &tab.title,
+                                        &target,
+                                        self.settings.log.timestamps,
+                                    ) {
+                                        Ok(log) => {
+                                            notice = Some((
+                                                format!("Registrando en {}", log.path().display()),
+                                                false,
+                                            ));
+                                            term.log = Some(log);
+                                        }
+                                        Err(e) => notice = Some((format!("{e:#}"), true)),
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(error) = term.log.as_mut().and_then(|l| l.error.take()) {
+                            // Disco lleno, carpeta borrada…: se deja de registrar.
+                            notice = Some((error, true));
+                            term.log = None;
                         }
                     });
                 });
@@ -1357,6 +1537,9 @@ impl App {
         });
 
         self.mirror_to_group(tab_id, &mirrored);
+        if let Some((message, is_error)) = notice {
+            self.notify(message, is_error);
+        }
 
         if reconnect && let Some(session) = self.tabs[self.active].session.clone() {
             if matches!(self.tabs[self.active].kind, TabKind::Desktop(_)) {
@@ -2210,6 +2393,12 @@ impl eframe::App for App {
             if request.open_server_bar {
                 self.server_bar_window = Some(ServerBarWindow::new(&self.settings.server_bar));
             }
+            if let Some(folder) = request.open_folder {
+                let _ = std::fs::create_dir_all(&folder);
+                if let Err(e) = crate::paths::open_with_system(&folder) {
+                    self.notify(format!("No se pudo abrir {}: {e}", folder.display()), true);
+                }
+            }
             if !open {
                 self.settings_window = None;
                 self.focus_active_terminal();
@@ -2246,11 +2435,39 @@ impl eframe::App for App {
             }
         }
         self.recorded_macro_ui(&ctx);
+        self.snippet_prompt_ui(&ctx);
         self.folder_dialog_ui(&ctx);
         self.confirm_delete_ui(&ctx);
         self.rdp_prompt_ui(&ctx);
         self.vault_dialog_ui(&ctx);
         self.prompt_ui(&ctx);
+    }
+}
+
+/// Datos de una pestaña para las variables de los snippets.
+fn snippet_context(tab: &Tab) -> crate::macros::SnippetContext {
+    match &tab.session {
+        Some(session) => crate::macros::SnippetContext {
+            host: session.host.trim().to_string(),
+            port: session.port.to_string(),
+            user: session.username.trim().to_string(),
+            name: session.display_name(),
+        },
+        // Terminal local.
+        None => crate::macros::SnippetContext {
+            host: "localhost".into(),
+            port: String::new(),
+            user: ["USER", "USERNAME", "LOGNAME"]
+                .iter()
+                .find_map(|name| std::env::var(name).ok().filter(|v| !v.is_empty()))
+                .or_else(|| {
+                    crate::paths::home_dir()
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                })
+                .unwrap_or_default(),
+            name: tab.title.clone(),
+        },
     }
 }
 
