@@ -17,6 +17,7 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 ![Paleta de órdenes](docs/paleta.png)
 ![Confirmación al pegar varias líneas y color de la carpeta](docs/protecciones.png)
 ![Una orden en varios equipos](docs/varios-equipos.png)
+![Visor del baúl](docs/baul.png)
 ![Servidor X integrado](docs/servidor-x.png)
 ![Snippets con atajos de teclado](docs/snippets.png)
 ![Escritorio remoto integrado](docs/escritorio.png)
