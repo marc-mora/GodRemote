@@ -85,8 +85,10 @@ Cada cambio que se sube pasa por GitHub Actions (`.github/workflows/ci.yml`):
 
 Al empujar una etiqueta `vX.Y.Z` se compilan además los ejecutables nativos
 de las dos ediciones para Windows, Linux y macOS, y se publican como
-**Release** en GitHub. Los mismos ejecutables se pueden pedir a mano desde la
-pestaña *Actions* (se descargan como artefactos de la ejecución).
+**Release** en GitHub. Los mismos ejecutables se pueden pedir sin publicar
+una versión —se descargan como artefactos de la ejecución, en la pestaña
+*Actions*—: a mano desde esa pestaña, o poniendo `[ejecutables]` en el
+mensaje de un commit.
 
 ### Ejecutable de Windows desde Linux
 
