@@ -1,0 +1,195 @@
+# Compila y prueba GodRemote en Windows, Linux y macOS, y publica los
+# ejecutables como «Release» al empujar una etiqueta vX.Y.Z.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ejecutables:
+        description: "Compilar también los ejecutables de las tres plataformas"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # La misma versión de Rust con la que se desarrolla.
+  RUST_VERSION: "1.97.0"
+  # En Windows, las rutinas en ensamblador de la librería criptográfica
+  # vienen ya ensambladas: no hace falta instalar NASM.
+  AWS_LC_SYS_PREBUILT_NASM: "1"
+
+jobs:
+  # Linux: formato, avisos y todas las pruebas, incluidas las que necesitan
+  # servidores reales (sshd, telnetd, x11vnc, FreeRDP…) y permisos de root.
+  linux:
+    name: Linux (con servidores reales)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
+          rustup default "$RUST_VERSION"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+            reforzado/target
+          key: linux-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'reforzado/Cargo.lock') }}
+          restore-keys: linux-${{ env.RUST_VERSION }}-
+      - name: Servidores y clientes de prueba
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            openssh-server xvfb xauth x11-apps x11-utils xterm x11vnc socat telnetd procps
+          # El servidor RDP de pruebas no está en todas las versiones de Ubuntu:
+          # sin él, su prueba se omite sola.
+          sudo apt-get install -y --no-install-recommends freerdp3-shadow-x11 || true
+      - name: Formato
+        run: cargo fmt --check
+      - name: Avisos (clippy), edición completa
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Avisos (clippy), edición SSH reforzada
+        run: cargo clippy --locked --all-targets --manifest-path reforzado/Cargo.toml -- -D warnings
+      - name: Pruebas, edición completa
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test --locked
+      - name: Pruebas, edición SSH reforzada
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test --locked --manifest-path reforzado/Cargo.toml
+      - name: Devolver la caché a su dueño
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" target reforzado/target "$HOME/.cargo" || true
+
+  # Windows y macOS: compilación nativa y las pruebas que no dependen de
+  # servidores de Unix.
+  escritorio:
+    name: ${{ matrix.nombre }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            nombre: Windows
+          - os: macos-latest
+            nombre: macOS
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'reforzado/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ env.RUST_VERSION }}-
+      - name: Pruebas, edición completa
+        run: cargo test --locked
+      - name: Compila la edición SSH reforzada
+        run: cargo check --locked --all-targets --manifest-path reforzado/Cargo.toml --target-dir target
+
+  # Ejecutables nativos de las dos ediciones. Solo al etiquetar una versión
+  # o al pedirlo a mano.
+  ejecutables:
+    name: Ejecutables (${{ matrix.nombre }})
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.ejecutables)
+    needs: [linux, escritorio]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            nombre: windows-x64
+            ext: .exe
+          - os: ubuntu-latest
+            nombre: linux-x64
+            ext: ""
+          - os: macos-latest
+            nombre: macos-arm64
+            ext: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ejecutables-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'reforzado/Cargo.lock') }}
+          restore-keys: ejecutables-${{ runner.os }}-${{ env.RUST_VERSION }}-
+      - name: Edición completa
+        run: cargo build --release --locked
+      - name: Edición SSH reforzada
+        run: cargo build --release --locked --manifest-path reforzado/Cargo.toml --target-dir target
+      - name: Empaqueta
+        shell: bash
+        run: |
+          mkdir -p paquetes/completa paquetes/reforzada
+          cp "target/release/godremote${{ matrix.ext }}" "paquetes/completa/GodRemote${{ matrix.ext }}"
+          cp "target/release/godremote-reforzado${{ matrix.ext }}" "paquetes/reforzada/GodRemote-ssh-reforzado${{ matrix.ext }}"
+          cp README.md paquetes/completa/LEEME.md
+          cp README.md paquetes/reforzada/LEEME.md
+          mkdir -p dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            (cd paquetes/completa && 7z a -tzip "../../dist/GodRemote-${{ matrix.nombre }}.zip" .)
+            (cd paquetes/reforzada && 7z a -tzip "../../dist/GodRemote-ssh-reforzado-${{ matrix.nombre }}.zip" .)
+          else
+            tar -C paquetes/completa -czf "dist/GodRemote-${{ matrix.nombre }}.tar.gz" .
+            tar -C paquetes/reforzada -czf "dist/GodRemote-ssh-reforzado-${{ matrix.nombre }}.tar.gz" .
+          fi
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GodRemote-${{ matrix.nombre }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Publica la versión con sus ejecutables.
+  release:
+    name: Publicar la versión
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: ejecutables
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Crea la Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "GodRemote ${GITHUB_REF_NAME#v}" \
+            --generate-notes
