@@ -3,6 +3,7 @@
 pub mod backdrop_view;
 pub mod desktop_view;
 pub mod editor;
+pub mod folder_editor;
 pub mod keys_view;
 pub mod macros_view;
 pub mod server_bar;
@@ -34,6 +35,7 @@ use crate::tunnels::TunnelStatus;
 use crate::vault::Vault;
 use desktop_view::{DesktopState, DesktopView};
 use editor::{EditorResult, SessionEditor};
+use folder_editor::{FolderEditor, FolderResult};
 use keys_view::KeysWindow;
 use macros_view::{MacroRequest, MacrosWindow};
 use server_bar::ServerBarWindow;
@@ -174,14 +176,6 @@ enum TreeAction {
     Move(Uuid, Option<Uuid>),
 }
 
-struct FolderDialog {
-    parent: Option<Uuid>,
-    /// Si es `Some`, se renombra esa carpeta en lugar de crear una.
-    rename: Option<Uuid>,
-    name: String,
-    focused: bool,
-}
-
 struct RdpPrompt {
     session: Session,
     password: String,
@@ -206,7 +200,7 @@ pub struct App {
     selected: Option<Uuid>,
     filter: String,
     editor: Option<SessionEditor>,
-    folder_dialog: Option<FolderDialog>,
+    folder_editor: Option<FolderEditor>,
     confirm_delete: Option<Uuid>,
     rdp_prompt: Option<RdpPrompt>,
     keys_window: Option<KeysWindow>,
@@ -335,7 +329,7 @@ impl App {
             selected: None,
             filter: String::new(),
             editor: None,
-            folder_dialog: None,
+            folder_editor: None,
             confirm_delete: None,
             rdp_prompt: None,
             keys_window: None,
@@ -569,7 +563,7 @@ impl App {
             }
             for tab in &saved.tabs {
                 match (
-                    tab.session.and_then(|id| self.tree.session(id).cloned()),
+                    tab.session.and_then(|id| self.tree.resolved_session(id)),
                     tab.kind.as_str(),
                 ) {
                     (None, "terminal") if tab.session.is_none() => self.open_local_terminal(),
@@ -797,12 +791,12 @@ impl App {
             match action {
                 TreeAction::Select(id) => self.selected = Some(id),
                 TreeAction::Connect(id) => {
-                    if let Some(s) = self.tree.session(id).cloned() {
+                    if let Some(s) = self.tree.resolved_session(id) {
                         self.connect(s, None);
                     }
                 }
                 TreeAction::OpenAs(id, protocol) => {
-                    if let Some(s) = self.tree.session(id).cloned() {
+                    if let Some(s) = self.tree.resolved_session(id) {
                         self.connect(s, Some(protocol));
                     }
                 }
@@ -816,7 +810,7 @@ impl App {
                             },
                             true,
                         );
-                    } else if let Some(mut s) = self.tree.session(id).cloned() {
+                    } else if let Some(mut s) = self.tree.resolved_session(id) {
                         s.rdp.embedded = embedded;
                         self.connect(s, None);
                     }
@@ -848,23 +842,13 @@ impl App {
                     }
                 }
                 TreeAction::Delete(id) => self.confirm_delete = Some(id),
-                TreeAction::NewSession(parent) => self.editor = Some(SessionEditor::new(parent)),
+                TreeAction::NewSession(parent) => self.editor = Some(self.new_session(parent)),
                 TreeAction::NewFolder(parent) => {
-                    self.folder_dialog = Some(FolderDialog {
-                        parent,
-                        rename: None,
-                        name: String::new(),
-                        focused: false,
-                    })
+                    self.folder_editor = Some(FolderEditor::new(parent));
                 }
                 TreeAction::RenameFolder(id) => {
                     if let Some(Node::Folder(f)) = self.tree.find(id) {
-                        self.folder_dialog = Some(FolderDialog {
-                            parent: None,
-                            rename: Some(id),
-                            name: f.name.clone(),
-                            focused: false,
-                        });
+                        self.folder_editor = Some(FolderEditor::edit(f, self.tree.parent_of(id)));
                     }
                 }
                 TreeAction::Move(id, parent) => {
@@ -900,19 +884,14 @@ impl App {
                 .on_hover_text("Nueva sesión SSH / SFTP / RDP")
                 .clicked()
             {
-                self.editor = Some(SessionEditor::new(self.target_folder()));
+                self.editor = Some(self.new_session(self.target_folder()));
             }
             if ui
                 .button("📁 Carpeta")
                 .on_hover_text("Nueva carpeta de equipos")
                 .clicked()
             {
-                self.folder_dialog = Some(FolderDialog {
-                    parent: self.target_folder(),
-                    rename: None,
-                    name: String::new(),
-                    focused: false,
-                });
+                self.folder_editor = Some(FolderEditor::new(self.target_folder()));
             }
             if ui.button("💻 Terminal local").clicked() {
                 self.open_local_terminal();
@@ -2085,63 +2064,14 @@ impl App {
         }
     }
 
-    fn folder_dialog_ui(&mut self, ctx: &egui::Context) {
-        let Some(dialog) = &mut self.folder_dialog else {
-            return;
-        };
-        let mut close = false;
-        let mut commit = false;
-        egui::Modal::new(egui::Id::unique("folder_dialog")).show(ctx, |ui| {
-            ui.set_width(340.0);
-            ui.heading(if dialog.rename.is_some() {
-                "Renombrar carpeta"
-            } else {
-                "Nueva carpeta"
-            });
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut dialog.name)
-                    .hint_text("nombre")
-                    .desired_width(f32::INFINITY),
-            );
-            if !dialog.focused {
-                resp.request_focus();
-                dialog.focused = true;
-            }
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let valid = !dialog.name.trim().is_empty();
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(valid, egui::Button::new("Aceptar"))
-                    .clicked()
-                    || (enter && valid)
-                {
-                    commit = true;
-                }
-                if ui.button("Cancelar").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
-                {
-                    close = true;
-                }
-            });
-        });
-        if commit {
-            if let Some(dialog) = self.folder_dialog.take() {
-                let name = dialog.name.trim().to_string();
-                match dialog.rename {
-                    Some(id) => {
-                        if let Some(Node::Folder(f)) = self.tree.find_mut(id) {
-                            f.name = name;
-                        }
-                    }
-                    None => {
-                        let id = self.tree.add_folder(dialog.parent, &name);
-                        self.selected = Some(id);
-                    }
-                }
-                self.save_tree();
-            }
-        } else if close {
-            self.folder_dialog = None;
-        }
+    /// Editor de una sesión nueva en la carpeta indicada. Si la carpeta
+    /// define la autenticación o los saltos, la sesión nace heredándolos.
+    fn new_session(&self, parent: Option<Uuid>) -> SessionEditor {
+        let mut editor = SessionEditor::new(parent);
+        let inherited = self.tree.inherited(parent);
+        editor.session.inherit_auth = inherited.auth.is_some();
+        editor.session.inherit_jumps = inherited.jumps.is_some();
+        editor
     }
 
     fn confirm_delete_ui(&mut self, ctx: &egui::Context) {
@@ -2444,7 +2374,7 @@ fn tree_ui(
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("✏ Renombrar…").clicked() {
+                    if ui.button("✏ Editar carpeta…").clicked() {
                         actions.push(TreeAction::RenameFolder(f.id));
                         ui.close();
                     }
@@ -2553,7 +2483,7 @@ impl eframe::App for App {
             key.split('/')
                 .next()
                 .and_then(|id| Uuid::parse_str(id).ok())
-                .is_some_and(|id| self.tree.session(id).is_some())
+                .is_some_and(|id| self.tree.find(id).is_some())
         });
         self.store_secrets(secrets);
         self.auto_reconnect(ui.ctx());
@@ -2590,10 +2520,12 @@ impl eframe::App for App {
                 EditorResult::Open => {}
                 EditorResult::Cancelled => self.editor = None,
                 EditorResult::Saved { connect } => {
-                    let session = editor.session.clone();
-                    self.selected = Some(session.id);
+                    let saved = editor.session.clone();
+                    self.selected = Some(saved.id);
                     self.editor = None;
                     self.save_tree();
+                    // Se usa tal como se conecta: con lo heredado de su carpeta.
+                    let session = self.tree.resolved_session(saved.id).unwrap_or(saved);
                     // Las pestañas ya abiertas de este equipo toman al
                     // momento su nuevo fondo y su barra de información.
                     for tab in &mut self.tabs {
@@ -2678,7 +2610,17 @@ impl eframe::App for App {
         }
         self.recorded_macro_ui(&ctx);
         self.snippet_prompt_ui(&ctx);
-        self.folder_dialog_ui(&ctx);
+        if let Some(editor) = &mut self.folder_editor {
+            match editor.show(&ctx, &mut self.tree, &mut self.vault) {
+                FolderResult::Open => {}
+                FolderResult::Cancelled => self.folder_editor = None,
+                FolderResult::Saved(id) => {
+                    self.selected = Some(id);
+                    self.folder_editor = None;
+                    self.save_tree();
+                }
+            }
+        }
         self.confirm_delete_ui(&ctx);
         self.rdp_prompt_ui(&ctx);
         self.vault_dialog_ui(&ctx);

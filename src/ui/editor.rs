@@ -43,6 +43,92 @@ const BAUD_RATES: [u32; 9] = [
 ];
 
 /// `true` si la sesión se autentica con una contraseña que puede ir al baúl.
+/// Lista ordenable de saltos: filas con su posición y botones para subir,
+/// bajar o quitar, y un desplegable para añadir. `own` es la sesión que se
+/// está editando (no puede saltar a través de sí misma).
+pub(super) fn jump_list_ui(
+    ui: &mut egui::Ui,
+    tree: &Tree,
+    jumps: &mut Vec<Uuid>,
+    own: Option<Uuid>,
+    salt: &str,
+) {
+    let sessions = tree.ssh_sessions();
+    let name_of = |id: Uuid| {
+        sessions
+            .iter()
+            .find(|(sid, _)| *sid == id)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| "(sesión eliminada)".into())
+    };
+    let mut move_up = None;
+    let mut move_down = None;
+    let mut remove = None;
+    let count = jumps.len();
+    for (i, id) in jumps.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(format!("{}.", i + 1));
+            ui.allocate_ui_with_layout(
+                egui::vec2(FIELD_WIDTH, 18.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(FIELD_WIDTH);
+                    ui.add(egui::Label::new(name_of(*id)).truncate());
+                },
+            );
+            if ui
+                .add_enabled(i > 0, egui::Button::new("⬆").small())
+                .on_hover_text("Antes en el camino")
+                .clicked()
+            {
+                move_up = Some(i);
+            }
+            if ui
+                .add_enabled(i + 1 < count, egui::Button::new("⬇").small())
+                .on_hover_text("Después en el camino")
+                .clicked()
+            {
+                move_down = Some(i);
+            }
+            if ui.small_button("🗑").on_hover_text("Quitar salto").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = move_up {
+        jumps.swap(i, i - 1);
+    }
+    if let Some(i) = move_down {
+        jumps.swap(i, i + 1);
+    }
+    if let Some(i) = remove {
+        jumps.remove(i);
+    }
+
+    // Añadir: cualquier sesión SSH que no sea la propia ni esté ya.
+    let candidates: Vec<&(Uuid, String)> = sessions
+        .iter()
+        .filter(|(id, _)| Some(*id) != own && !jumps.contains(id))
+        .collect();
+    let mut add = None;
+    egui::ComboBox::from_id_salt((salt, "jump_add"))
+        .selected_text("➕ Añadir salto…")
+        .width(FIELD_WIDTH)
+        .show_ui(ui, |ui| {
+            if candidates.is_empty() {
+                ui.weak("No hay más sesiones SSH en el árbol");
+            }
+            for (id, name) in candidates {
+                if ui.selectable_label(false, name).clicked() {
+                    add = Some(*id);
+                }
+            }
+        });
+    if let Some(id) = add {
+        jumps.push(id);
+    }
+}
+
 fn uses_password(s: &Session) -> bool {
     match s.protocol {
         Protocol::Rdp | Protocol::Vnc => true,
@@ -111,7 +197,7 @@ impl SessionEditor {
                             self.advanced_ssh(ui);
                         }
                         if self.session.protocol.has_terminal() {
-                            self.terminal_look(ui);
+                            self.terminal_look(ui, tree);
                         }
                     });
                 ui.add_space(6.0);
@@ -146,6 +232,14 @@ impl SessionEditor {
 
     fn form(&mut self, ui: &mut egui::Ui, tree: &Tree, vault: Option<&Vault>) {
         let embedded_rdp = self.embedded_rdp;
+        let inherited = tree.inherited(self.parent);
+        // Hereda la autenticación de su carpeta (si esta la define).
+        let auth_from_folder =
+            self.session.protocol.is_ssh() && self.session.inherit_auth && inherited.auth.is_some();
+        let user_hint = match &inherited.username {
+            Some((folder, user)) => format!("{user} (de la carpeta «{folder}»)"),
+            None => String::new(),
+        };
         let s = &mut self.session;
         egui::Grid::new("session_form")
             .num_columns(2)
@@ -193,13 +287,32 @@ impl SessionEditor {
                     Protocol::Ssh | Protocol::Sftp => {
                         ui.label("Usuario");
                         ui.add(
-                            egui::TextEdit::singleline(&mut s.username).desired_width(FIELD_WIDTH),
+                            egui::TextEdit::singleline(&mut s.username)
+                                .hint_text(user_hint.as_str())
+                                .desired_width(FIELD_WIDTH),
                         );
                         ui.end_row();
                         ui.label("Autenticación");
-                        ui.horizontal(|ui| {
-                            for m in AuthMethod::ALL {
-                                ui.selectable_value(&mut s.auth, m, m.label());
+                        ui.vertical(|ui| {
+                            if let Some((folder, method, key)) = &inherited.auth {
+                                let detail = if *method == AuthMethod::Key && !key.is_empty() {
+                                    format!("{} {key}", method.label())
+                                } else {
+                                    method.label().to_string()
+                                };
+                                ui.checkbox(
+                                    &mut s.inherit_auth,
+                                    format!("La de la carpeta «{folder}» ({detail})"),
+                                );
+                            } else if s.inherit_auth {
+                                ui.weak("Su carpeta ya no define la autenticación: se usa esta.");
+                            }
+                            if !auth_from_folder {
+                                ui.horizontal(|ui| {
+                                    for m in AuthMethod::ALL {
+                                        ui.selectable_value(&mut s.auth, m, m.label());
+                                    }
+                                });
                             }
                         });
                         ui.end_row();
@@ -207,7 +320,9 @@ impl SessionEditor {
                     Protocol::Rdp => {
                         ui.label("Usuario");
                         ui.add(
-                            egui::TextEdit::singleline(&mut s.username).desired_width(FIELD_WIDTH),
+                            egui::TextEdit::singleline(&mut s.username)
+                                .hint_text(user_hint.as_str())
+                                .desired_width(FIELD_WIDTH),
                         );
                         ui.end_row();
                         ui.label("Dominio");
@@ -229,7 +344,9 @@ impl SessionEditor {
                     Protocol::Vnc | Protocol::Serial => {}
                 }
 
-                if uses_password(s) {
+                if auth_from_folder {
+                    // La contraseña o la clave son las de la carpeta.
+                } else if uses_password(s) {
                     ui.label("Contraseña");
                     ui.vertical(|ui| {
                         let stored = vault.is_some_and(|v| v.contains(&s.password_key()));
@@ -502,101 +619,44 @@ impl SessionEditor {
 
     /// Lista ordenada de saltos (bastiones SSH) para llegar al equipo.
     fn jumps_ui(&mut self, ui: &mut egui::Ui, tree: &Tree) {
+        let inherited = tree.inherited(self.parent);
+        let parent = self.parent;
         let s = &mut self.session;
-        let header = if s.jumps.is_empty() {
+        let effective = tree.resolve(s, parent).jumps.len();
+        let header = if effective == 0 {
             "Saltos (bastiones SSH): conexión directa".to_string()
         } else {
-            format!("Saltos (bastiones SSH): {}", s.jumps.len())
+            format!("Saltos (bastiones SSH): {effective}")
         };
         egui::CollapsingHeader::new(header)
             .id_salt("session_jumps")
-            .default_open(!s.jumps.is_empty())
+            .default_open(effective > 0)
             .show(ui, |ui| {
-                let sessions = tree.ssh_sessions();
-                let name_of = |id: Uuid| {
-                    sessions
-                        .iter()
-                        .find(|(sid, _)| *sid == id)
-                        .map(|(_, name)| name.clone())
-                        .unwrap_or_else(|| "(sesión eliminada)".into())
-                };
                 ui.weak(
                     "Se conecta al primero, desde él al segundo, y así hasta el destino. \
                      Cada salto es una sesión SSH del árbol.",
                 );
-
-                // Filas: posición, equipo y botones para ordenar o quitar.
-                let mut move_up = None;
-                let mut move_down = None;
-                let mut remove = None;
-                let count = s.jumps.len();
-                for (i, id) in s.jumps.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{}.", i + 1));
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(FIELD_WIDTH, 18.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                ui.set_min_width(FIELD_WIDTH);
-                                ui.add(egui::Label::new(name_of(*id)).truncate());
-                            },
-                        );
-                        if ui
-                            .add_enabled(i > 0, egui::Button::new("⬆").small())
-                            .on_hover_text("Antes en el camino")
-                            .clicked()
-                        {
-                            move_up = Some(i);
-                        }
-                        if ui
-                            .add_enabled(i + 1 < count, egui::Button::new("⬇").small())
-                            .on_hover_text("Después en el camino")
-                            .clicked()
-                        {
-                            move_down = Some(i);
-                        }
-                        if ui.small_button("🗑").on_hover_text("Quitar salto").clicked() {
-                            remove = Some(i);
-                        }
-                    });
+                if let Some((folder, jumps)) = &inherited.jumps {
+                    ui.checkbox(
+                        &mut s.inherit_jumps,
+                        format!("Usar los saltos de la carpeta «{folder}»"),
+                    );
+                    if s.inherit_jumps && jumps.is_empty() {
+                        ui.weak("La carpeta indica conexión directa, sin saltos.");
+                    }
+                } else if s.inherit_jumps {
+                    ui.weak("Su carpeta ya no define saltos: se usan los de esta sesión.");
                 }
-                if let Some(i) = move_up {
-                    s.jumps.swap(i, i - 1);
-                }
-                if let Some(i) = move_down {
-                    s.jumps.swap(i, i + 1);
-                }
-                if let Some(i) = remove {
-                    s.jumps.remove(i);
-                }
-
-                // Añadir: cualquier sesión SSH que no sea esta ni esté ya.
-                let candidates: Vec<&(Uuid, String)> = sessions
-                    .iter()
-                    .filter(|(id, _)| *id != s.id && !s.jumps.contains(id))
-                    .collect();
-                let mut add = None;
-                egui::ComboBox::from_id_salt("jump_add")
-                    .selected_text("➕ Añadir salto…")
-                    .width(FIELD_WIDTH)
-                    .show_ui(ui, |ui| {
-                        if candidates.is_empty() {
-                            ui.weak("No hay más sesiones SSH en el árbol");
-                        }
-                        for (id, name) in candidates {
-                            if ui.selectable_label(false, name).clicked() {
-                                add = Some(*id);
-                            }
-                        }
-                    });
-                if let Some(id) = add {
-                    s.jumps.push(id);
+                let inheriting = s.inherit_jumps && inherited.jumps.is_some();
+                if !inheriting {
+                    jump_list_ui(ui, tree, &mut s.jumps, Some(s.id), "session");
                 }
 
                 // Camino resultante (incluye los saltos que cada salto
                 // necesite a su vez) o el motivo por el que no es válido.
-                if !s.jumps.is_empty() {
-                    match tree.jump_path(s) {
+                let resolved = tree.resolve(s, parent);
+                if !resolved.jumps.is_empty() {
+                    match tree.jump_path(&resolved) {
                         Ok(path) => {
                             let mut route = vec!["este equipo".to_string()];
                             route.extend(path.iter().map(|hop| hop.display_name()));
@@ -689,7 +749,8 @@ impl SessionEditor {
     }
 
     /// Aspecto del terminal de este equipo: barra de información y fondo.
-    fn terminal_look(&mut self, ui: &mut egui::Ui) {
+    fn terminal_look(&mut self, ui: &mut egui::Ui, tree: &Tree) {
+        let inherited = tree.inherited(self.parent);
         let s = &mut self.session;
         let configured = s.backdrop.is_some() || !s.server_info;
         egui::CollapsingHeader::new("Terminal: barra de información y fondo")
@@ -706,6 +767,20 @@ impl SessionEditor {
                          misma conexión. Desmárcalo en equipos sin shell POSIX (routers, \
                          conmutadores) o donde no quieras órdenes adicionales",
                     );
+                }
+                if let Some(folder) = &inherited.server_info_off
+                    && s.protocol == Protocol::Ssh
+                {
+                    ui.weak(format!(
+                        "La carpeta «{folder}» desactiva la barra en sus equipos."
+                    ));
+                }
+                if let Some(folder) = &inherited.backdrop
+                    && s.backdrop.is_none()
+                {
+                    ui.weak(format!(
+                        "Sin fondo propio se usa el de la carpeta «{folder}»."
+                    ));
                 }
                 let mut own = s.backdrop.is_some();
                 if ui
@@ -751,19 +826,22 @@ impl SessionEditor {
         if let Some(backdrop) = &mut s.backdrop {
             backdrop.sanitize();
         }
-        s.validate()?;
+        // Se valida tal como se conectará: con lo que herede de su carpeta.
+        let resolved = tree.resolve(&s, self.parent);
+        resolved.validate()?;
         // Los saltos deben formar un camino válido (sin bucles, todos SSH).
-        tree.jump_path(&s)?;
+        tree.jump_path(&resolved)?;
+        let own_auth = !(s.inherit_auth && resolved.secret_owner.is_some());
 
         if let Some(vault) = vault {
-            let with_password = uses_password(&s);
+            let with_password = uses_password(&s) && own_auth;
             let res = (|| -> anyhow::Result<()> {
                 if with_password && !self.password.is_empty() && self.save_password {
                     vault.set(&s.password_key(), &self.password)?;
                 } else if self.forget_password || !with_password {
                     vault.remove(&s.password_key())?;
                 }
-                let uses_key = s.protocol.is_ssh() && s.auth == AuthMethod::Key;
+                let uses_key = s.protocol.is_ssh() && s.auth == AuthMethod::Key && own_auth;
                 if uses_key && !self.passphrase.is_empty() {
                     vault.set(&s.passphrase_key(), &self.passphrase)?;
                 } else if self.forget_passphrase || !uses_key {

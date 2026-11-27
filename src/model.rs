@@ -269,6 +269,16 @@ pub struct Session {
     #[doc(hidden)]
     #[serde(default, rename = "jump", skip_serializing)]
     pub legacy_jump: Option<Uuid>,
+    /// Usar la autenticación (método y clave) que defina su carpeta.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub inherit_auth: bool,
+    /// Usar los saltos que defina su carpeta, en lugar de los propios.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub inherit_jumps: bool,
+    /// De quién son los secretos del baúl que usa: su carpeta, cuando
+    /// hereda de ella la autenticación. Se calcula al conectar.
+    #[serde(skip)]
+    pub secret_owner: Option<Uuid>,
     /// Reenvíos de puertos que se abren al conectar por SSH.
     pub tunnels: Vec<Tunnel>,
     /// Reenviar las aplicaciones gráficas X11 al servidor X local.
@@ -297,6 +307,9 @@ impl Default for Session {
             key_path: String::new(),
             jumps: vec![],
             legacy_jump: None,
+            inherit_auth: false,
+            inherit_jumps: false,
+            secret_owner: None,
             tunnels: vec![],
             x11_forwarding: false,
             rdp: RdpOptions::default(),
@@ -323,14 +336,15 @@ impl Session {
         }
     }
 
-    /// Clave del baúl para la contraseña de esta sesión.
+    /// Clave del baúl para la contraseña de esta sesión (o la de la
+    /// carpeta de la que hereda la autenticación).
     pub fn password_key(&self) -> String {
-        format!("{}/password", self.id)
+        format!("{}/password", self.secret_owner.unwrap_or(self.id))
     }
 
     /// Clave del baúl para la passphrase de la clave privada.
     pub fn passphrase_key(&self) -> String {
-        format!("{}/passphrase", self.id)
+        format!("{}/passphrase", self.secret_owner.unwrap_or(self.id))
     }
 
     /// Destino legible: `usuario@host:puerto` o el dispositivo serie.
@@ -402,10 +416,56 @@ impl Session {
     }
 }
 
+/// Valores que una carpeta da a los equipos que contiene. Los heredan
+/// también los de sus subcarpetas, salvo que una más cercana defina otros.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FolderDefaults {
+    /// Usuario de los equipos que no indiquen el suyo.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub username: String,
+    /// Autenticación de los equipos que la hereden.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthMethod>,
+    /// Clave privada, si la autenticación es por clave.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub key_path: String,
+    /// Saltos de los equipos que los hereden.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jumps: Option<Vec<Uuid>>,
+    /// Fondo del terminal de los equipos que no tengan uno propio.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backdrop: Option<crate::backdrop::Backdrop>,
+    /// `Some(false)`: sin barra de información en estos equipos.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_info: Option<bool>,
+}
+
+impl FolderDefaults {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Lo que un equipo recibiría de sus carpetas, y de cuál: sirve al editor
+/// para explicarlo. Cada dato lleva el nombre de la carpeta que lo define.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Inherited {
+    pub username: Option<(String, String)>,
+    /// (carpeta, método, clave privada).
+    pub auth: Option<(String, AuthMethod, String)>,
+    pub jumps: Option<(String, Vec<Uuid>)>,
+    pub backdrop: Option<String>,
+    /// Carpeta que desactiva la barra de información.
+    pub server_info_off: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Folder {
     pub id: Uuid,
     pub name: String,
+    #[serde(default, skip_serializing_if = "FolderDefaults::is_empty")]
+    pub defaults: FolderDefaults,
     #[serde(default)]
     pub children: Vec<Node>,
 }
@@ -463,7 +523,12 @@ impl Tree {
         fn go(nodes: &mut [Node]) {
             for n in nodes {
                 match n {
-                    Node::Folder(f) => go(&mut f.children),
+                    Node::Folder(f) => {
+                        if let Some(backdrop) = &mut f.defaults.backdrop {
+                            backdrop.sanitize();
+                        }
+                        go(&mut f.children)
+                    }
                     Node::Session(s) => s.migrate(),
                 }
             }
@@ -492,7 +557,8 @@ impl Tree {
             }
             stack.push(session.id);
             for hop_id in &session.jumps {
-                let hop = tree.session(*hop_id).ok_or_else(|| {
+                // El salto, con lo que herede de su carpeta.
+                let hop = tree.resolved_session(*hop_id).ok_or_else(|| {
                     format!(
                         "Un salto de «{}» ya no existe; edita la sesión",
                         session.display_name()
@@ -508,8 +574,8 @@ impl Tree {
                     continue;
                 }
                 // Primero, los saltos que este salto necesita a su vez.
-                expand(tree, hop, stack, path)?;
-                path.push(hop.clone());
+                expand(tree, &hop, stack, path)?;
+                path.push(hop);
                 if path.len() > MAX_JUMPS {
                     return Err(format!(
                         "Demasiados saltos encadenados (máximo {MAX_JUMPS})"
@@ -522,6 +588,98 @@ impl Tree {
         let mut path = vec![];
         expand(self, session, &mut vec![], &mut path)?;
         Ok(path)
+    }
+
+    /// Carpetas que contienen a `parent` (incluida), de la más cercana a
+    /// la raíz.
+    pub fn ancestors(&self, parent: Option<Uuid>) -> Vec<&Folder> {
+        let mut chain = vec![];
+        let mut current = parent;
+        while let Some(id) = current {
+            let Some(Node::Folder(folder)) = self.find(id) else {
+                break;
+            };
+            chain.push(folder);
+            current = self.parent_of(id);
+            // Un árbol dañado no debe dejar esto dando vueltas.
+            if chain.len() > 64 {
+                break;
+            }
+        }
+        chain
+    }
+
+    /// Lo que heredaría un equipo situado en la carpeta `parent`.
+    pub fn inherited(&self, parent: Option<Uuid>) -> Inherited {
+        let mut out = Inherited::default();
+        for folder in self.ancestors(parent) {
+            let d = &folder.defaults;
+            let name = folder.name.clone();
+            if out.username.is_none() && !d.username.trim().is_empty() {
+                out.username = Some((name.clone(), d.username.trim().to_string()));
+            }
+            if out.auth.is_none()
+                && let Some(auth) = d.auth
+            {
+                out.auth = Some((name.clone(), auth, d.key_path.clone()));
+            }
+            if out.jumps.is_none()
+                && let Some(jumps) = &d.jumps
+            {
+                out.jumps = Some((name.clone(), jumps.clone()));
+            }
+            if out.backdrop.is_none() && d.backdrop.is_some() {
+                out.backdrop = Some(name.clone());
+            }
+            if out.server_info_off.is_none() && d.server_info == Some(false) {
+                out.server_info_off = Some(name);
+            }
+        }
+        out
+    }
+
+    /// La sesión tal como se conecta: con lo que hereda de las carpetas
+    /// que la contienen. `parent` es la carpeta donde está (o va a estar).
+    pub fn resolve(&self, session: &Session, parent: Option<Uuid>) -> Session {
+        let mut out = session.clone();
+        let mut username_done = !out.username.trim().is_empty();
+        let mut auth_done = !out.inherit_auth;
+        let mut jumps_done = !out.inherit_jumps;
+        let mut backdrop_done = out.backdrop.is_some();
+        for folder in self.ancestors(parent) {
+            let d = &folder.defaults;
+            if !username_done && !d.username.trim().is_empty() {
+                out.username = d.username.trim().to_string();
+                username_done = true;
+            }
+            if !auth_done && let Some(auth) = d.auth {
+                out.auth = auth;
+                out.key_path = d.key_path.clone();
+                // Sus secretos son los de la carpeta, comunes a todos los
+                // equipos que heredan de ella.
+                out.secret_owner = Some(folder.id);
+                auth_done = true;
+            }
+            if !jumps_done && let Some(jumps) = &d.jumps {
+                // Un equipo no puede saltar a través de sí mismo.
+                out.jumps = jumps.iter().copied().filter(|j| *j != out.id).collect();
+                jumps_done = true;
+            }
+            if !backdrop_done && let Some(backdrop) = &d.backdrop {
+                out.backdrop = Some(backdrop.clone());
+                backdrop_done = true;
+            }
+            if d.server_info == Some(false) {
+                out.server_info = false;
+            }
+        }
+        out
+    }
+
+    /// Una sesión del árbol, lista para conectar (véase [`Tree::resolve`]).
+    pub fn resolved_session(&self, id: Uuid) -> Option<Session> {
+        let session = self.session(id)?;
+        Some(self.resolve(session, self.parent_of(id)))
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
@@ -567,6 +725,7 @@ impl Tree {
         self.insert(
             parent,
             Node::Folder(Folder {
+                defaults: FolderDefaults::default(),
                 id,
                 name: name.to_string(),
                 children: vec![],
@@ -828,6 +987,125 @@ mod tests {
 
     fn names(path: &[Session]) -> Vec<&str> {
         path.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    #[test]
+    fn folders_give_values_to_their_sessions() {
+        let mut tree = Tree::default();
+        let bastion = session("bastion");
+        tree.upsert_session(None, bastion.clone());
+        let prod = tree.add_folder(None, "Producción");
+        let web = tree.add_folder(Some(prod), "Web");
+        if let Some(Node::Folder(f)) = tree.find_mut(prod) {
+            f.defaults = FolderDefaults {
+                username: " deploy ".into(),
+                auth: Some(AuthMethod::Key),
+                key_path: "~/.ssh/prod".into(),
+                jumps: Some(vec![bastion.id]),
+                backdrop: Some(crate::backdrop::Backdrop {
+                    kind: crate::backdrop::BackdropKind::Text,
+                    text: "PRODUCCIÓN".into(),
+                    ..Default::default()
+                }),
+                server_info: None,
+            };
+        }
+        if let Some(Node::Folder(f)) = tree.find_mut(web) {
+            f.defaults.username = "www".into();
+            f.defaults.server_info = Some(false);
+        }
+
+        // Un equipo de la subcarpeta, que hereda todo lo que puede.
+        let mut one = session("web-01");
+        one.username.clear();
+        one.inherit_auth = true;
+        one.inherit_jumps = true;
+        tree.upsert_session(Some(web), one.clone());
+        let r = tree.resolved_session(one.id).unwrap();
+        // El usuario, de la carpeta más cercana; lo demás, de la de arriba.
+        assert_eq!(r.username, "www");
+        assert_eq!(
+            (r.auth, r.key_path.as_str()),
+            (AuthMethod::Key, "~/.ssh/prod")
+        );
+        assert_eq!(r.jumps, vec![bastion.id]);
+        assert_eq!(r.backdrop.as_ref().unwrap().text, "PRODUCCIÓN");
+        assert!(!r.server_info);
+        // Sus secretos son los de la carpeta que define la autenticación.
+        assert_eq!(r.password_key(), format!("{prod}/password"));
+        assert_eq!(r.passphrase_key(), format!("{prod}/passphrase"));
+        // Y el camino de saltos sale de lo heredado.
+        assert_eq!(names(&tree.jump_path(&r).unwrap()), ["bastion"]);
+        // La sesión guardada no cambia.
+        assert_eq!(tree.session(one.id).unwrap(), &one);
+
+        // Lo que el equipo define por sí mismo manda sobre la carpeta.
+        let mut own = session("web-02");
+        own.username = "root".into();
+        own.auth = AuthMethod::Password;
+        own.backdrop = Some(Default::default());
+        tree.upsert_session(Some(prod), own.clone());
+        let r = tree.resolved_session(own.id).unwrap();
+        assert_eq!(
+            (r.username.as_str(), r.auth),
+            ("root", AuthMethod::Password)
+        );
+        assert!(r.jumps.is_empty() && r.server_info);
+        assert_eq!(r.backdrop, Some(Default::default()));
+        assert_eq!(r.password_key(), format!("{}/password", own.id));
+
+        // Fuera de las carpetas no se hereda nada, aunque se pida.
+        let mut loose = session("suelto");
+        loose.inherit_auth = true;
+        loose.inherit_jumps = true;
+        loose.jumps = vec![bastion.id];
+        tree.upsert_session(None, loose.clone());
+        let r = tree.resolved_session(loose.id).unwrap();
+        assert_eq!((r.auth, r.jumps.clone()), (loose.auth, vec![bastion.id]));
+        assert_eq!(r.secret_owner, None);
+
+        // Lo que explica el editor: qué carpeta da cada cosa.
+        let i = tree.inherited(Some(web));
+        assert_eq!(i.username, Some(("Web".into(), "www".into())));
+        assert_eq!(i.auth.as_ref().map(|a| a.0.as_str()), Some("Producción"));
+        assert_eq!(i.jumps.as_ref().map(|j| j.0.as_str()), Some("Producción"));
+        assert_eq!(i.backdrop.as_deref(), Some("Producción"));
+        assert_eq!(i.server_info_off.as_deref(), Some("Web"));
+        assert_eq!(tree.inherited(None), Inherited::default());
+
+        // Un salto dentro de una carpeta también hereda (aquí, el usuario).
+        let mut hop = session("salto-interno");
+        hop.username.clear();
+        tree.upsert_session(Some(prod), hop.clone());
+        let mut target = session("destino");
+        target.jumps = vec![hop.id];
+        tree.upsert_session(None, target.clone());
+        let path = tree.jump_path(&target).unwrap();
+        assert_eq!(path[0].username, "deploy");
+
+        // Los saltos de la carpeta no hacen saltar a un equipo por sí mismo.
+        let mut in_prod = bastion.clone();
+        in_prod.id = Uuid::new_v4();
+        in_prod.inherit_jumps = true;
+        tree.upsert_session(Some(prod), in_prod.clone());
+        if let Some(Node::Folder(f)) = tree.find_mut(prod) {
+            f.defaults.jumps = Some(vec![in_prod.id, bastion.id]);
+        }
+        assert_eq!(
+            tree.resolved_session(in_prod.id).unwrap().jumps,
+            vec![bastion.id]
+        );
+
+        // Se guarda y se recupera; una carpeta sin valores no escribe nada.
+        let json = serde_json::to_string(&tree).unwrap();
+        assert!(
+            json.contains("\"defaults\":{\"username\":\" deploy \""),
+            "{json}"
+        );
+        assert_eq!(json.matches("\"defaults\"").count(), 2, "{json}");
+        assert!(json.contains("\"inherit_auth\":true"));
+        assert!(!json.contains("secret_owner"));
+        assert_eq!(serde_json::from_str::<Tree>(&json).unwrap(), tree);
     }
 
     #[test]
