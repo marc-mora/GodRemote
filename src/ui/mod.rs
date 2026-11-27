@@ -6,6 +6,7 @@ pub mod editor;
 pub mod folder_editor;
 pub mod keys_view;
 pub mod macros_view;
+pub mod palette_view;
 pub mod server_bar;
 pub mod settings_view;
 pub mod sftp_view;
@@ -41,6 +42,7 @@ use editor::{EditorResult, SessionEditor};
 use folder_editor::{FolderEditor, FolderResult};
 use keys_view::KeysWindow;
 use macros_view::{MacroRequest, MacrosWindow};
+use palette_view::{Command, Palette, PaletteAction, PaletteItem, PaletteResult};
 use server_bar::ServerBarWindow;
 use settings_view::SettingsWindow;
 use sftp_view::{SftpState, SftpView};
@@ -282,6 +284,8 @@ pub struct App {
     tunnels_window: Option<TunnelsWindow>,
     /// Faltan por iniciar los túneles marcados para arrancar solos.
     pending_autostart: bool,
+    /// Paleta de órdenes, si está abierta.
+    palette: Option<Palette>,
     pending_close: Option<PendingClose>,
     /// Se ha pedido salir con sesiones vivas; `Some(true)` cuando el botón
     /// «Cancelar» de la pregunta ya tiene el foco.
@@ -479,6 +483,7 @@ impl App {
             tunnel_runs: HashMap::new(),
             tunnels_window: None,
             pending_autostart: true,
+            palette: None,
             pending_close: None,
             pending_quit: None,
             quit_confirmed: false,
@@ -814,16 +819,7 @@ impl App {
                         self.notify(e, true);
                     }
                 }
-                TunnelRequest::Stop(id) => {
-                    if let Some(run) = self.tunnel_runs.get_mut(&id) {
-                        run.running.stop();
-                        run.retry = None;
-                        // Un reintento pendiente no deja nada que parar.
-                        if !run.running.is_running() {
-                            run.running.state = RunState::Stopped;
-                        }
-                    }
-                }
+                TunnelRequest::Stop(id) => self.stop_tunnel(id),
                 TunnelRequest::Removed(id) => {
                     self.tunnel_runs.remove(&id);
                 }
@@ -2077,6 +2073,264 @@ impl App {
         }
     }
 
+    /// Todo lo que se puede abrir desde la paleta de órdenes: primero las
+    /// pestañas abiertas, luego las acciones y por último los equipos, los
+    /// snippets y los túneles.
+    fn palette_items(&self) -> Vec<PaletteItem> {
+        let mut items = vec![];
+        for (index, tab) in self.tabs.iter().enumerate() {
+            if index == self.active {
+                continue;
+            }
+            items.push(PaletteItem {
+                kind: "Pestaña",
+                label: tab.title.clone(),
+                detail: tab.session.as_ref().map(|s| s.target()).unwrap_or_default(),
+                action: PaletteAction::SwitchTab(tab.id),
+            });
+        }
+        let has_terminal = matches!(
+            self.tabs.get(self.active).map(|t| &t.kind),
+            Some(TabKind::Terminal(_))
+        );
+        let mut command = |label: &str, detail: &str, command: Command| {
+            items.push(PaletteItem {
+                kind: "Acción",
+                label: label.to_string(),
+                detail: detail.to_string(),
+                action: PaletteAction::Command(command),
+            });
+        };
+        command(
+            "Abrir un terminal local",
+            "Ctrl+Mayús+T",
+            Command::LocalTerminal,
+        );
+        if !self.tabs.is_empty() {
+            command("Cerrar la pestaña", "Ctrl+Mayús+W", Command::CloseTab);
+        }
+        if has_terminal {
+            command(
+                "Buscar en el terminal",
+                "Ctrl+Mayús+F",
+                Command::SearchTerminal,
+            );
+            command(
+                if self.broadcast.enabled {
+                    "Desactivar la difusión"
+                } else {
+                    "Activar la difusión: escribir en varios terminales"
+                },
+                "",
+                Command::ToggleBroadcast,
+            );
+        }
+        command(
+            if self.split.enabled {
+                "Quitar la vista dividida"
+            } else {
+                "Vista dividida: varios terminales a la vez"
+            },
+            "",
+            Command::ToggleSplit,
+        );
+        command("Nuevo equipo…", "", Command::NewSession);
+        command("Nueva carpeta…", "", Command::NewFolder);
+        command(
+            "Ejecutar una orden en los equipos de una carpeta…",
+            "",
+            Command::RunOnFolder,
+        );
+        command("Túneles", "gestor de túneles", Command::Tunnels);
+        command("Snippets y atajos", "", Command::Snippets);
+        command("Claves SSH", "", Command::Keys);
+        command("Temas", "aspecto, colores y letra", Command::Themes);
+        command("Ajustes", "preferencias", Command::Settings);
+        command(
+            "Importar equipos o hacer una copia de seguridad",
+            "",
+            Command::Transfer,
+        );
+        if self.settings.x_server.embedded {
+            command(
+                "Servidor X: abrir su pestaña",
+                "aplicaciones gráficas",
+                Command::XServer,
+            );
+        }
+        if self.vault.is_some() {
+            command(
+                "Bloquear el baúl",
+                "contraseñas guardadas",
+                Command::VaultLock,
+            );
+            command("Ver lo guardado en el baúl", "", Command::VaultContents);
+        } else if Vault::exists(&crate::paths::vault_file()) {
+            command(
+                "Desbloquear el baúl…",
+                "contraseñas guardadas",
+                Command::VaultUnlock,
+            );
+        }
+        for (id, path) in self.tree.session_paths() {
+            let Some(session) = self.tree.session(id) else {
+                continue;
+            };
+            items.push(PaletteItem {
+                kind: "Equipo",
+                label: path,
+                detail: format!("{} · {}", session.protocol.label(), session.target()),
+                action: PaletteAction::Connect(id),
+            });
+        }
+        if has_terminal {
+            for snippet in &self.macros.macros {
+                items.push(PaletteItem {
+                    kind: "Snippet",
+                    label: snippet.name.clone(),
+                    detail: snippet.shortcut.map(|s| s.to_string()).unwrap_or_default(),
+                    action: PaletteAction::RunSnippet(snippet.id),
+                });
+            }
+        }
+        for tunnel in &self.tunnel_store.tunnels {
+            let running = self
+                .tunnel_runs
+                .get(&tunnel.id)
+                .is_some_and(|run| run.running.is_running());
+            items.push(PaletteItem {
+                kind: "Túnel",
+                label: format!(
+                    "{} {}",
+                    if running { "Detener" } else { "Iniciar" },
+                    tunnel.display_name()
+                ),
+                detail: tunnel.tunnel.describe(),
+                action: if running {
+                    PaletteAction::StopTunnel(tunnel.id)
+                } else {
+                    PaletteAction::StartTunnel(tunnel.id)
+                },
+            });
+        }
+        items
+    }
+
+    fn palette_ui(&mut self, ctx: &egui::Context) {
+        let Some(mut palette) = self.palette.take() else {
+            return;
+        };
+        let items = self.palette_items();
+        match palette.show(ctx, &items) {
+            PaletteResult::Open => self.palette = Some(palette),
+            PaletteResult::Closed => self.focus_active_terminal(),
+            PaletteResult::Chosen(action) => {
+                self.focus_active_terminal();
+                self.run_palette_action(action);
+            }
+        }
+    }
+
+    fn run_palette_action(&mut self, action: PaletteAction) {
+        match action {
+            PaletteAction::SwitchTab(id) => {
+                if let Some(index) = self.tabs.iter().position(|t| t.id == id) {
+                    self.active = index;
+                    self.focus_active_terminal();
+                }
+            }
+            PaletteAction::Connect(id) => {
+                if let Some(session) = self.tree.resolved_session(id) {
+                    self.selected = Some(id);
+                    self.connect(session, None);
+                }
+            }
+            PaletteAction::RunSnippet(id) => self.run_macro(id),
+            PaletteAction::StartTunnel(id) => {
+                if let Err(e) = self.start_tunnel(id) {
+                    self.notify(e, true);
+                }
+            }
+            PaletteAction::StopTunnel(id) => self.stop_tunnel(id),
+            PaletteAction::Command(command) => self.run_command(command),
+        }
+    }
+
+    /// Ejecuta una acción de la aplicación (desde la paleta o un atajo).
+    fn run_command(&mut self, command: Command) {
+        match command {
+            Command::LocalTerminal => self.open_local_terminal(),
+            Command::NewSession => self.editor = Some(self.new_session(self.target_folder())),
+            Command::NewFolder => {
+                self.folder_editor = Some(FolderEditor::new(self.target_folder()));
+            }
+            Command::Keys => self.keys_window = Some(KeysWindow::default()),
+            Command::Snippets => {
+                self.macros_window = Some(MacrosWindow::new(&self.macros, None));
+            }
+            Command::Tunnels => {
+                self.tunnels_window = Some(TunnelsWindow::new(&self.tunnel_store));
+            }
+            Command::Themes => {
+                self.themes_window = Some(ThemesWindow::new(&self.settings.theme));
+            }
+            Command::Settings => self.settings_window = Some(SettingsWindow),
+            Command::Transfer => self.transfer_window = Some(TransferWindow::default()),
+            Command::VaultLock => self.vault = None,
+            Command::VaultUnlock => {
+                self.vault_dialog = Some(VaultDialog::Unlock {
+                    password: String::new(),
+                    error: None,
+                    focus: true,
+                });
+            }
+            Command::VaultContents | Command::RunOnFolder => {}
+            Command::ToggleSplit => self.split.enabled = !self.split.enabled,
+            Command::ToggleBroadcast => self.broadcast.enabled = !self.broadcast.enabled,
+            Command::SearchTerminal => {
+                if let Some(TabKind::Terminal(term)) =
+                    self.tabs.get_mut(self.active).map(|t| &mut t.kind)
+                {
+                    term.open_search();
+                }
+            }
+            Command::CloseTab => {
+                if !self.tabs.is_empty() {
+                    self.request_close(&[self.active]);
+                }
+            }
+            Command::NextTab | Command::PreviousTab => {
+                let count = self.tabs.len();
+                if count > 1 {
+                    self.active = if command == Command::NextTab {
+                        (self.active + 1) % count
+                    } else {
+                        (self.active + count - 1) % count
+                    };
+                    self.focus_active_terminal();
+                }
+            }
+            Command::XServer => {
+                self.xhost.server();
+                if let Some(index) = self.tabs.iter().position(|t| t.x_server) {
+                    self.active = index;
+                }
+            }
+        }
+    }
+
+    /// Detiene un túnel del gestor.
+    fn stop_tunnel(&mut self, id: Uuid) {
+        if let Some(run) = self.tunnel_runs.get_mut(&id) {
+            run.running.stop();
+            run.retry = None;
+            // Un reintento pendiente no deja nada que parar.
+            if !run.running.is_running() {
+                run.running.state = RunState::Stopped;
+            }
+        }
+    }
+
     /// Cerrar esta pestaña interrumpe algo: una sesión remota conectada, un
     /// escritorio o aplicaciones gráficas abiertas.
     fn tab_is_live(&self, tab: &Tab) -> bool {
@@ -2602,6 +2856,30 @@ impl App {
             || self.recorded_macro.is_some()
             || self.snippet_prompt.is_some()
         {
+            return;
+        }
+        // Los atajos de la aplicación valen con el foco en cualquier parte,
+        // salvo con una pregunta en pantalla.
+        let asking = self.palette.is_some()
+            || self.pending_close.is_some()
+            || self.pending_quit.is_some()
+            || self.vault_dialog.is_some()
+            || !self.prompts.is_empty();
+        if self.settings.app_shortcuts
+            && !asking
+            && let Some(shortcut) = ctx.input_mut(|i| crate::macros::app_shortcut(&mut i.events))
+        {
+            use crate::macros::AppShortcut;
+            self.run_command(match shortcut {
+                AppShortcut::Palette => {
+                    self.palette = Some(Palette::default());
+                    return;
+                }
+                AppShortcut::NextTab => Command::NextTab,
+                AppShortcut::PreviousTab => Command::PreviousTab,
+                AppShortcut::NewTerminal => Command::LocalTerminal,
+                AppShortcut::CloseTab => Command::CloseTab,
+            });
             return;
         }
         let in_terminal = matches!(
@@ -3915,6 +4193,7 @@ impl eframe::App for App {
             }
         }
         self.tunnels_window_ui(&ctx);
+        self.palette_ui(&ctx);
         self.close_confirm_ui(&ctx);
         self.quit_guard(&ctx);
         self.recorded_macro_ui(&ctx);

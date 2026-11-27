@@ -28,6 +28,75 @@ pub fn is_modifier_key(key: Key) -> bool {
     )
 }
 
+/// Lo que hace cada atajo propio de la aplicación.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppShortcut {
+    Palette,
+    NextTab,
+    PreviousTab,
+    NewTerminal,
+    CloseTab,
+}
+
+const fn ctrl(key: Key, shift: bool) -> Shortcut {
+    Shortcut {
+        ctrl: true,
+        alt: false,
+        shift,
+        cmd: false,
+        key,
+    }
+}
+
+/// Atajos de la aplicación. Todos llevan Mayús o una tecla que la shell no
+/// usa con Ctrl, para no quitarle ninguna combinación al terminal.
+pub const APP_SHORTCUTS: [(Shortcut, AppShortcut, &str); 7] = [
+    (
+        ctrl(Key::P, true),
+        AppShortcut::Palette,
+        "abrir la paleta de órdenes",
+    ),
+    (
+        ctrl(Key::Tab, false),
+        AppShortcut::NextTab,
+        "pasar a la pestaña siguiente",
+    ),
+    (
+        ctrl(Key::Tab, true),
+        AppShortcut::PreviousTab,
+        "pasar a la pestaña anterior",
+    ),
+    (
+        ctrl(Key::PageDown, false),
+        AppShortcut::NextTab,
+        "pasar a la pestaña siguiente",
+    ),
+    (
+        ctrl(Key::PageUp, false),
+        AppShortcut::PreviousTab,
+        "pasar a la pestaña anterior",
+    ),
+    (
+        ctrl(Key::T, true),
+        AppShortcut::NewTerminal,
+        "abrir un terminal local",
+    ),
+    (
+        ctrl(Key::W, true),
+        AppShortcut::CloseTab,
+        "cerrar la pestaña",
+    ),
+];
+
+/// Busca entre los eventos del fotograma un atajo de la aplicación y, si
+/// está, retira la pulsación para que no llegue al terminal.
+pub fn app_shortcut(events: &mut Vec<Event>) -> Option<AppShortcut> {
+    APP_SHORTCUTS
+        .iter()
+        .find(|(shortcut, _, _)| shortcut.consume(events))
+        .map(|(_, action, _)| *action)
+}
+
 /// Combinación de teclas que lanza un snippet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Shortcut {
@@ -72,6 +141,12 @@ impl Shortcut {
         let plain_ctrl = (self.ctrl || self.cmd) && !self.alt && !self.shift;
         if plain_ctrl && matches!(self.key, Key::C | Key::V | Key::X) {
             return Err(format!("{self} está reservado para copiar, pegar y cortar"));
+        }
+        if let Some((_, _, purpose)) = APP_SHORTCUTS.iter().find(|(s, _, _)| s == self) {
+            return Err(format!("{self} está reservado para {purpose}"));
+        }
+        if *self == ctrl(Key::F, true) {
+            return Err(format!("{self} está reservado para buscar en el terminal"));
         }
         Ok(())
     }
@@ -595,6 +670,50 @@ mod tests {
                 .validate()
                 .is_ok()
         );
+        // Los atajos de la aplicación tampoco se pueden pisar.
+        let e = Shortcut::new(Key::P, Modifiers::CTRL | Modifiers::SHIFT)
+            .validate()
+            .unwrap_err();
+        assert!(e.contains("paleta"), "{e}");
+        assert!(Shortcut::new(Key::Tab, Modifiers::CTRL).validate().is_err());
+        assert!(
+            Shortcut::new(Key::F, Modifiers::CTRL | Modifiers::SHIFT)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Shortcut::new(Key::P, Modifiers::CTRL | Modifiers::ALT)
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn app_shortcuts_are_taken_from_the_events() {
+        let press = |key, modifiers| Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let mut events = vec![
+            press(Key::A, Modifiers::NONE),
+            press(Key::Tab, Modifiers::CTRL | Modifiers::SHIFT),
+        ];
+        assert_eq!(app_shortcut(&mut events), Some(AppShortcut::PreviousTab));
+        // La pulsación del atajo ya no está; lo demás sigue.
+        assert_eq!(events.len(), 1);
+        assert_eq!(app_shortcut(&mut events), None);
+        // Ctrl+W y Ctrl+T a secas son de la shell.
+        let mut events = vec![
+            press(Key::W, Modifiers::CTRL),
+            press(Key::T, Modifiers::CTRL),
+        ];
+        assert_eq!(app_shortcut(&mut events), None);
+        assert_eq!(events.len(), 2);
+        let mut events = vec![press(Key::W, Modifiers::CTRL | Modifiers::SHIFT)];
+        assert_eq!(app_shortcut(&mut events), Some(AppShortcut::CloseTab));
     }
 
     #[test]

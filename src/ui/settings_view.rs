@@ -76,6 +76,18 @@ impl SettingsWindow {
                      otra, y lleva una campana si la ha hecho sonar",
                         );
                         ui.separator();
+                        ui.strong("Teclado");
+                        ui.checkbox(
+                            &mut settings.app_shortcuts,
+                            "Atajos de la aplicación (paleta de órdenes y pestañas)",
+                        );
+                        ui.weak(
+                            "Ctrl+Mayús+P abre la paleta de órdenes · Ctrl+Tab y Ctrl+Mayús+Tab \
+                             (o Ctrl+AvPág y Ctrl+RePág) cambian de pestaña · Ctrl+Mayús+T abre \
+                             un terminal local · Ctrl+Mayús+W cierra la pestaña · Ctrl+Mayús+F \
+                             busca en el terminal.",
+                        );
+                        ui.separator();
                         ui.strong("Protecciones");
                         ui.checkbox(
                             &mut settings.confirm_paste,

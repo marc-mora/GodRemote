@@ -909,6 +909,38 @@ impl Tree {
         out
     }
 
+    /// Todos los equipos del árbol con su ruta legible ("Clientes / web-01").
+    pub fn session_paths(&self) -> Vec<(Uuid, String)> {
+        fn go(nodes: &[Node], prefix: &str, out: &mut Vec<(Uuid, String)>) {
+            for n in nodes {
+                match n {
+                    Node::Folder(f) => {
+                        let path = if prefix.is_empty() {
+                            f.name.clone()
+                        } else {
+                            format!("{prefix} / {}", f.name)
+                        };
+                        go(&f.children, &path, out);
+                    }
+                    Node::Session(s) => {
+                        let name = s.display_name();
+                        out.push((
+                            s.id,
+                            if prefix.is_empty() {
+                                name
+                            } else {
+                                format!("{prefix} / {name}")
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        let mut out = vec![];
+        go(&self.nodes, "", &mut out);
+        out
+    }
+
     /// Lista plana de carpetas con su ruta legible ("Clientes / ACME").
     pub fn folder_paths(&self) -> Vec<(Uuid, String)> {
         fn go(nodes: &[Node], prefix: &str, out: &mut Vec<(Uuid, String)>) {

@@ -1203,6 +1203,9 @@ pub struct Settings {
     /// Palabras resaltadas y enlaces en los terminales.
     #[serde(rename = "resaltado")]
     pub highlight: crate::highlight::Highlight,
+    /// Atajos de teclado de la aplicación (paleta, cambiar de pestaña…).
+    #[serde(rename = "atajos")]
+    pub app_shortcuts: bool,
     /// Preguntar antes de pegar varias líneas en un terminal.
     #[serde(rename = "confirmar_pegado")]
     pub confirm_paste: bool,
@@ -1251,6 +1254,7 @@ impl Default for Settings {
             activity_notice: true,
             highlight: Default::default(),
             x_server: Default::default(),
+            app_shortcuts: true,
             confirm_paste: true,
             confirm_close: true,
         }
@@ -1474,6 +1478,7 @@ mod tests {
             reconnect_attempts: 3,
             restore_tabs: true,
             editor: "code -w".into(),
+            app_shortcuts: false,
             confirm_paste: false,
             confirm_close: false,
             x_server: XServerSettings {

@@ -10,6 +10,7 @@ pub mod keys;
 pub mod macros;
 pub mod model;
 pub mod monitor;
+pub mod palette;
 pub mod paths;
 pub mod rdp;
 #[cfg(feature = "rdp-integrado")]
