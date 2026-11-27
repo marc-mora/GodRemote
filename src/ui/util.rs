@@ -88,7 +88,10 @@ pub fn parse_quick_connect(input: &str, protocol: Protocol) -> Result<Session, S
     if host.is_empty() || port == 0 {
         return Err("Host o puerto no válidos".into());
     }
-    if user.is_empty() && protocol != Protocol::Rdp {
+    if protocol == Protocol::Serial {
+        return Err("La conexión rápida no admite el puerto serie".into());
+    }
+    if user.is_empty() && protocol.is_ssh() {
         return Err("Falta el usuario: usuario@host".into());
     }
     Ok(Session {
@@ -155,6 +158,14 @@ mod tests {
         assert_eq!((s.host.as_str(), s.port), ("fe80::1", 22));
         let s = parse_quick_connect("winsrv", Protocol::Rdp).unwrap();
         assert_eq!((s.host.as_str(), s.port), ("winsrv", 3389));
+        let s = parse_quick_connect("pc-oficina:5901", Protocol::Vnc).unwrap();
+        assert_eq!(
+            (s.host.as_str(), s.port, s.protocol),
+            ("pc-oficina", 5901, Protocol::Vnc)
+        );
+        let s = parse_quick_connect("switch", Protocol::Telnet).unwrap();
+        assert_eq!((s.host.as_str(), s.port), ("switch", 23));
+        assert!(parse_quick_connect("COM3", Protocol::Serial).is_err());
         assert!(parse_quick_connect("host", Protocol::Ssh).is_err());
         assert!(parse_quick_connect("u@host:abc", Protocol::Ssh).is_err());
         assert!(parse_quick_connect("", Protocol::Ssh).is_err());

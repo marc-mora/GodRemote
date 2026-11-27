@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use egui::{Color32, RichText};
+use egui::RichText;
 
 use super::util::{format_size, format_time};
 use crate::sftp::{RemoteEntry, SftpClient, SftpCmd, SftpEvent, join_remote, parent_remote};
@@ -680,7 +680,7 @@ impl SftpView {
                             }
                             TransferState::Done => {
                                 ui.colored_label(
-                                    Color32::from_rgb(0x8c, 0xc0, 0x6b),
+                                    crate::theme::ok_color(),
                                     format!("Completada ({})", format_size(t.done)),
                                 );
                             }

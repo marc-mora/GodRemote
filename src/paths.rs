@@ -30,6 +30,16 @@ pub fn tls_known_hosts_file() -> PathBuf {
     data_dir().join("tls_known_hosts.json")
 }
 
+/// Carpeta con los temas del usuario.
+pub fn themes_dir() -> PathBuf {
+    data_dir().join("themes")
+}
+
+/// Preferencias (tema elegido…).
+pub fn settings_file() -> PathBuf {
+    data_dir().join("settings.json")
+}
+
 /// Macros de terminal.
 pub fn macros_file() -> PathBuf {
     data_dir().join("macros.json")

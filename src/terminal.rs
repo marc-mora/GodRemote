@@ -8,6 +8,7 @@ use egui::{Align2, Color32, Event, EventFilter, FontId, Key, Pos2, Rect, Sense, 
 use tokio::sync::mpsc;
 
 use crate::ssh::{SshHandle, Waker};
+use crate::theme::TermPalette;
 
 pub enum TermCmd {
     Input(Vec<u8>),
@@ -122,36 +123,11 @@ pub enum ConnState {
     Closed(Option<String>),
 }
 
-const DEFAULT_FG: Color32 = Color32::from_rgb(0xd4, 0xd7, 0xdd);
-const DEFAULT_BG: Color32 = Color32::from_rgb(0x12, 0x14, 0x18);
-const SELECTION_BG: Color32 = Color32::from_rgb(0x2f, 0x5d, 0x9e);
 const SCROLLBACK: usize = 10_000;
 
-const ANSI: [(u8, u8, u8); 16] = [
-    (0x1d, 0x1f, 0x21),
-    (0xcc, 0x66, 0x66),
-    (0x8c, 0xc0, 0x6b),
-    (0xe6, 0xc5, 0x47),
-    (0x6c, 0x9f, 0xe0),
-    (0xb2, 0x94, 0xbb),
-    (0x5f, 0xc0, 0xc0),
-    (0xc5, 0xc8, 0xc6),
-    (0x66, 0x69, 0x6e),
-    (0xff, 0x7b, 0x7b),
-    (0xa8, 0xe0, 0x7a),
-    (0xff, 0xdd, 0x66),
-    (0x8a, 0xb8, 0xff),
-    (0xd6, 0xa8, 0xe6),
-    (0x7d, 0xe0, 0xe0),
-    (0xff, 0xff, 0xff),
-];
-
-fn indexed_color(i: u8) -> Color32 {
+fn indexed_color(i: u8, palette: &TermPalette) -> Color32 {
     match i {
-        0..=15 => {
-            let (r, g, b) = ANSI[i as usize];
-            Color32::from_rgb(r, g, b)
-        }
+        0..=15 => palette.ansi[i as usize],
         16..=231 => {
             let i = i - 16;
             let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
@@ -164,12 +140,12 @@ fn indexed_color(i: u8) -> Color32 {
     }
 }
 
-fn resolve(color: vt100::Color, default: Color32, bold: bool) -> Color32 {
+fn resolve(color: vt100::Color, default: Color32, bold: bool, palette: &TermPalette) -> Color32 {
     match color {
         vt100::Color::Default => default,
         // La negrita se representa con la variante brillante del color.
-        vt100::Color::Idx(i) if bold && i < 8 => indexed_color(i + 8),
-        vt100::Color::Idx(i) => indexed_color(i),
+        vt100::Color::Idx(i) if bold && i < 8 => indexed_color(i + 8, palette),
+        vt100::Color::Idx(i) => indexed_color(i, palette),
         vt100::Color::Rgb(r, g, b) => Color32::from_rgb(r, g, b),
     }
 }
@@ -333,7 +309,8 @@ pub struct TerminalView {
     pub tunnels: Vec<Option<crate::tunnels::TunnelStatus>>,
     /// Selección: (fila, columna) inicial y final, en coordenadas de pantalla.
     selection: Option<((u16, u16), (u16, u16))>,
-    pub font_size: f32,
+    /// Ajuste del tamaño de letra respecto al del tema (botones A+ / A−).
+    pub font_delta: f32,
     scroll_accum: f32,
     want_focus: bool,
     /// Botón pulsado mientras la aplicación remota controla el ratón.
@@ -360,7 +337,7 @@ impl TerminalView {
             secrets_to_save: vec![],
             tunnels: vec![],
             selection: None,
-            font_size: 14.0,
+            font_delta: 0.0,
             scroll_accum: 0.0,
             want_focus: true,
             mouse_down: None,
@@ -434,10 +411,9 @@ impl TerminalView {
         self.send_raw(data);
     }
 
-    /// Envía un texto tal cual (macros). Los saltos de línea son Intro.
-    pub fn send_text(&mut self, text: &str) {
-        let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        self.send_raw(text.into_bytes());
+    /// Envía una secuencia de teclas ya preparada (macros).
+    pub fn send_macro(&mut self, bytes: Vec<u8>) {
+        self.send_raw(bytes);
     }
 
     pub fn is_connected(&self) -> bool {
@@ -506,7 +482,8 @@ impl TerminalView {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.poll();
 
-        let font = FontId::monospace(self.font_size);
+        let palette = crate::theme::terminal_palette();
+        let font = FontId::monospace((palette.font_size + self.font_delta).clamp(6.0, 60.0));
         let (cell_w, cell_h) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
         let cell_w = cell_w.max(1.0);
         let cell_h = cell_h.max(1.0);
@@ -646,6 +623,8 @@ impl TerminalView {
                     self.scroll_accum -= lines;
                     let count = (lines.abs() as usize).min(20);
                     if app_mouse {
+                        // Un evento por cada ~3 líneas, como una muesca de rueda.
+                        let count = count.div_ceil(3);
                         // La aplicación remota recibe la rueda.
                         let (row, col) = ui
                             .input(|i| i.pointer.hover_pos())
@@ -772,7 +751,7 @@ impl TerminalView {
             return;
         }
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, DEFAULT_BG);
+        painter.rect_filled(rect, 0.0, palette.background);
 
         let selection = self.selection_ordered();
         let in_selection = |row: u16, col: u16| -> bool {
@@ -819,8 +798,8 @@ impl TerminalView {
                 if cell.is_wide_continuation() {
                     continue;
                 }
-                let mut fg = resolve(cell.fgcolor(), DEFAULT_FG, cell.bold());
-                let mut bg = resolve(cell.bgcolor(), DEFAULT_BG, false);
+                let mut fg = resolve(cell.fgcolor(), palette.foreground, cell.bold(), &palette);
+                let mut bg = resolve(cell.bgcolor(), palette.background, false, &palette);
                 if cell.inverse() {
                     std::mem::swap(&mut fg, &mut bg);
                 }
@@ -828,8 +807,8 @@ impl TerminalView {
                     fg = fg.gamma_multiply(0.6);
                 }
                 if in_selection(row, col) {
-                    bg = SELECTION_BG;
-                    fg = Color32::WHITE;
+                    bg = palette.selection_bg;
+                    fg = palette.selection_fg;
                 }
 
                 // Fondo
@@ -837,7 +816,7 @@ impl TerminalView {
                     Some((_, c)) if *c == bg => {}
                     _ => {
                         flush_bg(&mut bg_run, col);
-                        if bg != DEFAULT_BG {
+                        if bg != palette.background {
                             bg_run = Some((col, bg));
                         }
                     }
@@ -893,16 +872,12 @@ impl TerminalView {
                 Vec2::new(cell_w, cell_h),
             );
             if has_focus {
-                painter.rect_filled(
-                    cursor,
-                    0.0,
-                    Color32::from_rgba_unmultiplied(220, 220, 220, 140),
-                );
+                painter.rect_filled(cursor, 0.0, palette.cursor.gamma_multiply(0.6));
             } else {
                 painter.rect_stroke(
                     cursor,
                     0.0,
-                    Stroke::new(1.0, Color32::from_gray(160)),
+                    Stroke::new(1.0, palette.cursor.gamma_multiply(0.7)),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -916,7 +891,7 @@ impl TerminalView {
                 Align2::RIGHT_TOP,
                 format!("↑ historial ({offset} líneas)"),
                 FontId::proportional(12.0),
-                Color32::from_rgb(0xe6, 0xc5, 0x47),
+                crate::theme::warn_color(),
             );
         }
     }
@@ -992,9 +967,15 @@ mod tests {
 
     #[test]
     fn color_cube() {
-        assert_eq!(indexed_color(16), Color32::from_rgb(0, 0, 0));
-        assert_eq!(indexed_color(231), Color32::from_rgb(255, 255, 255));
-        assert_eq!(indexed_color(232), Color32::from_rgb(8, 8, 8));
+        let palette = crate::theme::terminal_palette();
+        assert_eq!(indexed_color(16, &palette), Color32::from_rgb(0, 0, 0));
+        assert_eq!(
+            indexed_color(231, &palette),
+            Color32::from_rgb(255, 255, 255)
+        );
+        assert_eq!(indexed_color(232, &palette), Color32::from_rgb(8, 8, 8));
+        // Los 16 primeros salen del tema.
+        assert_eq!(indexed_color(1, &palette), palette.ansi[1]);
     }
 
     #[cfg(unix)]

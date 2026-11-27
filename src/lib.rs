@@ -2,6 +2,7 @@
 
 pub mod desktop;
 pub mod keys;
+pub mod macros;
 pub mod model;
 pub mod paths;
 pub mod rdp;
@@ -10,6 +11,7 @@ pub mod sftp;
 pub mod ssh;
 pub mod telnet;
 pub mod terminal;
+pub mod theme;
 pub mod trust;
 pub mod tunnels;
 pub mod ui;

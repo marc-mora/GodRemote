@@ -242,7 +242,7 @@ impl KeysWindow {
             let color = if *is_error {
                 ui.visuals().error_fg_color
             } else {
-                egui::Color32::from_rgb(0x8c, 0xc0, 0x6b)
+                crate::theme::ok_color()
             };
             ui.colored_label(color, msg);
         }

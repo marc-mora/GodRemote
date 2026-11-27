@@ -1,8 +1,11 @@
 //! Interfaz gráfica: árbol de equipos, pestañas y diálogos.
 
+pub mod desktop_view;
 pub mod editor;
 pub mod keys_view;
+pub mod macros_view;
 pub mod sftp_view;
+pub mod themes_view;
 pub mod util;
 
 use std::collections::VecDeque;
@@ -14,21 +17,28 @@ use egui::{Color32, RichText};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use crate::desktop::{DesktopBackend, KeyCode};
+use crate::macros::MacroStore;
 use crate::model::{AuthMethod, Node, Protocol, Session, Tree};
 use crate::sftp::SftpSource;
 use crate::ssh::{Credentials, Endpoint, PromptRequest, Prompter, SecretAnswer, SshHandle, Waker};
 use crate::terminal::{ConnState, INITIAL_COLS, INITIAL_ROWS, TerminalView};
+use crate::theme::{Settings, ThemeStore};
+use crate::theme::{ok_color, warn_color};
+use crate::tunnels::TunnelStatus;
 use crate::vault::Vault;
+use desktop_view::{DesktopState, DesktopView};
 use editor::{EditorResult, SessionEditor};
 use keys_view::KeysWindow;
+use macros_view::{MacroRequest, MacrosWindow};
 use sftp_view::{SftpState, SftpView};
-
-const OK_COLOR: Color32 = Color32::from_rgb(0x8c, 0xc0, 0x6b);
-const WARN_COLOR: Color32 = Color32::from_rgb(0xe6, 0xc5, 0x47);
+use themes_view::ThemesWindow;
 
 enum TabKind {
     Terminal(Box<TerminalView>),
     Sftp(Box<SftpView>),
+    /// Escritorio remoto integrado (RDP o VNC).
+    Desktop(Box<DesktopView>),
 }
 
 struct Tab {
@@ -91,6 +101,8 @@ enum TreeAction {
     Select(Uuid),
     Connect(Uuid),
     OpenAs(Uuid, Protocol),
+    /// Abrir una sesión RDP con el cliente integrado (`true`) o el externo.
+    OpenRdp(Uuid, bool),
     Edit(Uuid),
     Duplicate(Uuid),
     Delete(Uuid),
@@ -136,13 +148,35 @@ pub struct App {
     confirm_delete: Option<Uuid>,
     rdp_prompt: Option<RdpPrompt>,
     keys_window: Option<KeysWindow>,
+    themes: ThemeStore,
+    settings: Settings,
+    themes_window: Option<ThemesWindow>,
+    macros: MacroStore,
+    macros_window: Option<MacrosWindow>,
+    /// Macro recién grabada, a la espera de nombre.
+    recorded_macro: Option<RecordedMacro>,
+    /// Espacio disponible para el contenido de una pestaña (en puntos).
+    content_size: egui::Vec2,
     toast: Option<(String, bool, Instant)>,
     quick_connect: String,
 }
 
+struct RecordedMacro {
+    name: String,
+    bytes: Vec<u8>,
+    focused: bool,
+}
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Runtime) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        let themes = ThemeStore::load(&crate::paths::themes_dir());
+        let mut settings = Settings::load(&crate::paths::settings_file());
+        if !themes.exists(&settings.theme) {
+            settings.theme = crate::theme::BASE_NAME.into();
+        }
+        if let Some(theme) = themes.get(&settings.theme) {
+            theme.apply(&cc.egui_ctx);
+        }
         let ctx = cc.egui_ctx.clone();
         let waker: Waker = Arc::new(move || ctx.request_repaint());
         let (prompt_tx, prompt_rx) = std::sync::mpsc::channel();
@@ -195,6 +229,13 @@ impl App {
             confirm_delete: None,
             rdp_prompt: None,
             keys_window: None,
+            themes,
+            settings,
+            themes_window: None,
+            macros: MacroStore::load(&crate::paths::macros_file()).unwrap_or_default(),
+            macros_window: None,
+            recorded_macro: None,
+            content_size: egui::vec2(1024.0, 700.0),
             toast,
             quick_connect: String::new(),
         }
@@ -350,6 +391,55 @@ impl App {
         );
     }
 
+    /// Tamaño (en píxeles) que se pedirá para un escritorio RDP integrado.
+    fn desktop_size(&self, session: &Session) -> (u16, u16) {
+        if session.rdp.fit_window {
+            // El alto descuenta la barra de la pestaña.
+            let w = self.content_size.x.clamp(640.0, 7680.0);
+            let h = (self.content_size.y - 34.0).clamp(480.0, 4320.0);
+            (w as u16, h as u16)
+        } else {
+            (
+                session.rdp.width.clamp(640, 7680) as u16,
+                session.rdp.height.clamp(480, 4320) as u16,
+            )
+        }
+    }
+
+    /// Crea la vista de un escritorio remoto integrado (RDP o VNC).
+    fn new_desktop(&self, session: &Session) -> DesktopView {
+        let password = self
+            .vault
+            .as_ref()
+            .and_then(|v| v.get(&session.password_key()).map(str::to_string));
+        let backend: DesktopBackend = match session.protocol {
+            Protocol::Vnc => crate::vnc::spawn(
+                self.rt.handle(),
+                session.clone(),
+                password,
+                self.prompter.clone(),
+            ),
+            _ => spawn_embedded_rdp(
+                self.rt.handle(),
+                session.clone(),
+                password,
+                self.desktop_size(session),
+                self.prompter.clone(),
+            ),
+        };
+        let clipboard = session.protocol == Protocol::Vnc || session.rdp.clipboard;
+        DesktopView::new(backend, clipboard)
+    }
+
+    fn open_desktop(&mut self, session: Session) {
+        let view = self.new_desktop(&session);
+        self.push_tab(
+            session.display_name(),
+            Some(session),
+            TabKind::Desktop(Box::new(view)),
+        );
+    }
+
     fn open_rdp(&mut self, session: Session) {
         let stored = self
             .vault
@@ -403,9 +493,9 @@ impl App {
         match protocol.unwrap_or(session.protocol) {
             Protocol::Ssh | Protocol::Telnet | Protocol::Serial => self.open_terminal(session),
             Protocol::Sftp => self.open_sftp(session, None),
+            Protocol::Rdp if session.rdp.embedded => self.open_desktop(session),
             Protocol::Rdp => self.open_rdp(session),
-            // Pendiente de integrar.
-            Protocol::Vnc => self.notify("Protocolo aún no disponible", true),
+            Protocol::Vnc => self.open_desktop(session),
         }
     }
 
@@ -421,6 +511,12 @@ impl App {
                 TreeAction::OpenAs(id, protocol) => {
                     if let Some(s) = self.tree.session(id).cloned() {
                         self.connect(s, Some(protocol));
+                    }
+                }
+                TreeAction::OpenRdp(id, embedded) => {
+                    if let Some(mut s) = self.tree.session(id).cloned() {
+                        s.rdp.embedded = embedded;
+                        self.connect(s, None);
                     }
                 }
                 TreeAction::Edit(id) => {
@@ -526,6 +622,14 @@ impl App {
             {
                 self.keys_window = Some(KeysWindow::default());
             }
+            self.macros_menu(ui);
+            if ui
+                .button("🎨 Temas")
+                .on_hover_text("Cambiar o personalizar el aspecto")
+                .clicked()
+            {
+                self.themes_window = Some(ThemesWindow::new(&self.settings.theme));
+            }
             let vault_exists = Vault::exists(&crate::paths::vault_file());
             ui.menu_button("🔐 Baúl", |ui| {
                 if self.vault.is_some() {
@@ -562,6 +666,124 @@ impl App {
         });
     }
 
+    fn macros_menu(&mut self, ui: &mut egui::Ui) {
+        let can_run = self.active_terminal().is_some();
+        let recording = self.active_terminal().is_some_and(|t| t.is_recording());
+        let mut run = None;
+        let mut toggle_recording = false;
+        let mut manage = false;
+        ui.menu_button("⏺ Macros", |ui| {
+            if self.macros.macros.is_empty() {
+                ui.weak("Aún no hay macros");
+            }
+            for m in &self.macros.macros {
+                if ui
+                    .add_enabled(can_run, egui::Button::new(format!("▶ {}", m.name)))
+                    .on_disabled_hover_text("Abre un terminal conectado")
+                    .clicked()
+                {
+                    run = Some(m.id);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            let label = if recording {
+                "⏹ Detener y guardar…"
+            } else {
+                "⏺ Grabar en el terminal activo"
+            };
+            if ui
+                .add_enabled(can_run, egui::Button::new(label))
+                .on_disabled_hover_text("Abre un terminal conectado")
+                .clicked()
+            {
+                toggle_recording = true;
+                ui.close();
+            }
+            if ui.button("Gestionar macros…").clicked() {
+                manage = true;
+                ui.close();
+            }
+        });
+        if let Some(id) = run {
+            self.run_macro(id);
+        }
+        if toggle_recording {
+            let mut finished = None;
+            if let Some(term) = self.active_terminal() {
+                if term.is_recording() {
+                    finished = Some(term.stop_recording());
+                } else {
+                    term.start_recording();
+                    term.request_focus();
+                }
+            }
+            if let Some(bytes) = finished {
+                self.finish_recording(bytes);
+            }
+        }
+        if manage {
+            self.macros_window = Some(MacrosWindow::new(&self.macros, None));
+        }
+    }
+
+    fn recorded_macro_ui(&mut self, ctx: &egui::Context) {
+        let Some(recorded) = &mut self.recorded_macro else {
+            return;
+        };
+        let mut save = false;
+        let mut close = false;
+        egui::Modal::new(egui::Id::unique("recorded_macro")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.heading("Guardar macro");
+            ui.label("Nombre de la macro grabada:");
+            let resp =
+                ui.add(egui::TextEdit::singleline(&mut recorded.name).desired_width(f32::INFINITY));
+            if !recorded.focused {
+                resp.request_focus();
+                recorded.focused = true;
+            }
+            ui.add(
+                egui::Label::new(
+                    RichText::new(crate::macros::encode(&recorded.bytes))
+                        .monospace()
+                        .weak(),
+                )
+                .truncate(),
+            );
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let valid = !recorded.name.trim().is_empty();
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(valid, egui::Button::new("Guardar"))
+                    .clicked()
+                    || (enter && valid)
+                {
+                    save = true;
+                }
+                if ui.button("Descartar").clicked()
+                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    close = true;
+                }
+            });
+        });
+        if save {
+            if let Some(recorded) = self.recorded_macro.take() {
+                self.macros
+                    .add(&recorded.name, crate::macros::encode(&recorded.bytes));
+                match self.macros.save(&crate::paths::macros_file()) {
+                    Ok(()) => self.notify("Macro guardada", false),
+                    Err(e) => self.notify(format!("No se pudo guardar la macro: {e:#}"), true),
+                }
+            }
+            self.focus_active_terminal();
+        } else if close {
+            self.recorded_macro = None;
+            self.focus_active_terminal();
+        }
+    }
+
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         if let Some((_, is_error, at)) = &self.toast {
             let ttl = if *is_error { 15 } else { 6 };
@@ -575,17 +797,17 @@ impl App {
             // Primero el estado del baúl (derecha); el aviso ocupa el resto.
             match &self.vault {
                 Some(v) => ui.colored_label(
-                    OK_COLOR,
+                    ok_color(),
                     format!("🔓 Baúl abierto · {} secreto(s)", v.len()),
                 ),
-                None => ui.colored_label(WARN_COLOR, "🔒 Baúl bloqueado"),
+                None => ui.colored_label(warn_color(), "🔒 Baúl bloqueado"),
             };
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 if let Some((msg, is_error, _)) = &self.toast {
                     let color = if *is_error {
                         ui.visuals().error_fg_color
                     } else {
-                        OK_COLOR
+                        ok_color()
                     };
                     ui.add(egui::Label::new(RichText::new(msg).color(color)).truncate())
                         .on_hover_text(msg);
@@ -651,19 +873,27 @@ impl App {
                     for (i, tab) in self.tabs.iter().enumerate() {
                         let (icon, color) = match &tab.kind {
                             TabKind::Terminal(t) => (
-                                "💻",
+                                tab.session.as_ref().map_or("💻", |s| s.protocol.icon()),
                                 match t.state {
-                                    ConnState::Connecting => WARN_COLOR,
-                                    ConnState::Connected => OK_COLOR,
+                                    ConnState::Connecting => warn_color(),
+                                    ConnState::Connected => ok_color(),
                                     ConnState::Closed(_) => ui.visuals().error_fg_color,
                                 },
                             ),
                             TabKind::Sftp(s) => (
                                 "📂",
                                 match s.state {
-                                    SftpState::Connecting(_) => WARN_COLOR,
-                                    SftpState::Ready => OK_COLOR,
+                                    SftpState::Connecting(_) => warn_color(),
+                                    SftpState::Ready => ok_color(),
                                     SftpState::Closed(_) => ui.visuals().error_fg_color,
+                                },
+                            ),
+                            TabKind::Desktop(d) => (
+                                tab.session.as_ref().map_or("🖥", |s| s.protocol.icon()),
+                                match d.state {
+                                    DesktopState::Connecting(_) => warn_color(),
+                                    DesktopState::Connected => ok_color(),
+                                    DesktopState::Closed(_) => ui.visuals().error_fg_color,
                                 },
                             ),
                         };
@@ -700,12 +930,37 @@ impl App {
     }
 
     fn focus_active_terminal(&mut self) {
-        if let Some(Tab {
-            kind: TabKind::Terminal(t),
-            ..
-        }) = self.tabs.get_mut(self.active)
-        {
-            t.request_focus();
+        match self.tabs.get_mut(self.active).map(|t| &mut t.kind) {
+            Some(TabKind::Terminal(t)) => t.request_focus(),
+            Some(TabKind::Desktop(d)) => d.request_focus(),
+            _ => {}
+        }
+    }
+
+    /// Terminal conectado de la pestaña activa, si lo hay.
+    fn active_terminal(&mut self) -> Option<&mut TerminalView> {
+        match self.tabs.get_mut(self.active).map(|t| &mut t.kind) {
+            Some(TabKind::Terminal(t)) if t.is_connected() => Some(t),
+            _ => None,
+        }
+    }
+
+    fn run_macro(&mut self, id: Uuid) {
+        let Some(text) = self
+            .macros
+            .macros
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.text.clone())
+        else {
+            return;
+        };
+        match self.active_terminal() {
+            Some(term) => {
+                term.send_macro(crate::macros::decode(&text));
+                term.request_focus();
+            }
+            None => self.notify("Abre un terminal conectado para ejecutar la macro", true),
         }
     }
 
@@ -713,7 +968,7 @@ impl App {
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.18);
             ui.label(RichText::new("GodRemote").size(34.0).strong());
-            ui.weak("Gestor de conexiones remotas · SSH · SFTP · RDP");
+            ui.weak("Gestor de conexiones remotas · SSH · SFTP · RDP · VNC · Telnet · Serie");
             ui.add_space(24.0);
             ui.label("Conexión rápida");
             let mut go = None;
@@ -728,7 +983,7 @@ impl App {
                         go = Some(Protocol::Ssh);
                     }
                     for p in Protocol::ALL {
-                        if ui.button(p.label()).clicked() {
+                        if p != Protocol::Serial && ui.button(p.label()).clicked() {
                             go = Some(p);
                         }
                     }
@@ -749,6 +1004,7 @@ impl App {
     fn active_tab_ui(&mut self, ui: &mut egui::Ui) {
         let mut open_sftp: Option<(Session, Option<SshHandle>)> = None;
         let mut reconnect = false;
+        let mut recorded: Option<Vec<u8>> = None;
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
@@ -763,8 +1019,8 @@ impl App {
                             ui.label("Conectando…");
                         }
                         ConnState::Connected => {
-                            status_dot(ui, OK_COLOR);
-                            ui.colored_label(OK_COLOR, "Conectado");
+                            status_dot(ui, ok_color());
+                            ui.colored_label(ok_color(), "Conectado");
                         }
                         ConnState::Closed(_) => {
                             status_dot(ui, ui.visuals().error_fg_color);
@@ -775,14 +1031,52 @@ impl App {
                         }
                     }
                     if let Some(s) = &tab.session {
-                        ui.weak(format!("{}@{}:{}", s.username, s.host, s.port));
-                        if term.state == ConnState::Connected
+                        ui.weak(s.target());
+                        if s.protocol.is_ssh()
+                            && term.state == ConnState::Connected
                             && ui
                                 .button("📂 SFTP")
                                 .on_hover_text("Explorar ficheros sobre esta misma conexión")
                                 .clicked()
                         {
                             open_sftp = Some((s.clone(), term.ssh.clone()));
+                        }
+                        if !term.tunnels.is_empty() {
+                            let active = term
+                                .tunnels
+                                .iter()
+                                .filter(|t| matches!(t, Some(TunnelStatus::Active)))
+                                .count();
+                            let all_ok = active == term.tunnels.len();
+                            let color = if all_ok { ok_color() } else { warn_color() };
+                            let details: Vec<String> = term
+                                .tunnels
+                                .iter()
+                                .enumerate()
+                                .map(|(i, status)| {
+                                    let what =
+                                        s.tunnels.get(i).map(|t| t.describe()).unwrap_or_default();
+                                    match status {
+                                        Some(TunnelStatus::Active) => format!("Activo: {what}"),
+                                        Some(TunnelStatus::Failed(e)) => {
+                                            format!("Error: {what}: {e}")
+                                        }
+                                        None => format!("Pendiente: {what}"),
+                                    }
+                                })
+                                .collect();
+                            ui.colored_label(
+                                color,
+                                format!("Túneles {active}/{}", term.tunnels.len()),
+                            )
+                            .on_hover_text(details.join("\n"));
+                        }
+                    }
+                    if term.is_recording() {
+                        status_dot(ui, ui.visuals().error_fg_color);
+                        ui.label("Grabando macro");
+                        if ui.button("⏹ Detener").clicked() {
+                            recorded = Some(term.stop_recording());
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -791,14 +1085,14 @@ impl App {
                             .on_hover_text("Letra más grande")
                             .clicked()
                         {
-                            term.font_size = (term.font_size + 1.0).min(32.0);
+                            term.font_delta = (term.font_delta + 1.0).min(24.0);
                         }
                         if ui
                             .small_button("A−")
                             .on_hover_text("Letra más pequeña")
                             .clicked()
                         {
-                            term.font_size = (term.font_size - 1.0).max(8.0);
+                            term.font_delta = (term.font_delta - 1.0).max(-8.0);
                         }
                     });
                 });
@@ -806,16 +1100,80 @@ impl App {
                 egui::Frame::NONE.show(ui, |ui| term.ui(ui));
             }
             TabKind::Sftp(view) => view.ui(ui),
+            TabKind::Desktop(view) => {
+                ui.horizontal(|ui| {
+                    match &view.state {
+                        DesktopState::Connecting(_) => {
+                            ui.spinner();
+                            ui.label("Conectando…");
+                        }
+                        DesktopState::Connected => {
+                            status_dot(ui, ok_color());
+                            ui.colored_label(ok_color(), "Conectado");
+                        }
+                        DesktopState::Closed(_) => {
+                            status_dot(ui, ui.visuals().error_fg_color);
+                            ui.colored_label(ui.visuals().error_fg_color, "Desconectado");
+                            if tab.session.is_some() && ui.button("⟳ Reconectar").clicked() {
+                                reconnect = true;
+                            }
+                        }
+                    }
+                    if let Some(s) = &tab.session {
+                        ui.weak(format!("{} · {}", s.protocol.label(), s.target()));
+                    }
+                    if let Some((w, h)) = view.remote_size() {
+                        ui.weak(format!("{w}×{h}"));
+                        if ui
+                            .button("Ctrl+Alt+Supr")
+                            .on_hover_text("Envía Ctrl+Alt+Supr al equipo remoto")
+                            .clicked()
+                        {
+                            view.send_combo(&[KeyCode::Control, KeyCode::Alt, KeyCode::Delete]);
+                            view.request_focus();
+                        }
+                        if ui
+                            .button("⊞ Win")
+                            .on_hover_text("Pulsa la tecla Windows en el equipo remoto")
+                            .clicked()
+                        {
+                            view.send_combo(&[KeyCode::Meta]);
+                            view.request_focus();
+                        }
+                    }
+                });
+                egui::Frame::NONE.show(ui, |ui| view.ui(ui));
+            }
         });
 
         if reconnect && let Some(session) = self.tabs[self.active].session.clone() {
-            match self.new_terminal(&session) {
-                Ok(view) => self.tabs[self.active].kind = TabKind::Terminal(Box::new(view)),
-                Err(e) => self.notify(e, true),
+            if matches!(self.tabs[self.active].kind, TabKind::Desktop(_)) {
+                let view = self.new_desktop(&session);
+                self.tabs[self.active].kind = TabKind::Desktop(Box::new(view));
+            } else {
+                match self.new_terminal(&session) {
+                    Ok(view) => self.tabs[self.active].kind = TabKind::Terminal(Box::new(view)),
+                    Err(e) => self.notify(e, true),
+                }
             }
         }
         if let Some((session, handle)) = open_sftp {
             self.open_sftp(session, handle);
+        }
+        if let Some(bytes) = recorded {
+            self.finish_recording(bytes);
+        }
+    }
+
+    fn finish_recording(&mut self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            self.notify("No se tecleó nada: la macro no se ha guardado", true);
+        } else {
+            self.recorded_macro = Some(RecordedMacro {
+                name: String::new(),
+                bytes,
+                focused: false,
+            });
         }
     }
 
@@ -884,7 +1242,7 @@ impl App {
                          passphrases guardadas (Argon2id + XChaCha20-Poly1305).",
                     );
                     ui.colored_label(
-                        WARN_COLOR,
+                        warn_color(),
                         "Si la olvidas, los secretos guardados no se pueden recuperar.",
                     );
                     ui.add(
@@ -1279,6 +1637,28 @@ fn rdp_error_summary(log: &str) -> String {
     out.join(" · ")
 }
 
+/// Arranca el cliente RDP integrado.
+fn spawn_embedded_rdp(
+    rt: &tokio::runtime::Handle,
+    session: Session,
+    password: Option<String>,
+    size: (u16, u16),
+    prompter: Prompter,
+) -> DesktopBackend {
+    // PROVISIONAL hasta integrar el cliente RDP: cierra con un aviso.
+    let _ = (rt, session, password, size, prompter);
+    let (input, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, events) = std::sync::mpsc::channel();
+    let _ = tx.send(crate::desktop::DesktopEvent::Closed(Some(
+        "cliente RDP integrado pendiente de integrar".into(),
+    )));
+    DesktopBackend {
+        input,
+        events,
+        frame: crate::desktop::Framebuffer::shared(1, 1),
+    }
+}
+
 /// Punto de estado (verde / ámbar / rojo).
 fn status_dot(ui: &mut egui::Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
@@ -1370,7 +1750,18 @@ fn session_row(
                     ui.close();
                 }
             }
-            Protocol::Rdp | Protocol::Vnc | Protocol::Telnet | Protocol::Serial => {}
+            Protocol::Rdp => {
+                let (label, embedded) = if s.rdp.embedded {
+                    ("🖥 Abrir con el cliente externo", false)
+                } else {
+                    ("🖥 Abrir integrado en una pestaña", true)
+                };
+                if ui.button(label).clicked() {
+                    actions.push(TreeAction::OpenRdp(s.id, embedded));
+                    ui.close();
+                }
+            }
+            Protocol::Vnc | Protocol::Telnet | Protocol::Serial => {}
         }
         ui.separator();
         if ui.button("✏ Editar…").clicked() {
@@ -1495,6 +1886,10 @@ impl eframe::App for App {
                     s.poll();
                     secrets.append(&mut s.secrets_to_save);
                 }
+                TabKind::Desktop(d) => {
+                    d.poll();
+                    secrets.append(&mut d.secrets_to_save);
+                }
             }
         }
         // Solo se guardan secretos de sesiones que existen en el árbol.
@@ -1524,6 +1919,7 @@ impl eframe::App for App {
             } else {
                 self.tab_bar(ui);
                 ui.separator();
+                self.content_size = ui.available_size();
                 self.active_tab_ui(ui);
             }
         });
@@ -1549,7 +1945,29 @@ impl eframe::App for App {
             && !win.show(&ctx)
         {
             self.keys_window = None;
+            self.focus_active_terminal();
         }
+        if let Some(win) = &mut self.themes_window
+            && !win.show(&ctx, &mut self.themes, &mut self.settings)
+        {
+            self.themes_window = None;
+            self.focus_active_terminal();
+        }
+        if let Some(win) = &mut self.macros_window {
+            let can_run = matches!(
+                self.tabs.get(self.active).map(|t| &t.kind),
+                Some(TabKind::Terminal(t)) if t.is_connected()
+            );
+            let (open, request) = win.show(&ctx, &mut self.macros, can_run);
+            if !open {
+                self.macros_window = None;
+                self.focus_active_terminal();
+            }
+            if let MacroRequest::Run(id) = request {
+                self.run_macro(id);
+            }
+        }
+        self.recorded_macro_ui(&ctx);
         self.folder_dialog_ui(&ctx);
         self.confirm_delete_ui(&ctx);
         self.rdp_prompt_ui(&ctx);

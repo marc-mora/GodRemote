@@ -11,13 +11,15 @@ use anyhow::{Context, Result, bail};
 use crate::model::Session;
 
 /// Clientes FreeRDP conocidos, por orden de preferencia. El booleano indica
-/// si es FreeRDP 3 (admite `/args-from:stdin`).
+/// si es con seguridad FreeRDP 3 (admite `/args-from:stdin`).
 const FREERDP_CLIENTS: [(&str, bool); 6] = [
     ("xfreerdp3", true),
     ("sdl-freerdp3", true),
     ("wlfreerdp3", true),
-    ("sdl-freerdp", true),
+    // Sin sufijo puede ser la versión 2 o la 3: se usa `/from-stdin`,
+    // que entienden ambas.
     ("xfreerdp", false),
+    ("sdl-freerdp", false),
     ("wlfreerdp", false),
 ];
 
@@ -28,8 +30,16 @@ fn find_in_path(program: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// Busca un cliente FreeRDP instalado.
+/// Busca un cliente FreeRDP instalado. La variable `GODREMOTE_FREERDP`
+/// permite forzar uno concreto (ruta completa).
 pub fn find_freerdp() -> Option<(PathBuf, bool)> {
+    if let Some(forced) = std::env::var_os("GODREMOTE_FREERDP").filter(|v| !v.is_empty()) {
+        let path = PathBuf::from(forced);
+        let v3 = path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().contains('3'));
+        return path.is_file().then_some((path, v3));
+    }
     FREERDP_CLIENTS
         .iter()
         .find_map(|(name, v3)| find_in_path(name).map(|p| (p, *v3)))
@@ -139,22 +149,26 @@ pub fn launch(session: &Session, password: Option<&str>) -> Result<(Child, Optio
              o `brew install freerdp` (macOS)."
         );
     };
-    let args = freerdp_args(session, password);
+    // La contraseña nunca viaja en la línea de órdenes (la verían otros
+    // usuarios del equipo): se entrega por la entrada estándar.
+    let args = freerdp_args(session, None);
     // Un salto de línea rompería el formato de un argumento por línea.
-    if args.iter().any(|a| a.contains(['\n', '\r'])) {
+    if args.iter().any(|a| a.contains(['\n', '\r']))
+        || password.is_some_and(|p| p.contains(['\n', '\r']))
+    {
         bail!("Los datos de la sesión contienen saltos de línea");
     }
     let log_path = dir.join(format!("{}.log", session.id));
     let log = std::fs::File::create(&log_path)?;
     let mut cmd = Command::new(&program);
     cmd.stdout(Stdio::from(log.try_clone()?))
-        .stderr(Stdio::from(log));
+        .stderr(Stdio::from(log))
+        .stdin(Stdio::piped());
 
+    use std::io::Write;
     let child = if v3 {
-        // FreeRDP 3: los argumentos (incluida la contraseña) viajan por stdin
-        // y no quedan visibles en la lista de procesos.
-        use std::io::Write;
-        cmd.arg("/args-from:stdin").stdin(Stdio::piped());
+        // FreeRDP 3: todos los argumentos, contraseña incluida, por stdin.
+        cmd.arg("/args-from:stdin");
         let mut child = cmd
             .spawn()
             .with_context(|| format!("No se pudo ejecutar {}", program.display()))?;
@@ -164,15 +178,29 @@ pub fn launch(session: &Session, password: Option<&str>) -> Result<(Child, Optio
                 payload.push_str(a);
                 payload.push('\n');
             }
+            if let Some(p) = password {
+                payload.push_str(&format!("/p:{p}\n"));
+            }
             stdin.write_all(payload.as_bytes())?;
         }
         child
     } else {
-        // FreeRDP 2 no admite /args-from: la contraseña va en la línea de
-        // órdenes (visible para otros usuarios locales mientras dure).
-        cmd.args(&args).stdin(Stdio::null());
-        cmd.spawn()
-            .with_context(|| format!("No se pudo ejecutar {}", program.display()))?
+        // FreeRDP 2: `/from-stdin` lee la contraseña de la entrada estándar.
+        // Solo pregunta la contraseña si el usuario va en los argumentos.
+        if password.is_some() && session.username.trim().is_empty() {
+            bail!("Indica el usuario en la sesión para conectar con FreeRDP 2");
+        }
+        cmd.args(&args);
+        if password.is_some() {
+            cmd.arg("/from-stdin");
+        }
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("No se pudo ejecutar {}", program.display()))?;
+        if let (Some(mut stdin), Some(p)) = (child.stdin.take(), password) {
+            stdin.write_all(format!("{p}\n").as_bytes())?;
+        }
+        child
     };
     Ok((child, Some(log_path)))
 }

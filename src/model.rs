@@ -172,11 +172,11 @@ impl Tunnel {
     pub fn describe(&self) -> String {
         match self.kind {
             TunnelKind::Local => format!(
-                "-L {}:{} → {}:{}",
+                "-L {}:{} hacia {}:{}",
                 self.listen_host, self.listen_port, self.target_host, self.target_port
             ),
             TunnelKind::Remote => format!(
-                "-R {}:{} → {}:{}",
+                "-R {}:{} hacia {}:{}",
                 self.listen_host, self.listen_port, self.target_host, self.target_port
             ),
             TunnelKind::Dynamic => {
@@ -587,6 +587,24 @@ impl Tree {
             Node::Session(s) => vec![s.id],
             Node::Folder(f) => f.children.iter().flat_map(Tree::session_ids).collect(),
         }
+    }
+
+    /// Sesiones SSH del árbol (id y nombre), candidatas a servir de salto.
+    pub fn ssh_sessions(&self) -> Vec<(Uuid, String)> {
+        fn go(nodes: &[Node], out: &mut Vec<(Uuid, String)>) {
+            for n in nodes {
+                match n {
+                    Node::Folder(f) => go(&f.children, out),
+                    Node::Session(s) if s.protocol.is_ssh() => {
+                        out.push((s.id, format!("{} ({})", s.display_name(), s.target())))
+                    }
+                    Node::Session(_) => {}
+                }
+            }
+        }
+        let mut out = vec![];
+        go(&self.nodes, &mut out);
+        out
     }
 
     /// Lista plana de carpetas con su ruta legible ("Clientes / ACME").
