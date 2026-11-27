@@ -14,4 +14,5 @@ pub mod trust;
 pub mod tunnels;
 pub mod ui;
 pub mod vault;
+pub mod vnc;
 pub mod x11;

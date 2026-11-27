@@ -192,11 +192,9 @@ impl TelnetCodec {
                     reply.extend_from_slice(&[IAC, if accept { DO } else { DONT }, opt]);
                 }
             }
-            WONT => {
-                if self.remote[i] {
-                    self.remote[i] = false;
-                    reply.extend_from_slice(&[IAC, DONT, opt]);
-                }
+            WONT if self.remote[i] => {
+                self.remote[i] = false;
+                reply.extend_from_slice(&[IAC, DONT, opt]);
             }
             _ => {}
         }

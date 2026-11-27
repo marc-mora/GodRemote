@@ -318,7 +318,7 @@ mod tests {
     fn cookie_substitution() {
         let fake = [0xAA; 16];
         let real = [0x55; 16];
-        for order in [b'B', b'l'] {
+        for order in *b"Bl" {
             let (head, rest) = setup(order, COOKIE_PROTOCOL.as_bytes(), &fake);
             let out = rewrite_setup(&head, &rest, &fake, Some(&real)).unwrap();
             let (h2, r2) = setup(order, COOKIE_PROTOCOL.as_bytes(), &real);
