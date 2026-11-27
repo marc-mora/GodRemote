@@ -472,7 +472,19 @@ fn decorate(screen: &vt100::Screen, rows: u16, cols: u16, rules: &Compiled) -> D
             continue;
         }
         let cell_of = |index: usize| ((first + index / width) as u16, (index % width) as u16);
+        let links = if rules.links {
+            crate::highlight::find_links(&line)
+        } else {
+            vec![]
+        };
         for (range, color) in rules.spans(&line) {
+            // Dentro de una dirección web no se resalta nada.
+            if links
+                .iter()
+                .any(|(link, _)| link.start < range.end && range.start < link.end)
+            {
+                continue;
+            }
             for index in range {
                 // Lo que la aplicación remota ya coloreó se respeta.
                 let (r, c) = cell_of(index);
@@ -484,22 +496,20 @@ fn decorate(screen: &vt100::Screen, rows: u16, cols: u16, rules: &Compiled) -> D
                 }
             }
         }
-        if rules.links {
-            for (range, url) in crate::highlight::find_links(&line) {
-                let mut spans = vec![];
-                let mut start = range.start;
-                while start < range.end {
-                    let line_row = start / width;
-                    let end = range.end.min((line_row + 1) * width);
-                    spans.push((
-                        (first + line_row) as u16,
-                        (start - line_row * width) as u16,
-                        (end - line_row * width) as u16,
-                    ));
-                    start = end;
-                }
-                decor.links.push(Link { url, spans });
+        for (range, url) in links {
+            let mut spans = vec![];
+            let mut start = range.start;
+            while start < range.end {
+                let line_row = start / width;
+                let end = range.end.min((line_row + 1) * width);
+                spans.push((
+                    (first + line_row) as u16,
+                    (start - line_row * width) as u16,
+                    (end - line_row * width) as u16,
+                ));
+                start = end;
             }
+            decor.links.push(Link { url, spans });
         }
     }
     decor
@@ -1816,12 +1826,17 @@ mod tests {
         assert_eq!(decor.color(2, 25), Some(HlColor::Green));
         // Sin cambios en pantalla se reutiliza lo calculado.
         assert!(Arc::ptr_eq(&decor, &view.decor(&rules)));
-        feed(&mut view, b"warning\r\n");
+        // Dentro de un enlace no se resalta, aunque contenga una palabra.
+        feed(&mut view, b"warning http://a.example/error ok\r\n");
         let decor = view.decor(&rules);
         assert_eq!(decor.color(3, 0), Some(HlColor::Yellow));
+        assert_eq!(decor.color(3, 25), None);
+        assert_eq!(decor.color(3, 31), Some(HlColor::Green));
         // Al desplazar el historial, los enlaces se mueven con el texto.
         feed(&mut view, "\r\n".repeat(27).as_bytes());
-        assert!(view.decor(&rules).links.is_empty());
+        let decor = view.decor(&rules);
+        assert_eq!(decor.links.len(), 1);
+        assert_eq!(decor.links[0].spans, [(1, 8, 30)]);
         view.parser.screen_mut().set_scrollback(2);
         assert_eq!(view.decor(&rules).links[0].spans, [(0, 4, 100), (1, 0, 24)]);
         assert_eq!(view.decor(&rules).color(2, 0), Some(HlColor::Red));

@@ -368,6 +368,10 @@ impl App {
             theme.apply(&cc.egui_ctx);
         }
         crate::highlight::set(&settings.highlight);
+        // El doble clic se mide entre fotogramas: con el margen habitual de
+        // los sistemas (medio segundo) no se pierde si uno tarda en pintarse.
+        cc.egui_ctx
+            .options_mut(|o| o.input_options.max_double_click_delay = 0.5);
         let ctx = cc.egui_ctx.clone();
         let waker: Waker = Arc::new(move || ctx.request_repaint());
         let (prompt_tx, prompt_rx) = std::sync::mpsc::channel();
@@ -1749,10 +1753,42 @@ impl App {
                                     field.state.store(ui.ctx(), field.response.id);
                                     *focused = true;
                                 } else if field.response.lost_focus() {
-                                    // Intro o un clic fuera lo guardan;
-                                    // Escape lo deja como estaba.
-                                    rename_end =
-                                        Some(!ui.input(|i| i.key_pressed(egui::Key::Escape)));
+                                    let (escape, enter, tab, pointer) = ui.input(|i| {
+                                        (
+                                            i.key_pressed(egui::Key::Escape),
+                                            i.key_pressed(egui::Key::Enter),
+                                            i.key_pressed(egui::Key::Tab),
+                                            i.pointer.any_pressed()
+                                                || i.pointer.any_released()
+                                                || i.pointer.any_down(),
+                                        )
+                                    });
+                                    // La tecla que cierra la edición es del
+                                    // campo: no debe llegar al terminal.
+                                    ui.input_mut(|i| {
+                                        i.events.retain(|event| {
+                                            !matches!(
+                                                event,
+                                                egui::Event::Key {
+                                                    key: egui::Key::Enter | egui::Key::Escape,
+                                                    pressed: true,
+                                                    ..
+                                                }
+                                            )
+                                        })
+                                    });
+                                    if escape {
+                                        // Escape lo deja como estaba.
+                                        rename_end = Some(false);
+                                    } else if enter || tab || pointer {
+                                        // Intro o un clic fuera lo guardan.
+                                        rename_end = Some(true);
+                                    } else {
+                                        // Otro control ha tomado el foco sin
+                                        // que el usuario hiciera nada: se
+                                        // sigue editando.
+                                        field.response.request_focus();
+                                    }
                                 }
                                 return;
                             }

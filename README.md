@@ -11,6 +11,8 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 ![Barra de información del servidor y fondo del terminal](docs/barra-y-fondo.png)
 ![Vista dividida con difusión](docs/vista-dividida.png)
 ![Escribir en varios terminales a la vez](docs/difusion.png)
+![Pestañas con nombre propio, avisos de actividad, enlaces y palabras resaltadas](docs/pestanas-y-enlaces.png)
+![Gestor de túneles](docs/tuneles.png)
 ![Snippets con atajos de teclado](docs/snippets.png)
 ![Escritorio remoto integrado](docs/escritorio.png)
 ![Temas](docs/temas.png)
