@@ -2,6 +2,56 @@
 
 use crate::model::{AuthMethod, Protocol, Session};
 
+/// Colores listos para marcar pestañas (el primero, para producción).
+pub const TAB_COLORS: [(&str, u32); 6] = [
+    ("Rojo", 0xd9453c),
+    ("Naranja", 0xe08a2b),
+    ("Amarillo", 0xd9b93c),
+    ("Verde", 0x4fae5b),
+    ("Azul", 0x3f8fd9),
+    ("Morado", 0x9a63d6),
+];
+
+/// Elección del color con el que se marcan las pestañas: ninguno propio
+/// (casilla sin marcar) o uno de los preparados o cualquier otro. Devuelve
+/// `true` si ha cambiado.
+pub fn tab_color_ui(ui: &mut egui::Ui, label: &str, color: &mut Option<crate::theme::Rgb>) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let mut own = color.is_some();
+        if ui.checkbox(&mut own, label).changed() {
+            *color = own.then_some(crate::theme::Rgb::hex(TAB_COLORS[0].1));
+            changed = true;
+        }
+        if let Some(current) = color {
+            for (name, value) in TAB_COLORS {
+                let preset = crate::theme::Rgb::hex(value);
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+                ui.painter()
+                    .rect_filled(rect.shrink(2.0), 3.0, preset.color32());
+                if *current == preset {
+                    ui.painter().rect_stroke(
+                        rect.shrink(1.0),
+                        3.0,
+                        egui::Stroke::new(1.5, ui.visuals().strong_text_color()),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                if response.on_hover_text(name).clicked() {
+                    *current = preset;
+                    changed = true;
+                }
+            }
+            changed |= ui
+                .color_edit_button_srgb(&mut current.0)
+                .on_hover_text("Otro color")
+                .changed();
+        }
+    });
+    changed
+}
+
 pub fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;

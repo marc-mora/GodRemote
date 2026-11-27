@@ -76,6 +76,16 @@ struct Tab {
     x_server: bool,
 }
 
+/// Pestañas que se han pedido cerrar y tienen sesiones conectadas: se
+/// pregunta antes.
+struct PendingClose {
+    ids: Vec<u64>,
+    /// Títulos de las que siguen conectadas.
+    live: Vec<String>,
+    /// El botón «Cancelar» ya tiene el foco.
+    focused: bool,
+}
+
 /// Acción pedida desde el menú contextual de una pestaña.
 enum TabAction {
     Rename(usize),
@@ -272,6 +282,12 @@ pub struct App {
     tunnels_window: Option<TunnelsWindow>,
     /// Faltan por iniciar los túneles marcados para arrancar solos.
     pending_autostart: bool,
+    pending_close: Option<PendingClose>,
+    /// Se ha pedido salir con sesiones vivas; `Some(true)` cuando el botón
+    /// «Cancelar» de la pregunta ya tiene el foco.
+    pending_quit: Option<bool>,
+    /// El usuario ha confirmado que quiere salir.
+    quit_confirmed: bool,
     /// Servidor X integrado (arranca con la primera aplicación gráfica).
     xhost: Arc<crate::xhost::XHost>,
     /// Tamaño que pide la pestaña del servidor X y desde cuándo: se aplica
@@ -375,6 +391,7 @@ impl App {
             theme.apply(&cc.egui_ctx);
         }
         crate::highlight::set(&settings.highlight);
+        crate::terminal::set_paste_guard(settings.confirm_paste);
         // El doble clic se mide entre fotogramas: con el margen habitual de
         // los sistemas (medio segundo) no se pierde si uno tarda en pintarse.
         cc.egui_ctx
@@ -462,6 +479,9 @@ impl App {
             tunnel_runs: HashMap::new(),
             tunnels_window: None,
             pending_autostart: true,
+            pending_close: None,
+            pending_quit: None,
+            quit_confirmed: false,
             xhost,
             x_resize: None,
         }
@@ -1205,6 +1225,7 @@ impl App {
             theme.apply(ctx);
         }
         crate::highlight::set(&self.settings.highlight);
+        crate::terminal::set_paste_guard(self.settings.confirm_paste);
         self.xhost.configure(
             self.settings.x_server.embedded,
             self.settings.x_server.listen_local,
@@ -1761,7 +1782,7 @@ impl App {
             self.tab_strip(ui, &mut close);
         });
         if let Some(i) = close {
-            self.close_tab(i);
+            self.request_close(&[i]);
         }
     }
 
@@ -1934,6 +1955,18 @@ impl App {
                             }
                         });
                         rects.push(scope.response.rect);
+                        // Color de la carpeta o del equipo, bajo la pestaña.
+                        if let Some(color) = tab.session.as_ref().and_then(|s| s.color) {
+                            let r = scope.response.rect;
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_max(
+                                    egui::pos2(r.left(), r.bottom() - 1.0),
+                                    egui::pos2(r.right(), r.bottom() + 2.0),
+                                ),
+                                1.0,
+                                color.color32(),
+                            );
+                        }
                         ui.separator();
                     }
                 });
@@ -2032,22 +2065,186 @@ impl App {
             }
             TabAction::MoveFirst(i) => self.move_tab(i, 0),
             TabAction::MoveLast(i) => self.move_tab(i, self.tabs.len().saturating_sub(1)),
-            TabAction::Close(i) => self.close_tab(i),
+            TabAction::Close(i) => self.request_close(&[i]),
             TabAction::CloseOthers(i) => {
-                let Some(keep) = self.tabs.get(i).map(|t| t.id) else {
-                    return;
-                };
-                for index in (0..self.tabs.len()).rev() {
-                    if self.tabs[index].id != keep {
-                        self.close_tab(index);
+                let others: Vec<usize> = (0..self.tabs.len()).filter(|j| *j != i).collect();
+                self.request_close(&others);
+            }
+            TabAction::CloseRight(i) => {
+                let right: Vec<usize> = (i + 1..self.tabs.len()).collect();
+                self.request_close(&right);
+            }
+        }
+    }
+
+    /// Cerrar esta pestaña interrumpe algo: una sesión remota conectada, un
+    /// escritorio o aplicaciones gráficas abiertas.
+    fn tab_is_live(&self, tab: &Tab) -> bool {
+        match &tab.kind {
+            TabKind::Terminal(term) => tab.session.is_some() && term.is_connected(),
+            TabKind::Desktop(_) if tab.x_server => self
+                .xhost
+                .running()
+                .is_some_and(|server| server.client_count() > 0),
+            TabKind::Desktop(view) => view.state == DesktopState::Connected,
+            TabKind::Sftp(_) => false,
+        }
+    }
+
+    /// Cierra las pestañas indicadas; si alguna tiene una sesión viva y los
+    /// ajustes lo piden, pregunta antes.
+    fn request_close(&mut self, indices: &[usize]) {
+        let tabs: Vec<&Tab> = indices.iter().filter_map(|i| self.tabs.get(*i)).collect();
+        let ids: Vec<u64> = tabs.iter().map(|t| t.id).collect();
+        let live: Vec<String> = tabs
+            .iter()
+            .filter(|t| self.tab_is_live(t))
+            .map(|t| t.title.clone())
+            .collect();
+        if live.is_empty() || !self.settings.confirm_close {
+            self.close_tabs(&ids);
+        } else {
+            self.pending_close = Some(PendingClose {
+                ids,
+                live,
+                focused: false,
+            });
+        }
+    }
+
+    fn close_tabs(&mut self, ids: &[u64]) {
+        for id in ids {
+            if let Some(index) = self.tabs.iter().position(|t| t.id == *id) {
+                self.close_tab(index);
+            }
+        }
+    }
+
+    /// Pregunta antes de cerrar pestañas con sesiones vivas. El foco va a
+    /// «Cancelar»: una tecla pulsada de más no cierra nada (ni llega al
+    /// terminal).
+    fn close_confirm_ui(&mut self, ctx: &egui::Context) {
+        let Some(pending) = &mut self.pending_close else {
+            return;
+        };
+        let mut decision = None;
+        egui::Modal::new(egui::Id::unique("close_confirm")).show(ctx, |ui| {
+            ui.set_width(400.0);
+            match (pending.ids.len(), pending.live.as_slice()) {
+                (1, [title]) => {
+                    ui.heading(format!("¿Cerrar «{title}»?"));
+                    ui.label("Su sesión sigue conectada: lo que esté en marcha se interrumpirá.");
+                }
+                (total, live) => {
+                    ui.heading(format!("¿Cerrar {total} pestañas?"));
+                    ui.label(format!(
+                        "{} de ellas siguen conectadas; lo que esté en marcha se interrumpirá:",
+                        live.len()
+                    ));
+                    for title in live.iter().take(8) {
+                        ui.label(format!("  • {title}"));
+                    }
+                    if live.len() > 8 {
+                        ui.weak(format!("  … y {} más", live.len() - 8));
                     }
                 }
             }
-            TabAction::CloseRight(i) => {
-                for index in (i + 1..self.tabs.len()).rev() {
-                    self.close_tab(index);
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cerrar").clicked() {
+                    decision = Some(true);
                 }
+                let cancel = ui.button("Cancelar");
+                if !pending.focused {
+                    cancel.request_focus();
+                    pending.focused = true;
+                }
+                if cancel.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    decision = Some(false);
+                }
+            });
+        });
+        if let Some(close) = decision {
+            let pending = self.pending_close.take();
+            if close && let Some(pending) = pending {
+                self.close_tabs(&pending.ids);
             }
+            self.focus_active_terminal();
+        }
+    }
+
+    /// Sesiones conectadas y túneles en marcha: lo que se perdería al salir.
+    fn live_counts(&self) -> (usize, usize) {
+        let sessions = self.tabs.iter().filter(|t| self.tab_is_live(t)).count();
+        let tunnels = self
+            .tunnel_runs
+            .values()
+            .filter(|run| run.running.is_running())
+            .count();
+        (sessions, tunnels)
+    }
+
+    /// Al pedir el cierre de la ventana con sesiones vivas, pregunta antes.
+    fn quit_guard(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested())
+            && !self.quit_confirmed
+            && self.settings.confirm_close
+        {
+            let (sessions, tunnels) = self.live_counts();
+            if sessions + tunnels > 0 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.pending_quit.get_or_insert(false);
+            }
+        }
+        if self.pending_quit.is_none() {
+            return;
+        }
+        let (sessions, tunnels) = self.live_counts();
+        let Some(focused) = &mut self.pending_quit else {
+            return;
+        };
+        let mut decision = None;
+        egui::Modal::new(egui::Id::unique("quit_confirm")).show(ctx, |ui| {
+            ui.set_width(400.0);
+            ui.heading("¿Salir de GodRemote?");
+            let mut parts = vec![];
+            match sessions {
+                0 => {}
+                1 => parts.push("1 sesión conectada".to_string()),
+                n => parts.push(format!("{n} sesiones conectadas")),
+            }
+            match tunnels {
+                0 => {}
+                1 => parts.push("1 túnel en marcha".to_string()),
+                n => parts.push(format!("{n} túneles en marcha")),
+            }
+            ui.label(format!("Hay {}: se cerrarán.", parts.join(" y ")));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Salir").clicked() {
+                    decision = Some(true);
+                }
+                let cancel = ui.button("Cancelar");
+                if !*focused {
+                    cancel.request_focus();
+                    *focused = true;
+                }
+                if cancel.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    decision = Some(false);
+                }
+            });
+        });
+        match decision {
+            Some(true) => {
+                self.pending_quit = None;
+                self.quit_confirmed = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Some(false) => {
+                self.pending_quit = None;
+                self.focus_active_terminal();
+            }
+            None => {}
         }
     }
 
@@ -3566,6 +3763,20 @@ impl eframe::App for App {
                 if tiles.len() >= 2 && tiles.contains(&self.active) {
                     self.split_view_ui(ui, &tiles);
                 } else {
+                    // El color de la carpeta o del equipo, bien a la vista
+                    // sobre lo que se está escribiendo.
+                    if let Some(color) = self
+                        .tabs
+                        .get(self.active)
+                        .and_then(|t| t.session.as_ref())
+                        .and_then(|s| s.color)
+                    {
+                        let (band, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 3.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(band, 1.0, color.color32());
+                    }
                     self.active_tab_ui(ui);
                 }
             }
@@ -3620,6 +3831,7 @@ impl eframe::App for App {
             if changed {
                 self.settings.highlight.sanitize();
                 crate::highlight::set(&self.settings.highlight);
+                crate::terminal::set_paste_guard(self.settings.confirm_paste);
                 self.xhost.configure(
                     self.settings.x_server.embedded,
                     self.settings.x_server.listen_local,
@@ -3703,6 +3915,8 @@ impl eframe::App for App {
             }
         }
         self.tunnels_window_ui(&ctx);
+        self.close_confirm_ui(&ctx);
+        self.quit_guard(&ctx);
         self.recorded_macro_ui(&ctx);
         self.snippet_prompt_ui(&ctx);
         if let Some(editor) = &mut self.folder_editor {

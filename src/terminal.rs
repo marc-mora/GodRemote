@@ -400,6 +400,19 @@ fn find_all(line: &[char], needle: &[char]) -> Vec<usize> {
         .collect()
 }
 
+/// Pedir confirmación antes de pegar varias líneas (ajuste de la aplicación).
+static PASTE_GUARD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Activa o desactiva la confirmación al pegar varias líneas.
+pub fn set_paste_guard(enabled: bool) {
+    PASTE_GUARD.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// El texto tiene más de una línea (un salto final no cuenta).
+fn is_multiline(text: &str) -> bool {
+    text.trim_end_matches(['\r', '\n']).contains(['\r', '\n'])
+}
+
 /// Un enlace visible en pantalla.
 struct Link {
     url: String,
@@ -548,6 +561,9 @@ pub struct TerminalView {
     decor: Option<(DecorKey, Arc<Decor>)>,
     /// Enlace sobre el que se abrió el menú contextual.
     menu_link: Option<String>,
+    /// Texto de varias líneas a la espera de que el usuario confirme que
+    /// quiere pegarlo.
+    pending_paste: Option<String>,
     /// Avisos para el usuario (los recoge la aplicación).
     pub notices: Vec<String>,
     /// La sesión llegó a conectarse: si después se cierra con error es una
@@ -601,6 +617,7 @@ impl TerminalView {
             generation: 0,
             decor: None,
             menu_link: None,
+            pending_paste: None,
             notices: vec![],
             was_connected: false,
             log: None,
@@ -946,6 +963,109 @@ impl TerminalView {
         self.recording.take().unwrap_or_default()
     }
 
+    /// Pegado hecho por el usuario: si son varias líneas se pregunta antes,
+    /// porque en una shell cada una se ejecutaría según llega.
+    fn user_paste(&mut self, text: String) {
+        if PASTE_GUARD.load(std::sync::atomic::Ordering::Relaxed) && is_multiline(&text) {
+            self.pending_paste = Some(text);
+        } else {
+            self.input(TermInput::Paste(text));
+        }
+    }
+
+    /// Hay un pegado a la espera de confirmación.
+    pub fn is_confirming_paste(&self) -> bool {
+        self.pending_paste.is_some()
+    }
+
+    /// Resuelve el pegado pendiente: lo envía o lo descarta.
+    fn resolve_paste(&mut self, accept: bool) {
+        if let Some(text) = self.pending_paste.take()
+            && accept
+        {
+            self.input(TermInput::Paste(text));
+        }
+        self.want_focus = true;
+    }
+
+    /// Diálogo de confirmación del pegado de varias líneas.
+    fn paste_dialog(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let Some(text) = &self.pending_paste else {
+            return;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let (accept_key, cancel_key) = ui.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, Key::Enter),
+                i.consume_key(egui::Modifiers::NONE, Key::Escape),
+            )
+        });
+        let mut decision = if cancel_key {
+            Some(false)
+        } else if accept_key {
+            Some(true)
+        } else {
+            None
+        };
+        let width = 520.0_f32.min(rect.width() - 24.0).max(200.0);
+        egui::Area::new(ui.scope_id().with("paste_confirm"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(Pos2::new(
+                rect.center().x - width / 2.0,
+                rect.top() + (rect.height() * 0.18).min(90.0),
+            ))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::window(ui.style()).show(ui, |ui| {
+                    ui.set_width(width);
+                    ui.colored_label(
+                        crate::theme::warn_color(),
+                        format!(
+                            "⚠ Vas a pegar {} líneas ({} caracteres)",
+                            lines.len(),
+                            text.chars().count()
+                        ),
+                    );
+                    ui.weak(
+                        "En una shell, cada línea se ejecuta según llega. Revisa lo que hay \
+                         en el portapapeles antes de enviarlo.",
+                    );
+                    egui::Frame::NONE
+                        .fill(ui.visuals().extreme_bg_color)
+                        .inner_margin(6.0)
+                        .show(ui, |ui| {
+                            egui::ScrollArea::both()
+                                .max_height(170.0)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    const SHOWN: usize = 12;
+                                    for line in lines.iter().take(SHOWN) {
+                                        let line: String = line.chars().take(200).collect();
+                                        ui.add(
+                                            egui::Label::new(egui::RichText::new(line).monospace())
+                                                .wrap_mode(egui::TextWrapMode::Extend),
+                                        );
+                                    }
+                                    if lines.len() > SHOWN {
+                                        ui.weak(format!("… y {} líneas más", lines.len() - SHOWN));
+                                    }
+                                });
+                        });
+                    ui.horizontal(|ui| {
+                        if ui.button("Pegar").clicked() {
+                            decision = Some(true);
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            decision = Some(false);
+                        }
+                        ui.weak("Intro pega · Esc cancela");
+                    });
+                });
+            });
+        if let Some(accept) = decision {
+            self.resolve_paste(accept);
+        }
+    }
+
     pub fn paste(&mut self, text: &str) {
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
         if self.parser.screen().bracketed_paste() {
@@ -1220,7 +1340,8 @@ impl TerminalView {
         }
 
         // --- Teclado ------------------------------------------------------
-        if has_focus {
+        // (Con un pegado por confirmar, las teclas son para su diálogo.)
+        if has_focus && self.pending_paste.is_none() {
             let events = ui.input(|i| i.events.clone());
             for event in events {
                 match event {
@@ -1232,7 +1353,7 @@ impl TerminalView {
                         }
                         self.input(TermInput::Bytes(text.into_bytes()));
                     }
-                    Event::Paste(text) => self.input(TermInput::Paste(text)),
+                    Event::Paste(text) => self.user_paste(text),
                     Event::Copy => match self.selected_text() {
                         Some(text) => {
                             ui.ctx().copy_text(text);
@@ -1521,6 +1642,7 @@ impl TerminalView {
             );
         }
         self.search_bar(ui, rect);
+        self.paste_dialog(ui, rect);
     }
 
     /// Barra de búsqueda, superpuesta en la esquina superior derecha.
@@ -1848,6 +1970,31 @@ mod tests {
         });
         let decor = view.decor(&off);
         assert!(decor.links.is_empty() && decor.colors.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn multiline_pastes_wait_for_confirmation() {
+        assert!(!is_multiline("una sola línea"));
+        assert!(!is_multiline("con salto final\n"));
+        assert!(is_multiline("uno\ndos"));
+        assert!(is_multiline("uno\r\ndos\r\n"));
+
+        let (mut view, mut sent, _events) = fake_terminal();
+        // Una línea se pega sin más.
+        view.user_paste("ls -l".into());
+        assert_eq!(sent_bytes(&mut sent), [b"ls -l".to_vec()]);
+        // Varias: no se envía nada hasta confirmar.
+        view.user_paste("rm -rf a\nrm -rf b\n".into());
+        assert!(view.is_confirming_paste());
+        assert!(sent_bytes(&mut sent).is_empty());
+        // Cancelar lo descarta.
+        view.resolve_paste(false);
+        assert!(!view.is_confirming_paste());
+        assert!(sent_bytes(&mut sent).is_empty());
+        // Aceptar lo envía entero.
+        view.user_paste("echo a\necho b".into());
+        view.resolve_paste(true);
+        assert_eq!(sent_bytes(&mut sent), [b"echo a\recho b".to_vec()]);
     }
 
     #[test]

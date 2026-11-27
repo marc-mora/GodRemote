@@ -25,6 +25,7 @@ pub struct FolderEditor {
     define_jumps: bool,
     jumps: Vec<Uuid>,
     hide_bar: bool,
+    color: Option<crate::theme::Rgb>,
     define_backdrop: bool,
     backdrop: Backdrop,
     backdrop_ui: BackdropEditor,
@@ -68,6 +69,7 @@ impl FolderEditor {
             define_jumps: d.jumps.is_some(),
             jumps: d.jumps.clone().unwrap_or_default(),
             hide_bar: d.server_info == Some(false),
+            color: d.color,
             define_backdrop: d.backdrop.is_some(),
             backdrop: d.backdrop.clone().unwrap_or_default(),
             backdrop_ui: BackdropEditor::default(),
@@ -92,6 +94,7 @@ impl FolderEditor {
             jumps: self.define_jumps.then(|| self.jumps.clone()),
             backdrop: self.define_backdrop.then_some(backdrop),
             server_info: self.hide_bar.then_some(false),
+            color: self.color,
         }
     }
 
@@ -195,6 +198,11 @@ impl FolderEditor {
                 ui.checkbox(
                     &mut self.hide_bar,
                     "Sin barra de información del servidor en estos equipos",
+                );
+                super::util::tab_color_ui(
+                    ui,
+                    "Marcar con un color las pestañas de estos equipos",
+                    &mut self.color,
                 );
                 ui.checkbox(
                     &mut self.define_backdrop,

@@ -1203,6 +1203,13 @@ pub struct Settings {
     /// Palabras resaltadas y enlaces en los terminales.
     #[serde(rename = "resaltado")]
     pub highlight: crate::highlight::Highlight,
+    /// Preguntar antes de pegar varias líneas en un terminal.
+    #[serde(rename = "confirmar_pegado")]
+    pub confirm_paste: bool,
+    /// Preguntar antes de cerrar pestañas (o la aplicación) con sesiones
+    /// conectadas.
+    #[serde(rename = "confirmar_cierre")]
+    pub confirm_close: bool,
 }
 
 /// Dónde se muestran las aplicaciones gráficas que llegan por X11.
@@ -1244,6 +1251,8 @@ impl Default for Settings {
             activity_notice: true,
             highlight: Default::default(),
             x_server: Default::default(),
+            confirm_paste: true,
+            confirm_close: true,
         }
     }
 }
@@ -1465,6 +1474,8 @@ mod tests {
             reconnect_attempts: 3,
             restore_tabs: true,
             editor: "code -w".into(),
+            confirm_paste: false,
+            confirm_close: false,
             x_server: XServerSettings {
                 embedded: !cfg!(windows),
                 listen_local: true,

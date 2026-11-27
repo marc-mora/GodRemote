@@ -291,6 +291,18 @@ pub struct Session {
     /// Fondo del terminal propio de este equipo; sin él se usa el del tema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backdrop: Option<crate::backdrop::Backdrop>,
+    /// Color con el que se marcan sus pestañas; sin él, el de su carpeta.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<crate::theme::Rgb>,
+    /// Órdenes que se envían al terminal nada más conectar (una por línea).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub on_connect: String,
+    /// Reenviar el agente SSH a este equipo (como `ssh -A`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub agent_forwarding: bool,
+    /// Conectar directamente aunque haya un proxy de salida en los ajustes.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bypass_proxy: bool,
     pub notes: String,
 }
 
@@ -316,6 +328,10 @@ impl Default for Session {
             serial: SerialOptions::default(),
             server_info: true,
             backdrop: None,
+            color: None,
+            on_connect: String::new(),
+            agent_forwarding: false,
+            bypass_proxy: false,
             notes: String::new(),
         }
     }
@@ -439,6 +455,9 @@ pub struct FolderDefaults {
     /// `Some(false)`: sin barra de información en estos equipos.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_info: Option<bool>,
+    /// Color de las pestañas de los equipos que no tengan el suyo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<crate::theme::Rgb>,
 }
 
 impl FolderDefaults {
@@ -458,6 +477,8 @@ pub struct Inherited {
     pub backdrop: Option<String>,
     /// Carpeta que desactiva la barra de información.
     pub server_info_off: Option<String>,
+    /// (carpeta, color de las pestañas).
+    pub color: Option<(String, crate::theme::Rgb)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -631,6 +652,11 @@ impl Tree {
             if out.backdrop.is_none() && d.backdrop.is_some() {
                 out.backdrop = Some(name.clone());
             }
+            if out.color.is_none()
+                && let Some(color) = d.color
+            {
+                out.color = Some((name.clone(), color));
+            }
             if out.server_info_off.is_none() && d.server_info == Some(false) {
                 out.server_info_off = Some(name);
             }
@@ -668,6 +694,9 @@ impl Tree {
             if !backdrop_done && let Some(backdrop) = &d.backdrop {
                 out.backdrop = Some(backdrop.clone());
                 backdrop_done = true;
+            }
+            if out.color.is_none() {
+                out.color = d.color;
             }
             if d.server_info == Some(false) {
                 out.server_info = false;
@@ -1008,6 +1037,7 @@ mod tests {
                     ..Default::default()
                 }),
                 server_info: None,
+                color: Some(crate::theme::Rgb::hex(0xcc3333)),
             };
         }
         if let Some(Node::Folder(f)) = tree.find_mut(web) {
@@ -1031,6 +1061,7 @@ mod tests {
         assert_eq!(r.jumps, vec![bastion.id]);
         assert_eq!(r.backdrop.as_ref().unwrap().text, "PRODUCCIÓN");
         assert!(!r.server_info);
+        assert_eq!(r.color, Some(crate::theme::Rgb::hex(0xcc3333)));
         // Sus secretos son los de la carpeta que define la autenticación.
         assert_eq!(r.password_key(), format!("{prod}/password"));
         assert_eq!(r.passphrase_key(), format!("{prod}/passphrase"));
@@ -1044,6 +1075,7 @@ mod tests {
         own.username = "root".into();
         own.auth = AuthMethod::Password;
         own.backdrop = Some(Default::default());
+        own.color = Some(crate::theme::Rgb::hex(0x3366cc));
         tree.upsert_session(Some(prod), own.clone());
         let r = tree.resolved_session(own.id).unwrap();
         assert_eq!(
@@ -1052,6 +1084,7 @@ mod tests {
         );
         assert!(r.jumps.is_empty() && r.server_info);
         assert_eq!(r.backdrop, Some(Default::default()));
+        assert_eq!(r.color, Some(crate::theme::Rgb::hex(0x3366cc)));
         assert_eq!(r.password_key(), format!("{}/password", own.id));
 
         // Fuera de las carpetas no se hereda nada, aunque se pida.
@@ -1069,6 +1102,7 @@ mod tests {
         assert_eq!(i.username, Some(("Web".into(), "www".into())));
         assert_eq!(i.auth.as_ref().map(|a| a.0.as_str()), Some("Producción"));
         assert_eq!(i.jumps.as_ref().map(|j| j.0.as_str()), Some("Producción"));
+        assert_eq!(i.color.as_ref().map(|c| c.0.as_str()), Some("Producción"));
         assert_eq!(i.backdrop.as_deref(), Some("Producción"));
         assert_eq!(i.server_info_off.as_deref(), Some("Web"));
         assert_eq!(tree.inherited(None), Inherited::default());

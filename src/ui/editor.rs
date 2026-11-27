@@ -752,11 +752,19 @@ impl SessionEditor {
     fn terminal_look(&mut self, ui: &mut egui::Ui, tree: &Tree) {
         let inherited = tree.inherited(self.parent);
         let s = &mut self.session;
-        let configured = s.backdrop.is_some() || !s.server_info;
-        egui::CollapsingHeader::new("Terminal: barra de información y fondo")
+        let configured = s.backdrop.is_some() || !s.server_info || s.color.is_some();
+        egui::CollapsingHeader::new("Terminal: color de la pestaña, barra y fondo")
             .id_salt("terminal_look")
             .default_open(configured)
             .show(ui, |ui| {
+                super::util::tab_color_ui(ui, "Color propio para su pestaña", &mut s.color);
+                if let Some((folder, _)) = &inherited.color
+                    && s.color.is_none()
+                {
+                    ui.weak(format!(
+                        "Sin color propio se usa el de la carpeta «{folder}»."
+                    ));
+                }
                 if s.protocol == Protocol::Ssh {
                     ui.checkbox(
                         &mut s.server_info,

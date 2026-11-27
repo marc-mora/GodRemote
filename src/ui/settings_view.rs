@@ -76,6 +76,24 @@ impl SettingsWindow {
                      otra, y lleva una campana si la ha hecho sonar",
                         );
                         ui.separator();
+                        ui.strong("Protecciones");
+                        ui.checkbox(
+                            &mut settings.confirm_paste,
+                            "Preguntar antes de pegar varias líneas en un terminal",
+                        )
+                        .on_hover_text(
+                            "En una shell cada línea se ejecuta según llega: el aviso enseña \
+                             lo que hay en el portapapeles antes de enviarlo",
+                        );
+                        ui.checkbox(
+                            &mut settings.confirm_close,
+                            "Preguntar antes de cerrar pestañas con sesiones conectadas",
+                        )
+                        .on_hover_text(
+                            "También al salir de GodRemote con sesiones conectadas o túneles \
+                             en marcha",
+                        );
+                        ui.separator();
                         ui.strong("SFTP");
                         ui.horizontal(|ui| {
                             ui.label("Editor de los ficheros remotos");
