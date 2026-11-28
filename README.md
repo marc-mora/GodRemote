@@ -1,5 +1,7 @@
 # GodRemote
 
+[English](README.en.md) · **Español**
+
 Gestor de conexiones remotas escrito en Rust, al estilo de MobaXterm: un árbol
 jerárquico de equipos, terminales con pestañas (SSH, Telnet, puerto serie),
 explorador SFTP, escritorios remotos integrados (RDP y VNC), servidor X propio
@@ -8,8 +10,10 @@ claves, autenticación SSH con certificados, segundo factor (TOTP) y llaves
 de seguridad, snippets con atajos, vista dividida y escritura simultánea en
 varios terminales, disparadores, grabación de sesiones e historial de
 órdenes, panel de estado de los equipos de una carpeta, ajustes heredados
-por carpeta, importación desde otras herramientas, temas personalizables y
-un baúl cifrado para las credenciales.
+por carpeta, importación desde otras herramientas, sincronización cifrada
+de la configuración entre tus equipos, carpetas de equipos compartidas con
+compañeros, temas personalizables, interfaz en español y en inglés y un baúl
+cifrado para las credenciales.
 
 **Descargas:** en la
 [última versión publicada](https://github.com/marc-mora/GodRemote/releases/latest)
@@ -44,6 +48,8 @@ ejecutables no están firmados: Windows y macOS avisan la primera vez.
 | **Equipos** | Árbol de carpetas y subcarpetas, búsqueda, mover, duplicar, renombrar y eliminar. Conexión rápida `usuario@host[:puerto]`. |
 | **Carpetas con valores** | Una carpeta puede dar a sus equipos el usuario, la autenticación, los saltos, el fondo del terminal y la barra de información. |
 | **Importar y copiar** | Importa equipos de `~/.ssh/config`, PuTTY y MobaXterm. Copia de seguridad de toda la configuración en un solo fichero. |
+| **Sincronización** | La configuración (equipos, snippets, túneles, temas, ajustes y el baúl) se mantiene igual en todos tus equipos a través de una carpeta que ya repliques (Dropbox, Syncthing, una unidad de red…), en un único fichero cifrado. Fusión elemento a elemento; los cambios que chocan se preguntan. |
+| **Carpetas compartidas** | Publica una carpeta de equipos en un fichero cifrado para tus compañeros (sin contraseñas ni órdenes) o suscríbete a la de otro: aparece en el árbol, de solo lectura, y se actualiza sola. |
 | **SSH** | Terminal integrado (xterm-256color, historial de 10 000 líneas, selección y copiar/pegar, ratón para `htop`, `mc`, `vim`…). |
 | **Autenticación SSH** | Contraseña, keyboard-interactive (PAM, códigos OTP), clave privada (OpenSSH, PEM, PuTTY `.ppk`), certificados OpenSSH, agente SSH (el de OpenSSH y, en Windows, Pageant) y llaves de seguridad FIDO2 a través del agente. El código del segundo factor (TOTP) puede rellenarse solo al conectar. |
 | **Saltos (bastiones)** | Cada equipo tiene su lista ordenada de saltos SSH, como `ProxyJump a,b,c`. Vale para SSH, SFTP, Telnet, VNC y RDP integrado. |
@@ -70,6 +76,7 @@ ejecutables no están firmados: Windows y macOS avisan la primera vez.
 | **Fondo del terminal** | Un texto, un dibujo ASCII o una imagen detrás del texto, con la opacidad que se quiera. Por tema o por equipo. |
 | **Claves** | Lista las claves de `~/.ssh` y las propias, con sus certificados, y lo que hay cargado en el agente; genera pares Ed25519 / ECDSA (con passphrase opcional), importa claves y copia la pública. |
 | **Credenciales** | Baúl cifrado con contraseña maestra (Argon2id + XChaCha20-Poly1305). Las contraseñas solo se guardan tras una autenticación correcta. Se bloquea solo tras un rato sin actividad y tiene un visor para revisar y borrar lo guardado. |
+| **Idioma** | Español o inglés: el del sistema operativo, o el que elijas en los ajustes. |
 | **Terminal local** | Con la shell que elijas: PowerShell, cmd, WSL o Git Bash en Windows; bash, zsh, fish… en Linux y macOS. |
 
 ## Compilar y ejecutar
@@ -782,6 +789,95 @@ La **copia de seguridad** guarda en un solo fichero los equipos, el baúl
 las claves de la carpeta de GodRemote. Al restaurarla se guarda antes la
 configuración actual, por si hay que volver atrás.
 
+### Sincronizar la configuración entre tus equipos
+
+**⚙ Ajustes → Sincronización entre mis equipos…** (también en la paleta y,
+una vez activa, pulsando el indicador 🔄 de la barra de estado). Elige una
+carpeta que ya repliques entre tus equipos (Dropbox, OneDrive, Syncthing, una
+unidad de red, un repositorio que gestiones tú) y una contraseña de
+sincronización, la misma en todos.
+
+- En la carpeta hay un único fichero, `godremote-sync.json`, cifrado con
+  Argon2id + XChaCha20-Poly1305 y comprimido: no se lee nada, ni nombres de
+  equipos ni usuarios.
+- **Se sincronizan** los equipos y carpetas, los snippets, los túneles del
+  gestor, los temas del usuario, los ajustes y el baúl.
+- **No se sincronizan** las claves privadas (solo su ruta, como texto; si en
+  un equipo no existe, se anota en «Últimos avisos» y al conectar sale el
+  error de siempre), los registros, las grabaciones, el historial de
+  órdenes, las huellas TLS aceptadas ni los ajustes propios de cada máquina
+  (editor, shell local, carpeta de registros, proxy, servidor X, agente SSH).
+- **Cuándo**: al arrancar (en cuanto hay contraseña), a los pocos segundos de
+  cambiar algo aquí o en la carpeta, cada cierto tiempo (5 minutos de
+  fábrica) y con **🔄 Sincronizar ahora**. También con la ventana
+  minimizada.
+- **Cómo se fusiona**: a tres bandas, elemento a elemento y campo a campo,
+  con lo último acordado como base. Si solo cambió un lado, gana ese; dos
+  cambios en campos distintos del mismo equipo se quedan los dos; los
+  borrados se propagan y no resucitan. Ninguna hora decide nada, así que
+  los relojes desajustados no importan.
+- **Conflictos**: si los dos lados cambiaron lo mismo de forma distinta (o
+  uno borró lo que el otro cambió), se pregunta: **Lo mío** o **Lo de la
+  carpeta**, uno a uno o todos a la vez. Mientras no elijas, cada lado
+  conserva lo suyo.
+- **Copia previa**: antes de aplicar en este equipo cambios llegados de
+  fuera se guarda `antes-de-sincronizar-….json` en la carpeta de GodRemote
+  (las 10 últimas). Se restauran desde «Importar y copias de seguridad».
+- **El baúl** viaja como un bloque, cifrado con su contraseña maestra: la
+  sincronización nunca ve un secreto. Si cambió en un solo lado, el otro lo
+  recibe. Si cambió en los dos, con el baúl abierto se combinan secreto a
+  secreto (y se pregunta por los que choquen); con el baúl cerrado queda
+  como conflicto hasta que lo abras o te quedes con uno entero. Si el de la
+  carpeta tiene otra contraseña maestra, se pide para combinarlos.
+- **La contraseña de sincronización** se guarda en el baúl; con el baúl
+  cerrado vive solo en memoria y se pide.
+- **Si algo va mal**: con el fichero a medias o la carpeta sin montar se
+  reintenta solo, sin tocar nada; con la contraseña equivocada o el fichero
+  dañado se dice claro, sin tocar nada; si dos equipos escriben a la vez, el
+  que pierde lo nota y reenvía lo suyo; y de las copias «en conflicto» que
+  deje el servicio de sincronización se avisa y se pueden borrar.
+- **Cambiar la contraseña o reparar un fichero dañado**: escribe la nueva y
+  pulsa **Reescribir la carpeta con lo de este equipo…**; en los demás
+  equipos, escribe la nueva.
+
+### Compartir una carpeta de equipos con compañeros
+
+**⚙ Ajustes → Carpetas compartidas con compañeros…** (o la paleta).
+
+- **Publicar**: elige una carpeta tuya, el fichero de destino (en un recurso
+  al que lleguen tus compañeros) y una contraseña compartida. Se publican
+  sus equipos y subcarpetas con dirección, usuario, ruta de la clave,
+  saltos, notas y colores. **No se publican** contraseñas ni nada del baúl,
+  órdenes al conectar, túneles, reenvío del agente o de X11, autorrelleno
+  TOTP, «saltarse el proxy» ni equipos de puerto serie. Se vuelve a publicar
+  con **Publicar ahora** o sola al cambiar la carpeta, y nunca pisa un
+  fichero que no sea una publicación anterior suya.
+- **Suscribirse**: ruta del fichero y contraseña. La carpeta aparece en el
+  árbol como «👥 Nombre (compartida)», de solo lectura: puedes conectar,
+  abrir SFTP, ejecutar en sus equipos y duplicar un equipo (la copia sale
+  fuera de la carpeta y ya es tuya), pero no editar, mover, borrar ni crear
+  dentro. Con **Mi usuario** y **Mi autenticación** (clave privada o agente)
+  usas lo tuyo en sus equipos SSH sin tocar lo publicado. Se actualiza sola
+  (se mira cada 30 segundos); sin conexión se usa la última copia.
+  **Dejar de seguir…** quita sus equipos o los deja como carpeta tuya.
+- Si un equipo compartido desaparece, sus pestañas abiertas siguen
+  funcionando (se avisa), pero no se guardan para reabrirse al arrancar. Si
+  le cambian la dirección, el puerto o el protocolo, se avisa y se olvida la
+  contraseña que tuvieras guardada para él.
+- Las carpetas que sigues no entran en tu sincronización. Si sigues la misma
+  desde dos equipos tuyos, las credenciales guardadas valen en ambos.
+- Las contraseñas de las carpetas compartidas se guardan en el baúl; con el
+  baúl cerrado se piden.
+
+### Idioma
+
+La interfaz está en español y en inglés. De fábrica usa el idioma del sistema
+operativo (español si el sistema está en español, catalán, gallego, euskera o
+asturiano; inglés en cualquier otro caso) y se cambia en **⚙ Ajustes →
+Idioma**, al momento y sin reiniciar. Los nombres de los temas integrados,
+los ficheros de configuración y lo que ya esté escrito en un terminal o en un
+registro no cambian con el idioma.
+
 ### Snippets y atajos
 
 Un snippet es un texto o una serie de órdenes con nombre que se envía al
@@ -845,6 +941,10 @@ Linux, `%APPDATA%\godremote` en Windows; se puede cambiar con la variable
 | `edit/` | Copias temporales de los ficheros remotos en edición. |
 | `macros.json` | Snippets y sus atajos. |
 | `tunnels.json` | Túneles del gestor de túneles. |
+| `sync.json` | Carpeta, intervalo y nombre de este equipo para la sincronización. |
+| `sync-estado.json` | Lo último acordado con la carpeta de sincronización (base de la fusión) y los conflictos pendientes. |
+| `antes-de-sincronizar-*.json` | Copias previas a aplicar cambios sincronizados (las 10 últimas). |
+| `shares.json` | Carpetas que publico y que sigo, con la última copia de estas. |
 | `tls_known_hosts.json` | Huellas de los certificados RDP aceptados. |
 | `rdp/` | Registros de la última ejecución del cliente RDP externo. |
 
@@ -902,6 +1002,24 @@ recuperar; el resto de la configuración sigue intacta.
   por eso lo normal es escribir la orden en el terminal sin ejecutarla.
 - Un `.cast` ajeno es entrada no fiable: al abrirlo se acotan su tamaño, sus
   dimensiones y sus tiempos, y lo que pregunte al terminal no se contesta.
+- **Sincronización y carpetas compartidas**: lo que llega de la carpeta de
+  sincronización o de un fichero compartido se trata como entrada no fiable
+  aunque descifre: límites de tamaño, de elementos y de profundidad, costes
+  de derivación de clave acotados, y solo se escriben los ficheros de
+  configuración de siempre.
+- De una carpeta compartida no se acepta nada que haga actuar a GodRemote
+  por cuenta de otro (órdenes al conectar, túneles, reenvíos), ni saltos de
+  línea en textos de una línea. Los identificadores de sus equipos se
+  derivan: quien publica no puede hacerlos coincidir con los de tus equipos
+  para llevarse sus credenciales. Una contraseña guardada es siempre de un
+  equipo, nunca de la carpeta, y un fichero más antiguo que el último visto
+  no se acepta.
+- Quien tenga la contraseña de una carpeta compartida y pueda escribir en
+  su ruta puede sustituir lo publicado: dásela solo a quien deba publicar o
+  leer.
+- `sync-estado.json`, `shares.json` y las copias previas guardan
+  configuración en claro (como `sessions.json`), con permisos privados; el
+  baúl va siempre cifrado dentro.
 
 ## Limitaciones conocidas
 
@@ -1139,6 +1257,30 @@ recuperar; el resto de la configuración sigue intacta.
 - Saltos: como máximo ocho encadenados; cada salto se autentica con su
   propia sesión (no hay reenvío del agente SSH entre saltos).
 - Sin Mosh ni FTP.
+- **Sincronización**: probada con carpetas locales que hacen de carpeta
+  replicada, no con Dropbox, OneDrive, Syncthing ni unidades de red reales,
+  ni con tres o más equipos a la vez. Usa un solo fichero que se reescribe
+  entero, y la fusión se hace en el hilo de la interfaz: con temas o fondos
+  con imágenes grandes puede notarse. Mientras esté abierto el editor de
+  equipos o de carpetas, o la ventana de snippets, temas o túneles, lo
+  recibido espera a que se cierre. Los conflictos se resuelven por elemento
+  entero (lo mío o lo de la carpeta), no campo a campo. Restaurar una copia
+  de seguridad en un equipo sincronizado se propaga a los demás como
+  cualquier cambio, borrados incluidos (ellos guardan su copia previa).
+  Combinar baúles secreto a secreto exige tener el baúl abierto.
+- **Carpetas compartidas**: publicaciones y suscripciones son de cada equipo
+  (las rutas lo son) y no se sincronizan. Los saltos por equipos de fuera de
+  la carpeta no funcionan para quien la sigue (se avisa a ambos); no viajan
+  túneles ni órdenes al conectar; «mi usuario / mi clave» solo se aplican a
+  equipos SSH/SFTP; no se puede fijar una contraseña común para toda la
+  carpeta (a propósito). «Dejar de publicar» no borra el fichero publicado.
+  Al dejar de seguir una carpeta con el baúl cerrado, las contraseñas
+  guardadas de sus equipos quedan huérfanas en el visor del baúl.
+- **Inglés**: la traducción se ha revisado a ojo ventana por ventana en
+  Linux, no la ha revisado un hablante nativo. Los mensajes de error que
+  vienen del sistema operativo o de las librerías (casi siempre en inglés)
+  se enseñan tal cual en los dos idiomas. Las capturas de este documento
+  están en español.
 - **Tema según el sistema**: comprobado a mano solo en Linux, con el portal
   de escritorio de GTK/GNOME; en Windows y macOS la lectura del modo está
   hecha y compila, pero no se ha visto funcionar. En Linux se pregunta con
@@ -1233,6 +1375,14 @@ la edición «SSH reforzada», es decir, contra russh 0.65.4.
   pregunta, lo tecleado sin eco no aparece ni en el historial ni en el
   `.cast`, la grabación reproduce la pantalla y una orden larga con
   marcadores OSC 133 avisa con su código de salida.
+- `tests/sync_devices.rs`: sincronización con dos carpetas de configuración
+  sobre la misma carpeta compartida: nada legible en ella y convergencia,
+  conflictos que esperan respuesta, escrituras simultáneas, fichero a
+  medias, dañado o ajeno, contraseña equivocada, carpeta ausente, baúl en
+  bloque y en conflicto, cambio de contraseña y poda de copias previas.
+- `tests/share_folders.rs`: publicar y suscribirse a una carpeta de equipos:
+  saneado de ficheros hostiles, no pisar ficheros ajenos, identificadores y
+  credenciales propias, actualizaciones y convivencia con la sincronización.
 - `tests/xserver_ssh.rs`: de extremo a extremo: una aplicación lanzada por
   SSH con reenvío X11 (contra un `sshd` real) acaba dibujada en el servidor
   X integrado; cambio de tamaño, parada y rearranque.
@@ -1292,5 +1442,11 @@ src/
   proxy.rs        proxy de salida HTTP y SOCKS5
   import.rs       importación de OpenSSH, PuTTY y MobaXterm
   backup.rs       copia de seguridad de la configuración
+  sync.rs         sincronización cifrada de la configuración entre equipos
+  share.rs        carpetas de equipos publicadas y seguidas
+  i18n.rs         idioma de la interfaz; i18n/en/ son las tablas en inglés
+  update_check.rs aviso de versión nueva
+  system_theme.rs modo claro u oscuro del sistema
+  render.rs       con qué se pinta la ventana (DirectX u OpenGL)
   ui/             interfaz (egui)
 ```
