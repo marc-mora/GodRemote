@@ -11,8 +11,12 @@ varios terminales, disparadores, grabación de sesiones e historial de
 por carpeta, importación desde otras herramientas, temas personalizables y
 un baúl cifrado para las credenciales.
 
-**Descargas:** ejecutables para Windows, Linux y macOS en la
-[última versión publicada](https://github.com/marc-mora/GodRemote/releases/latest).
+**Descargas:** en la
+[última versión publicada](https://github.com/marc-mora/GodRemote/releases/latest)
+hay, para cada una de las dos ediciones, instalador y `.zip` portátil para
+Windows, aplicación universal (`.dmg`, Intel y Apple Silicon) para macOS y
+paquete `.deb` y `.tar.gz` para Linux, con sus sumas en `SHA256SUMS.txt`. Los
+ejecutables no están firmados: Windows y macOS avisan la primera vez.
 
 ![Terminal SSH](docs/terminal.png)
 ![Barra de información del servidor y fondo del terminal](docs/barra-y-fondo.png)
@@ -93,6 +97,10 @@ Cada cambio que se sube pasa por GitHub Actions (`.github/workflows/ci.yml`):
   clientes X)— y `clippy` sin avisos.
 - **Windows y macOS**: compilación nativa y las pruebas que no dependen de
   servidores de Unix.
+- **En los tres**, la aplicación de verdad: se abre, pinta su ventana, guarda
+  una captura (queda como artefacto de la ejecución) y se cierra. Es lo que
+  hace `GODREMOTE_CAPTURA=fichero.png godremote`, y el código de salida dice
+  si la ventana llegó a pintarse.
 
 Al crear una etiqueta `vX.Y.Z` se compilan además los ejecutables nativos
 de las dos ediciones para Windows, Linux y macOS, y se publican como
@@ -104,6 +112,22 @@ Los mismos ejecutables se pueden pedir sin publicar
 una versión —se descargan como artefactos de la ejecución, en la pestaña
 *Actions*—: a mano desde esa pestaña, o poniendo `[ejecutables]` en el
 mensaje de un commit.
+
+Los paquetes los prepara `empaquetado/empaquetar.sh` a partir de los
+ejecutables ya compilados (sirve igual a mano): `.tar.gz` y `.deb` en Linux
+—compilado en una Ubuntu antigua para que valga en más distribuciones—,
+`.tar.gz` y `.dmg` con la aplicación universal en macOS, y `.zip` e
+instalador por usuario (Inno Setup, sin permisos de administrador) en
+Windows. Antes de empaquetar, cada ejecutable pasa la prueba de arranque.
+
+### Con qué se pinta la ventana
+
+En Linux y macOS, con OpenGL. En **Windows, con DirectX 12**: funciona
+también donde no hay controlador de OpenGL (máquinas virtuales, servidores
+sin tarjeta gráfica, algunas sesiones de escritorio remoto), porque DirectX
+trae un modo por software. Si DirectX no arranca se prueba OpenGL, y si
+ninguno sirve un cuadro de diálogo dice por qué. La variable de entorno
+`GODREMOTE_RENDER` (`directx` u `opengl`) elige uno a mano.
 
 ### Ejecutable de Windows desde Linux
 
@@ -814,6 +838,7 @@ Linux, `%APPDATA%\godremote` en Windows; se puede cambiar con la variable
 | `themes/` | Temas del usuario. |
 | `settings.json` | Tema elegido y demás ajustes, entre ellos los disparadores y los del panel de estado (`panel_estado`). |
 | `state.json` | Pestañas abiertas al cerrar (para reabrirlas). |
+| `version.json` | Cuándo se consultó por última vez si hay versión nueva, y cuál era. |
 | `logs/` | Registros de las sesiones de terminal y grabaciones `.cast`. |
 | `command_history.json` | Historial de órdenes por equipo. No entra en la copia de seguridad. |
 | `edit/` | Copias temporales de los ficheros remotos en edición. |
@@ -827,6 +852,15 @@ recuperar; el resto de la configuración sigue intacta.
 
 ## Seguridad
 
+- **Lo único que GodRemote conecta sin que se le pida** es el aviso de
+  versión nueva: al arrancar, y como mucho una vez al día, hace una petición
+  HTTPS a `github.com` (sin cuerpo ni datos del usuario; por el proxy de
+  salida si lo hay) y lee de la respuesta el número de la última versión
+  publicada. Si es más nueva, lo dice en la barra de estado con un enlace a
+  la página de descargas; no descarga ni instala nada. Se desactiva en
+  **⚙ Ajustes → Protecciones → Avisar cuando haya una versión nueva**. La
+  edición «SSH reforzada» no lo lleva: no incluye TLS y no hace ninguna
+  conexión por su cuenta.
 - **Telnet y VNC no cifran nada**: úsalos solo en redes de confianza o a
   través de un túnel SSH.
 - Con el cliente RDP externo la contraseña se entrega por la entrada estándar
@@ -1109,9 +1143,11 @@ recuperar; el resto de la configuración sigue intacta.
   las herramientas del propio escritorio (`gdbus`, `dbus-send` o `busctl`, y
   `gsettings`): sin ninguna de ellas, o sin sesión de escritorio, no se
   detecta y queda el tema fijo. Con KDE Plasma no se ha probado.
-- A mano solo se ha usado en Linux (X11). En Windows y macOS se compila y
+- A mano solo se ha usado en Linux (X11). En Windows y macOS se compila,
   pasa sus pruebas automáticas en cada cambio (entre ellas la del terminal
-  local), pero la interfaz no se ha manejado allí: quedan sin comprobar a
+  local) y se comprueba que la aplicación abre y pinta su ventana —en
+  Windows, en una máquina sin tarjeta gráfica, con el modo por software de
+  DirectX—, pero la interfaz no se ha manejado allí: quedan sin comprobar a
   mano, por ejemplo, la detección de shells, arrastrar ficheros desde el
   explorador, el reenvío del agente en Windows y todo lo de Pageant. Tampoco
   se han visto funcionar allí el panel de estado, los disparadores, la
