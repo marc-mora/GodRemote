@@ -60,8 +60,12 @@ uuid = { version = "1", features = ["v4", "serde"] }
 vt100 = "0.18"
 zeroize = "1"
 
-# Para leer del registro de Windows si el sistema está en modo oscuro.
 [target.'cfg(windows)'.dependencies]
+# En Windows se pinta con DirectX (wgpu): no depende del controlador de
+# OpenGL, que falta en máquinas virtuales y servidores sin tarjeta gráfica.
+eframe = { version = "0.37", default-features = false, features = ["wgpu_no_default_features"] }
+wgpu = { version = "30", default-features = false, features = ["dx12", "wgsl", "std", "parking_lot"] }
+# Para leer del registro de Windows si el sistema está en modo oscuro.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
 
 [dev-dependencies]

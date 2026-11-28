@@ -1,6 +1,56 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-fn main() -> eframe::Result {
+use std::process::ExitCode;
+
+use godremote::render::{self, Backend};
+
+/// Errores de los motores de dibujo que ya se han probado (entre procesos).
+const ERRORS_ENV: &str = "GODREMOTE_RENDER_ERRORES";
+
+fn main() -> ExitCode {
+    let plan = render::plan(std::env::var(render::ENV).ok().as_deref());
+    let backend = plan[0];
+    let error = match run(backend) {
+        Ok(()) => return ExitCode::SUCCESS,
+        Err(error) => format!("{}: {error}", backend.label()),
+    };
+    eprintln!("No se pudo abrir la ventana con {error}");
+    let mut errors = std::env::var(ERRORS_ENV).unwrap_or_default();
+    if !errors.is_empty() {
+        errors.push('\n');
+    }
+    errors.push_str(&error);
+
+    // La ventana solo se puede intentar crear una vez por proceso: el
+    // siguiente motor se prueba en un proceso nuevo, y este espera por él.
+    let rest = &plan[1..];
+    if !rest.is_empty()
+        && let Ok(program) = std::env::current_exe()
+    {
+        let status = std::process::Command::new(program)
+            .args(std::env::args_os().skip(1))
+            .env(render::ENV, render::remaining(rest))
+            .env(ERRORS_ENV, &errors)
+            .status();
+        if let Ok(status) = status {
+            return ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8);
+        }
+    }
+
+    // Nada ha funcionado: que al menos se vea por qué (el ejecutable de
+    // Windows no tiene consola).
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("GodRemote")
+        .set_description(format!(
+            "GodRemote no ha podido abrir su ventana: este equipo no ofrece \
+             ningún modo de dibujo que sirva.\n\n{errors}"
+        ))
+        .show();
+    ExitCode::FAILURE
+}
+
+fn run(backend: Backend) -> eframe::Result {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(2)
@@ -14,6 +64,11 @@ fn main() -> eframe::Result {
             .with_app_id("godremote")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([760.0, 480.0]),
+        renderer: match backend {
+            #[cfg(windows)]
+            Backend::DirectX => eframe::Renderer::Wgpu,
+            _ => eframe::Renderer::Glow,
+        },
         ..Default::default()
     };
     eframe::run_native(

@@ -21,6 +21,7 @@ pub mod proxy;
 pub mod rdp;
 #[cfg(feature = "rdp-integrado")]
 pub mod rdp_client;
+pub mod render;
 pub mod serial;
 pub mod session_log;
 pub mod sftp;
