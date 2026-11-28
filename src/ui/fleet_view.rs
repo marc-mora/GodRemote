@@ -6,9 +6,11 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::fleet::{FleetRun, HostState};
+use crate::i18n::{decimal, tr};
 use crate::macros::MacroStore;
 use crate::model::{Protocol, Tree};
 use crate::theme::{error_color, ok_color, warn_color};
+use crate::trf;
 
 /// Lo que la ventana pide a la aplicación.
 pub enum FleetRequest {
@@ -76,7 +78,7 @@ impl FleetWindow {
         let mut request = FleetRequest::None;
         let hosts = self.hosts(tree);
         let running = self.run.as_ref().is_some_and(|run| !run.is_finished());
-        egui::Window::new("Ejecutar en varios equipos")
+        egui::Window::new(tr("Ejecutar en varios equipos"))
             .id(egui::Id::unique("fleet_window"))
             .open(&mut open)
             .collapsible(false)
@@ -85,41 +87,45 @@ impl FleetWindow {
             .show(ctx, |ui| {
                 ui.set_width(860.0);
                 ui.horizontal(|ui| {
-                    ui.label("Equipos de");
+                    ui.label(tr("Equipos de"));
                     let folders = tree.folder_paths();
                     let current = match self.folder {
-                        None => "todas las carpetas".to_string(),
+                        None => tr("todas las carpetas").to_string(),
                         Some(id) => folders
                             .iter()
                             .find(|(fid, _)| *fid == id)
                             .map(|(_, path)| path.clone())
-                            .unwrap_or_else(|| "(carpeta eliminada)".into()),
+                            .unwrap_or_else(|| tr("(carpeta eliminada)").into()),
                     };
                     ui.add_enabled_ui(!running, |ui| {
                         egui::ComboBox::from_id_salt("fleet_folder")
                             .selected_text(current)
                             .width(300.0)
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.folder, None, "todas las carpetas");
+                                ui.selectable_value(
+                                    &mut self.folder,
+                                    None,
+                                    tr("todas las carpetas"),
+                                );
                                 for (id, path) in &folders {
                                     ui.selectable_value(&mut self.folder, Some(*id), path);
                                 }
                             });
                     });
                     ui.separator();
-                    ui.label("A la vez");
+                    ui.label(tr("A la vez"));
                     ui.add_enabled(
                         !running,
                         egui::DragValue::new(&mut self.parallel).range(1..=32),
                     );
-                    ui.label("Tiempo máximo");
+                    ui.label(tr("Tiempo máximo"));
                     ui.add_enabled(
                         !running,
                         egui::DragValue::new(&mut self.timeout_secs)
                             .range(2..=3600)
                             .suffix(" s"),
                     )
-                    .on_hover_text("Lo que cada equipo puede tardar en conectar y terminar");
+                    .on_hover_text(tr("Lo que cada equipo puede tardar en conectar y terminar"));
                 });
                 ui.separator();
                 ui.allocate_ui_with_layout(
@@ -146,17 +152,17 @@ impl FleetWindow {
     fn host_list(&mut self, ui: &mut egui::Ui, hosts: &[(Uuid, String)], running: bool) {
         ui.horizontal(|ui| {
             ui.strong(match &self.run {
-                Some(run) => format!("Resultado ({})", run.hosts.len()),
-                None => format!("Equipos SSH ({})", hosts.len()),
+                Some(run) => trf!("Resultado ({n})", n = run.hosts.len()),
+                None => trf!("Equipos SSH ({n})", n = hosts.len()),
             });
             if self.run.is_none() {
-                if ui.small_button("Todos").clicked() {
+                if ui.small_button(tr("Todos")).clicked() {
                     self.skipped.clear();
                 }
-                if ui.small_button("Ninguno").clicked() {
+                if ui.small_button(tr("Ninguno")).clicked() {
                     self.skipped = hosts.iter().map(|(id, _)| *id).collect();
                 }
-            } else if !running && ui.small_button("Elegir de nuevo").clicked() {
+            } else if !running && ui.small_button(tr("Elegir de nuevo")).clicked() {
                 self.run = None;
                 self.shown = None;
             }
@@ -167,7 +173,7 @@ impl FleetWindow {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if hosts.is_empty() {
-                    ui.weak("No hay equipos SSH en esta carpeta.");
+                    ui.weak(tr("No hay equipos SSH en esta carpeta."));
                 }
                 match &self.run {
                     // Con una ejecución hecha (o en curso): su estado.
@@ -176,21 +182,30 @@ impl FleetWindow {
                             ui.horizontal(|ui| {
                                 let (color, text) = match &host.state {
                                     HostState::Waiting => {
-                                        (ui.visuals().weak_text_color(), "en cola".to_string())
+                                        (ui.visuals().weak_text_color(), tr("en cola").to_string())
                                     }
                                     HostState::Connecting(_) => {
-                                        (warn_color(), "conectando".to_string())
+                                        (warn_color(), tr("conectando").to_string())
                                     }
-                                    HostState::Running => (warn_color(), "en marcha".to_string()),
-                                    HostState::Done(Some(0)) => (ok_color(), "bien".to_string()),
+                                    HostState::Running => {
+                                        (warn_color(), tr("en marcha").to_string())
+                                    }
+                                    HostState::Done(Some(0)) => {
+                                        (ok_color(), tr("bien").to_string())
+                                    }
                                     HostState::Done(Some(code)) => {
-                                        (error_color(), format!("código {code}"))
+                                        (error_color(), trf!("código {code}", code))
                                     }
-                                    HostState::Done(None) => (ok_color(), "terminado".to_string()),
-                                    HostState::Failed(_) => (error_color(), "error".to_string()),
-                                    HostState::Cancelled => {
-                                        (ui.visuals().weak_text_color(), "cancelado".to_string())
+                                    HostState::Done(None) => {
+                                        (ok_color(), tr("terminado").to_string())
                                     }
+                                    HostState::Failed(_) => {
+                                        (error_color(), tr("error").to_string())
+                                    }
+                                    HostState::Cancelled => (
+                                        ui.visuals().weak_text_color(),
+                                        tr("cancelado").to_string(),
+                                    ),
                                 };
                                 super::status_dot(ui, color);
                                 let label = ui
@@ -203,7 +218,10 @@ impl FleetWindow {
                                 if label.clicked() {
                                     self.shown = Some(host.id);
                                 }
-                                ui.weak(format!("{text} · {:.1} s", host.elapsed.as_secs_f32()));
+                                ui.weak(format!(
+                                    "{text} · {} s",
+                                    decimal(host.elapsed.as_secs_f64(), 1)
+                                ));
                             });
                         }
                     }
@@ -233,9 +251,9 @@ impl FleetWindow {
     ) -> FleetRequest {
         let mut request = FleetRequest::None;
         ui.horizontal(|ui| {
-            ui.strong("Orden");
+            ui.strong(tr("Orden"));
             ui.add_enabled_ui(!running && !macros.macros.is_empty(), |ui| {
-                ui.menu_button("Usar un snippet", |ui| {
+                ui.menu_button(tr("Usar un snippet"), |ui| {
                     for snippet in &macros.macros {
                         if ui.button(&snippet.name).clicked() {
                             self.command = snippet.text.trim_end().to_string();
@@ -251,13 +269,13 @@ impl FleetWindow {
                 .font(egui::TextStyle::Monospace)
                 .desired_rows(4)
                 .desired_width(f32::INFINITY)
-                .hint_text("por ejemplo: uptime; df -h /"),
+                .hint_text(tr("por ejemplo: uptime; df -h /")),
         );
-        ui.weak(
+        ui.weak(tr(
             "Se ejecuta sin terminal, como «ssh equipo 'orden'»: no sirve para órdenes que \
              preguntan algo. Admite las variables de los snippets ({{host}}, {{usuario}}, \
              {{nombre}}, {{fecha}}…), que se sustituyen en cada equipo.",
-        );
+        ));
         let chosen: Vec<Uuid> = hosts
             .iter()
             .map(|(id, _)| *id)
@@ -265,7 +283,7 @@ impl FleetWindow {
             .collect();
         ui.horizontal(|ui| {
             if running {
-                if ui.button("⏹ Cancelar").clicked()
+                if ui.button(tr("⏹ Cancelar")).clicked()
                     && let Some(run) = &self.run
                 {
                     run.cancel();
@@ -273,20 +291,20 @@ impl FleetWindow {
             } else if self.confirming {
                 ui.colored_label(
                     warn_color(),
-                    format!("Se ejecutará en {} equipos. ¿Seguro?", chosen.len()),
+                    trf!("Se ejecutará en {n} equipos. ¿Seguro?", n = chosen.len()),
                 );
-                if ui.button("Sí, ejecutar").clicked() {
+                if ui.button(tr("Sí, ejecutar")).clicked() {
                     self.confirming = false;
                     request = self.start(&chosen);
                 }
-                if ui.button("No").clicked() {
+                if ui.button(tr("No")).clicked() {
                     self.confirming = false;
                 }
             } else {
                 let ready = !chosen.is_empty() && !self.command.trim().is_empty();
                 let label = match chosen.len() {
-                    1 => "▶ Ejecutar en 1 equipo".to_string(),
-                    n => format!("▶ Ejecutar en {n} equipos"),
+                    1 => tr("▶ Ejecutar en 1 equipo").to_string(),
+                    n => trf!("▶ Ejecutar en {n} equipos", n),
                 };
                 if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
                     // Con varios equipos, una pregunta más: es fácil
@@ -300,12 +318,12 @@ impl FleetWindow {
             }
             if let Some(run) = &self.run {
                 let (ok, failed, pending) = run.summary();
-                ui.colored_label(ok_color(), format!("{ok} bien"));
+                ui.colored_label(ok_color(), trf!("{ok} bien", ok));
                 if failed > 0 {
-                    ui.colored_label(error_color(), format!("{failed} con error"));
+                    ui.colored_label(error_color(), trf!("{failed} con error", failed));
                 }
                 if pending > 0 {
-                    ui.colored_label(warn_color(), format!("{pending} sin terminar"));
+                    ui.colored_label(warn_color(), trf!("{pending} sin terminar", pending));
                 }
             }
         });
@@ -329,7 +347,7 @@ impl FleetWindow {
 
     fn output_panel(&mut self, ui: &mut egui::Ui) {
         let Some(run) = &self.run else {
-            ui.weak("Aquí aparecerá lo que conteste cada equipo.");
+            ui.weak(tr("Aquí aparecerá lo que conteste cada equipo."));
             return;
         };
         // Sin elegir ninguno se enseña el primero que tenga algo que decir.
@@ -344,17 +362,19 @@ impl FleetWindow {
         let mut save = false;
         ui.horizontal(|ui| {
             ui.strong(&host.name);
-            if ui.button("Copiar su salida").clicked() {
+            if ui.button(tr("Copiar su salida")).clicked() {
                 ui.ctx().copy_text(host.output.clone());
             }
             if ui
-                .button("Copiar todo")
-                .on_hover_text("La salida de todos los equipos, con una cabecera por equipo")
+                .button(tr("Copiar todo"))
+                .on_hover_text(tr(
+                    "La salida de todos los equipos, con una cabecera por equipo",
+                ))
                 .clicked()
             {
                 ui.ctx().copy_text(run.report());
             }
-            if ui.button("Guardar todo…").clicked() {
+            if ui.button(tr("Guardar todo…")).clicked() {
                 save = true;
             }
         });
@@ -372,18 +392,18 @@ impl FleetWindow {
                         .wrap_mode(egui::TextWrapMode::Extend),
                 );
                 if host.truncated {
-                    ui.colored_label(warn_color(), "[salida recortada: era demasiado larga]");
+                    ui.colored_label(warn_color(), tr("[salida recortada: era demasiado larga]"));
                 }
             });
         if save
             && let Some(path) = rfd::FileDialog::new()
-                .set_title("Guardar la salida de todos los equipos")
-                .set_file_name("salida-equipos.txt")
+                .set_title(tr("Guardar la salida de todos los equipos"))
+                .set_file_name(tr("salida-equipos.txt"))
                 .save_file()
         {
             self.message = Some(match std::fs::write(&path, run.report()) {
-                Ok(()) => (format!("Guardado en {}", path.display()), false),
-                Err(e) => (format!("No se pudo guardar: {e}"), true),
+                Ok(()) => (trf!("Guardado en {ruta}", ruta = path.display()), false),
+                Err(error) => (trf!("No se pudo guardar: {error}", error), true),
             });
         }
     }

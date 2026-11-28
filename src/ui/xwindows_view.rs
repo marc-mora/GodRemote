@@ -25,6 +25,8 @@ use egui::{Color32, Event, EventFilter, Pos2, Rect, Sense, TextureHandle, Textur
 
 use super::desktop_view::{DesktopView, KeyRelay};
 use crate::desktop::{MouseButton, SharedFrame};
+use crate::i18n::tr;
+use crate::trf;
 use crate::xserver::{RootlessInput, RootlessRequest, RootlessWindow, XServer};
 
 /// Color de lo que una ventana no pinta (fuera de su forma, o mientras la
@@ -135,7 +137,7 @@ impl NativeWindow {
     /// cambie de un fotograma a otro.
     fn builder(&self, w: &RootlessWindow) -> egui::ViewportBuilder {
         let title = if w.title.is_empty() {
-            "Aplicación X".to_string()
+            tr("Aplicación X").to_string()
         } else {
             w.title.clone()
         };
@@ -571,12 +573,16 @@ fn window_ui(
 pub fn placeholder(ui: &mut egui::Ui, windows: usize) {
     ui.add_space(24.0);
     ui.vertical_centered(|ui| {
-        ui.label("Las aplicaciones gráficas se muestran cada una en su propia ventana.");
+        ui.label(tr(
+            "Las aplicaciones gráficas se muestran cada una en su propia ventana.",
+        ));
         ui.weak(match windows {
-            0 => "Ahora mismo no hay ninguna abierta.".to_string(),
-            1 => "Hay 1 ventana abierta.".to_string(),
-            n => format!("Hay {n} ventanas abiertas."),
+            0 => tr("Ahora mismo no hay ninguna abierta.").to_string(),
+            1 => tr("Hay 1 ventana abierta.").to_string(),
+            n => trf!("Hay {n} ventanas abiertas.", n),
         });
-        ui.weak("Cerrar esta pestaña para el servidor X y cierra esas aplicaciones.");
+        ui.weak(tr(
+            "Cerrar esta pestaña para el servidor X y cierra esas aplicaciones.",
+        ));
     });
 }

@@ -3,6 +3,8 @@
 
 use uuid::Uuid;
 
+use crate::i18n::tr;
+
 /// Acciones de la aplicación que se pueden lanzar desde la paleta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -46,10 +48,12 @@ pub enum PaletteAction {
 }
 
 pub struct PaletteItem {
-    /// Tipo de resultado, a la izquierda: «Pestaña», «Equipo»…
+    /// Tipo de resultado, a la izquierda: «Pestaña», «Equipo»… Va sin
+    /// traducir (`mark!`): se traduce al pintarlo y al buscar.
     pub kind: &'static str,
     pub label: String,
-    /// Texto secundario (destino, atajo…); también se busca en él.
+    /// Texto secundario (destino, atajo…); también se busca en él. Como
+    /// `label`, llega ya en el idioma en uso.
     pub detail: String,
     pub action: PaletteAction,
 }
@@ -74,9 +78,10 @@ pub struct Palette {
 
 impl Palette {
     pub fn show(&mut self, ctx: &egui::Context, items: &[PaletteItem]) -> PaletteResult {
+        // Se busca en lo que se ve: los textos en el idioma en uso.
         let texts: Vec<String> = items
             .iter()
-            .map(|item| format!("{} {} {}", item.label, item.detail, item.kind))
+            .map(|item| format!("{} {} {}", item.label, item.detail, tr(item.kind)))
             .collect();
         let mut matches = crate::palette::rank(&self.query, texts.iter().map(String::as_str));
         matches.truncate(MAX_SHOWN);
@@ -111,7 +116,7 @@ impl Palette {
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.query)
                     .desired_width(f32::INFINITY)
-                    .hint_text("Equipo, pestaña, snippet, túnel o acción…"),
+                    .hint_text(tr("Equipo, pestaña, snippet, túnel o acción…")),
             );
             if !self.focused {
                 edit.request_focus();
@@ -127,7 +132,7 @@ impl Palette {
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     if matches.is_empty() {
-                        ui.weak("Nada coincide con lo escrito.");
+                        ui.weak(tr("Nada coincide con lo escrito."));
                     }
                     for (row, index) in matches.iter().enumerate() {
                         let item = &items[*index];
@@ -135,7 +140,9 @@ impl Palette {
                             .horizontal(|ui| {
                                 ui.add_sized(
                                     [70.0, 18.0],
-                                    egui::Label::new(egui::RichText::new(item.kind).weak().small()),
+                                    egui::Label::new(
+                                        egui::RichText::new(tr(item.kind)).weak().small(),
+                                    ),
                                 );
                                 let label = ui.selectable_label(
                                     row == self.selected,
@@ -160,7 +167,9 @@ impl Palette {
                 });
             self.reveal = false;
             ui.add_space(2.0);
-            ui.weak("Flechas para moverse · Intro para abrir · Esc para cerrar");
+            ui.weak(tr(
+                "Flechas para moverse · Intro para abrir · Esc para cerrar",
+            ));
         });
         if let Some(index) = chosen {
             return PaletteResult::Chosen(items[index].action.clone());

@@ -4,7 +4,9 @@
 use crate::cmd_history::{
     HistorySettings, HistoryStore, LOCAL_KEY, MAX_PER_HOST, MIN_PER_HOST, ago,
 };
+use crate::i18n::tr;
 use crate::theme::warn_color;
+use crate::trf;
 
 /// Lo que la ventana pide a la aplicación.
 pub enum HistoryRequest {
@@ -68,7 +70,7 @@ impl HistoryWindow {
         let mut close = false;
         let mut request = HistoryRequest::None;
         let before = settings.clone();
-        egui::Window::new("Historial de órdenes")
+        egui::Window::new(tr("Historial de órdenes"))
             .id(egui::Id::unique("history_window"))
             .open(&mut open)
             .collapsible(false)
@@ -91,11 +93,11 @@ impl HistoryWindow {
         hosts: &[(String, String)],
     ) {
         ui.horizontal(|ui| {
-            ui.label("Equipo");
+            ui.label(tr("Equipo"));
             let current = hosts
                 .iter()
                 .find(|(key, _)| *key == self.host)
-                .map_or("(sin historial)", |(_, name)| name.as_str());
+                .map_or(tr("(sin historial)"), |(_, name)| name.as_str());
             let mut chosen = None;
             egui::ComboBox::from_id_salt("history_host")
                 .selected_text(current)
@@ -115,12 +117,12 @@ impl HistoryWindow {
             if ui
                 .add_enabled(
                     settings.enabled,
-                    egui::Checkbox::new(&mut remembered, "Recordar las órdenes de este equipo"),
+                    egui::Checkbox::new(&mut remembered, tr("Recordar las órdenes de este equipo")),
                 )
-                .on_hover_text(
+                .on_hover_text(tr(
                     "Desmarcado, lo que ejecutes en este equipo no se anota (lo ya anotado \
                      sigue ahí hasta que lo borres)",
-                )
+                ))
                 .changed()
             {
                 settings.set_excluded(&self.host, !remembered);
@@ -151,7 +153,7 @@ impl HistoryWindow {
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.query)
                     .desired_width(470.0)
-                    .hint_text("Buscar entre sus órdenes…"),
+                    .hint_text(tr("Buscar entre sus órdenes…")),
             );
             if !self.focused {
                 edit.request_focus();
@@ -193,9 +195,10 @@ impl HistoryWindow {
                 }
             }
             ui.weak(match (found.len(), total) {
-                (_, 0) => "sin órdenes".to_string(),
-                (shown, total) if shown == total => format!("{total} órdenes"),
-                (shown, total) => format!("{shown} de {total}"),
+                (_, 0) => tr("sin órdenes").to_string(),
+                (1, 1) => tr("1 orden").to_string(),
+                (shown, total) if shown == total => trf!("{total} órdenes", total),
+                (shown, total) => trf!("{shown} de {total}", shown, total),
             });
         });
         let now = chrono::Utc::now().timestamp();
@@ -207,17 +210,17 @@ impl HistoryWindow {
             .show(ui, |ui| {
                 if total == 0 {
                     ui.add_space(8.0);
-                    ui.weak("Aún no se ha anotado ninguna orden de este equipo.");
+                    ui.weak(tr("Aún no se ha anotado ninguna orden de este equipo."));
                 } else if found.is_empty() {
                     ui.add_space(8.0);
-                    ui.weak("Nada coincide con lo buscado.");
+                    ui.weak(tr("Nada coincide con lo buscado."));
                 }
                 for (row, (command, count, last)) in found.iter().enumerate() {
                     ui.horizontal(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
                                 .small_button("🗑")
-                                .on_hover_text("Borrar esta orden del historial")
+                                .on_hover_text(tr("Borrar esta orden del historial"))
                                 .clicked()
                             {
                                 remove = Some(command.clone());
@@ -262,33 +265,33 @@ impl HistoryWindow {
         ui.horizontal(|ui| {
             let can_send = chosen.is_some() && target.is_some();
             if ui
-                .add_enabled(can_send, egui::Button::new("⌨ Escribir en el terminal"))
-                .on_hover_text("La deja escrita, sin ejecutarla (Intro, o doble clic)")
-                .on_disabled_hover_text("Elige una orden y abre un terminal conectado")
+                .add_enabled(can_send, egui::Button::new(tr("⌨ Escribir en el terminal")))
+                .on_hover_text(tr("La deja escrita, sin ejecutarla (Intro, o doble clic)"))
+                .on_disabled_hover_text(tr("Elige una orden y abre un terminal conectado"))
                 .clicked()
                 && let Some(command) = chosen
             {
                 request = HistoryRequest::Type(command.clone());
             }
             if ui
-                .add_enabled(can_send, egui::Button::new("▶ Ejecutar"))
-                .on_hover_text("La escribe y pulsa Intro (Mayús+Intro)")
-                .on_disabled_hover_text("Elige una orden y abre un terminal conectado")
+                .add_enabled(can_send, egui::Button::new(tr("▶ Ejecutar")))
+                .on_hover_text(tr("La escribe y pulsa Intro (Mayús+Intro)"))
+                .on_disabled_hover_text(tr("Elige una orden y abre un terminal conectado"))
                 .clicked()
                 && let Some(command) = chosen
             {
                 request = HistoryRequest::Run(command.clone());
             }
             if ui
-                .add_enabled(chosen.is_some(), egui::Button::new("📋 Copiar"))
+                .add_enabled(chosen.is_some(), egui::Button::new(tr("📋 Copiar")))
                 .clicked()
                 && let Some(command) = chosen
             {
                 ui.ctx().copy_text(command.clone());
             }
             match target {
-                Some(title) => ui.weak(format!("se envía a «{title}»")),
-                None => ui.weak("no hay un terminal conectado a la vista"),
+                Some(title) => ui.weak(trf!("se envía a «{title}»", title)),
+                None => ui.weak(tr("no hay un terminal conectado a la vista")),
             };
         });
         request
@@ -301,20 +304,25 @@ impl HistoryWindow {
         settings: &mut HistorySettings,
     ) {
         ui.horizontal(|ui| {
-            ui.checkbox(&mut settings.enabled, "Recordar las órdenes que ejecuto")
-                .on_hover_text("En todos los equipos, salvo los que se excluyan uno a uno");
-            ui.label("hasta");
+            ui.checkbox(
+                &mut settings.enabled,
+                tr("Recordar las órdenes que ejecuto"),
+            )
+            .on_hover_text(tr(
+                "En todos los equipos, salvo los que se excluyan uno a uno",
+            ));
+            ui.label(tr("hasta"));
             ui.add_enabled(
                 settings.enabled,
                 egui::DragValue::new(&mut settings.max_per_host).range(MIN_PER_HOST..=MAX_PER_HOST),
             );
-            ui.label("por equipo");
+            ui.label(tr("por equipo"));
         });
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(
                     !store.entries(&self.host).is_empty(),
-                    egui::Button::new("🗑 Borrar el historial de este equipo"),
+                    egui::Button::new(tr("🗑 Borrar el historial de este equipo")),
                 )
                 .clicked()
             {
@@ -322,33 +330,34 @@ impl HistoryWindow {
                 self.selected = 0;
             }
             if self.confirming_clear {
-                ui.colored_label(warn_color(), "¿Borrar el de todos los equipos?");
-                if ui.button("Sí, borrar todo").clicked() {
+                ui.colored_label(warn_color(), tr("¿Borrar el de todos los equipos?"));
+                if ui.button(tr("Sí, borrar todo")).clicked() {
                     store.clear();
                     self.selected = 0;
                     self.confirming_clear = false;
                 }
-                if ui.button("No").clicked() {
+                if ui.button(tr("No")).clicked() {
                     self.confirming_clear = false;
                 }
             } else if ui
-                .add_enabled(!store.is_empty(), egui::Button::new("Borrar todo…"))
+                .add_enabled(!store.is_empty(), egui::Button::new(tr("Borrar todo…")))
                 .clicked()
             {
                 self.confirming_clear = true;
             }
         });
-        let local = if self.host == LOCAL_KEY {
-            " Los terminales locales comparten un mismo historial."
-        } else {
-            ""
-        };
-        ui.weak(format!(
+        let mut help = tr(
             "Se anota lo que el terminal muestra al pulsar Intro, sin el indicador de la shell: \
              una contraseña tecleada sin eco no se guarda, y tampoco las respuestas a preguntas \
              («Usuario:», «¿Seguro? [s/N]») ni las órdenes que empiecen por un espacio. Si la \
              shell marca sus órdenes (OSC 133) solo se anotan las suyas; si no, también lo que \
-             se escriba a otros programas con indicador propio, como mysql o python.{local}"
-        ));
+             se escriba a otros programas con indicador propio, como mysql o python.",
+        )
+        .to_string();
+        if self.host == LOCAL_KEY {
+            help.push(' ');
+            help.push_str(tr("Los terminales locales comparten un mismo historial."));
+        }
+        ui.weak(help);
     }
 }

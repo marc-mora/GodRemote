@@ -13,11 +13,13 @@ use super::palette_view::{PaletteAction, PaletteItem};
 use super::triggers_view::TriggersWindow;
 use super::{App, Tab, TabKind};
 use crate::cmd_history::{HistoryStore, LOCAL_KEY};
+use crate::i18n::tr;
 use crate::model::{Session, Tree};
 use crate::session_log::LogSettings;
 use crate::shell_marks::{Finished, human_duration};
 use crate::terminal::{Signal, TermInput, TerminalView};
 use crate::triggers::{Compiled, Fired, Scope, TriggerSettings};
+use crate::{mark, trf};
 
 /// Grabaciones recientes que se ofrecen en el menú.
 const RECENT_CASTS: usize = 8;
@@ -29,6 +31,9 @@ const MAX_SCANNED: usize = 20_000;
 const HISTORY_SAVE_EVERY: Duration = Duration::from_secs(2);
 /// Órdenes del historial que se ofrecen en la paleta.
 const PALETTE_HISTORY: usize = 40;
+/// Nombre del historial que comparten los terminales locales. Sin traducir
+/// es también el que se guarda con él; se traduce al enseñarlo.
+const LOCAL_NAME: &str = mark!("Terminales locales");
 
 /// Marca de una pestaña en la que ha saltado un disparador (o ha terminado
 /// una orden larga) mientras no se miraba.
@@ -168,22 +173,23 @@ pub(super) fn header_buttons(
 ) {
     if ui
         .small_button("🕘")
-        .on_hover_text("Historial de órdenes de este equipo")
+        .on_hover_text(tr("Historial de órdenes de este equipo"))
         .clicked()
     {
         tools.open_history = true;
     }
     let (label, hover) = match &term.cast {
         Some(cast) => (
-            egui::RichText::new("🎬 Grabando").color(ui.visuals().error_fg_color),
-            format!(
-                "Grabando esta sesión, con sus tiempos, en\n{}\nPulsa para terminar la grabación.",
-                cast.path().display()
+            egui::RichText::new(tr("🎬 Grabando")).color(ui.visuals().error_fg_color),
+            trf!(
+                "Grabando esta sesión, con sus tiempos, en\n{ruta}\nPulsa para terminar la \
+                 grabación.",
+                ruta = cast.path().display()
             ),
         ),
         None => (
-            egui::RichText::new("🎬 Grabar"),
-            "Grabar esta sesión con sus tiempos (asciicast, .cast) para reproducirla después"
+            egui::RichText::new(tr("🎬 Grabar")),
+            tr("Grabar esta sesión con sus tiempos (asciicast, .cast) para reproducirla después")
                 .to_string(),
         ),
     };
@@ -197,15 +203,21 @@ pub(super) fn header_buttons(
 fn toggle_cast(term: &mut TerminalView, title: &str, settings: &LogSettings) -> (String, bool) {
     match term.stop_cast() {
         Some(path) => (
-            format!(
-                "Grabación guardada en {} (se reproduce desde «Herramientas»)",
-                path.display()
+            trf!(
+                "Grabación guardada en {ruta} (se reproduce desde «Herramientas»)",
+                ruta = path.display()
             ),
             false,
         ),
         None => match term.start_cast(&settings.dir(), title) {
-            Ok(path) => (format!("Grabando en {}", path.display()), false),
-            Err(e) => (format!("No se pudo grabar la sesión: {e:#}"), true),
+            Ok(path) => (trf!("Grabando en {ruta}", ruta = path.display()), false),
+            Err(e) => (
+                trf!(
+                    "No se pudo grabar la sesión: {error}",
+                    error = format!("{e:#}")
+                ),
+                true,
+            ),
         },
     }
 }
@@ -214,20 +226,28 @@ fn toggle_cast(term: &mut TerminalView, title: &str, settings: &LogSettings) -> 
 fn describe_fired(tab: &str, fired: &Fired) -> (String, bool) {
     if fired.paused {
         return (
-            format!(
-                "{tab}: el disparador «{}» se ha disparado demasiadas veces seguidas y queda \
-                 en pausa en esta pestaña",
-                fired.name
+            trf!(
+                "{tab}: el disparador «{nombre}» se ha disparado demasiadas veces seguidas y \
+                 queda en pausa en esta pestaña",
+                tab,
+                nombre = fired.name
             ),
             true,
         );
     }
     let text = match (&fired.send, fired.notify) {
-        (Some(_), _) => format!(
-            "⚠ {tab}: el disparador «{}» ha contestado a «{}»",
-            fired.name, fired.line
+        (Some(_), _) => trf!(
+            "⚠ {tab}: el disparador «{nombre}» ha contestado a «{linea}»",
+            tab,
+            nombre = fired.name,
+            linea = fired.line
         ),
-        (None, _) => format!("🔔 {tab}: {} — «{}»", fired.name, fired.line),
+        (None, _) => trf!(
+            "🔔 {tab}: {nombre} — «{linea}»",
+            tab,
+            nombre = fired.name,
+            linea = fired.line
+        ),
     };
     (text, false)
 }
@@ -236,13 +256,18 @@ fn describe_fired(tab: &str, fired: &Fired) -> (String, bool) {
 fn describe_done(tab: &str, done: &Finished) -> String {
     let time = human_duration(done.duration);
     match (done.exact, done.exit_code) {
-        (true, Some(code)) if code != 0 => {
-            format!("{tab}: la orden ha terminado con error (código {code}) tras {time}")
-        }
-        (true, _) => format!("{tab}: la orden ha terminado tras {time}"),
-        (false, _) => {
-            format!("{tab}: parece que la orden ha terminado (o espera una respuesta) tras {time}")
-        }
+        (true, Some(code)) if code != 0 => trf!(
+            "{tab}: la orden ha terminado con error (código {code}) tras {time}",
+            tab,
+            code,
+            time
+        ),
+        (true, _) => trf!("{tab}: la orden ha terminado tras {time}", tab, time),
+        (false, _) => trf!(
+            "{tab}: parece que la orden ha terminado (o espera una respuesta) tras {time}",
+            tab,
+            time
+        ),
     }
 }
 
@@ -287,7 +312,13 @@ impl App {
                 && term.cast.is_none()
                 && let Err(e) = term.start_cast(&cast_dir, &tab.title)
             {
-                notices.push((format!("No se pudo grabar la sesión: {e:#}"), true));
+                notices.push((
+                    trf!(
+                        "No se pudo grabar la sesión: {error}",
+                        error = format!("{e:#}")
+                    ),
+                    true,
+                ));
             }
             if let Some(error) = term.cast.as_mut().and_then(|c| c.error.take()) {
                 // Disco lleno, carpeta borrada…: se deja de grabar.
@@ -333,7 +364,7 @@ impl App {
                         if let Some(key) = &history_key {
                             let name = match &tab.session {
                                 Some(session) => session.display_name(),
-                                None => "Terminales locales".to_string(),
+                                None => LOCAL_NAME.to_string(),
                             };
                             store.record(key, &name, &command, now, history.max_per_host);
                         }
@@ -370,7 +401,10 @@ impl App {
                 if let Err(e) = result {
                     if !already_failed {
                         self.notify(
-                            format!("No se pudo guardar el historial de órdenes: {e:#}"),
+                            trf!(
+                                "No se pudo guardar el historial de órdenes: {error}",
+                                error = format!("{e:#}")
+                            ),
                             true,
                         );
                     }
@@ -388,7 +422,10 @@ impl App {
             let (open, changed) = window.show(ctx, &mut self.settings.triggers, &self.tree);
             if changed && let Err(e) = self.settings.save(&crate::paths::settings_file()) {
                 self.notify(
-                    format!("No se pudieron guardar las preferencias: {e:#}"),
+                    trf!(
+                        "No se pudieron guardar las preferencias: {error}",
+                        error = format!("{e:#}")
+                    ),
                     true,
                 );
             }
@@ -445,13 +482,13 @@ impl App {
         let paths = self.tree.session_paths();
         let name_of = |key: &str, stored: &str| -> String {
             if key == LOCAL_KEY {
-                return "Terminales locales".to_string();
+                return tr(LOCAL_NAME).to_string();
             }
             paths
                 .iter()
                 .find(|(id, _)| id.to_string() == key)
                 .map(|(_, path)| path.clone())
-                .unwrap_or_else(|| format!("{stored} (eliminado)"))
+                .unwrap_or_else(|| trf!("{stored} (eliminado)", stored))
         };
         let mut hosts: Vec<(String, String)> = self
             .term_tools
@@ -483,7 +520,10 @@ impl App {
             self.settings.history.sanitize();
             if let Err(e) = self.settings.save(&crate::paths::settings_file()) {
                 self.notify(
-                    format!("No se pudieron guardar las preferencias: {e:#}"),
+                    trf!(
+                        "No se pudieron guardar las preferencias: {error}",
+                        error = format!("{e:#}")
+                    ),
                     true,
                 );
             }
@@ -512,7 +552,10 @@ impl App {
     /// pide pulsa Intro.
     pub(super) fn type_in_terminal(&mut self, command: &str, run: bool) {
         let Some(term) = self.active_terminal() else {
-            return self.notify("Abre un terminal conectado para enviarle la orden", true);
+            return self.notify(
+                tr("Abre un terminal conectado para enviarle la orden"),
+                true,
+            );
         };
         term.apply_input(&TermInput::Paste(command.to_string()));
         if run {
@@ -539,7 +582,7 @@ impl App {
                 label.push('…');
             }
             items.push(PaletteItem {
-                kind: "Historial",
+                kind: mark!("Historial"),
                 label,
                 detail: match entry.count {
                     0 | 1 => String::new(),
@@ -567,12 +610,12 @@ impl App {
     pub(super) fn pick_cast(&mut self) {
         let dir = self.settings.log.dir();
         let mut dialog = rfd::FileDialog::new()
-            .set_title("Reproducir una grabación")
+            .set_title(tr("Reproducir una grabación"))
             .add_filter(
-                "Grabaciones de terminal (asciicast)",
+                tr("Grabaciones de terminal (asciicast)"),
                 &[crate::cast::EXTENSION],
             )
-            .add_filter("Todos los ficheros", &["*"]);
+            .add_filter(tr("Todos los ficheros"), &["*"]);
         if dir.is_dir() {
             dialog = dialog.set_directory(&dir);
         }
@@ -626,47 +669,47 @@ impl App {
             .count();
         let recording = self.active_cast();
         let mut chosen = None;
-        let menu = ui.menu_button("🛠 Herramientas", |ui| {
+        let menu = ui.menu_button(tr("🛠 Herramientas"), |ui| {
             ui.set_min_width(300.0);
             let triggers = match rules {
-                0 => "🔔 Disparadores…".to_string(),
-                1 => "🔔 Disparadores… (1 activo)".to_string(),
-                n => format!("🔔 Disparadores… ({n} activos)"),
+                0 => tr("🔔 Disparadores…").to_string(),
+                1 => tr("🔔 Disparadores… (1 activo)").to_string(),
+                n => trf!("🔔 Disparadores… ({n} activos)", n),
             };
             if ui
                 .button(triggers)
-                .on_hover_text(
+                .on_hover_text(tr(
                     "Avisar o contestar cuando aparezca un texto en un terminal, y avisar \
                      cuando termine una orden larga",
-                )
+                ))
                 .clicked()
             {
                 chosen = Some(Chosen::Triggers);
             }
             if ui
-                .button("🕘 Historial de órdenes…")
-                .on_hover_text(
+                .button(tr("🕘 Historial de órdenes…"))
+                .on_hover_text(tr(
                     "Las órdenes ejecutadas en cada equipo, para buscarlas y volver a \
                      enviarlas",
-                )
+                ))
                 .clicked()
             {
                 chosen = Some(Chosen::History);
             }
             ui.separator();
             let label = if recording == Some(true) {
-                "⏹ Terminar la grabación de esta sesión"
+                tr("⏹ Terminar la grabación de esta sesión")
             } else {
-                "🎬 Grabar esta sesión (.cast)"
+                tr("🎬 Grabar esta sesión (.cast)")
             };
             if ui
                 .add_enabled(recording.is_some(), egui::Button::new(label))
-                .on_disabled_hover_text("Abre un terminal")
+                .on_disabled_hover_text(tr("Abre un terminal"))
                 .clicked()
             {
                 chosen = Some(Chosen::ToggleCast);
             }
-            if ui.button("▶ Reproducir una grabación…").clicked() {
+            if ui.button(tr("▶ Reproducir una grabación…")).clicked() {
                 chosen = Some(Chosen::PickCast);
             }
             // Las últimas de la carpeta de registros, a un clic.
@@ -686,7 +729,7 @@ impl App {
                 .map(|(_, list)| list.as_slice())
                 .unwrap_or_default();
             if !recent.is_empty() {
-                ui.weak("Últimas grabaciones");
+                ui.weak(tr("Últimas grabaciones"));
             }
             for path in recent {
                 let name = path
@@ -702,7 +745,7 @@ impl App {
                 }
             }
             if ui
-                .button("📂 Abrir la carpeta de las grabaciones")
+                .button(tr("📂 Abrir la carpeta de las grabaciones"))
                 .clicked()
             {
                 chosen = Some(Chosen::Folder);
@@ -711,8 +754,9 @@ impl App {
                 ui.close();
             }
         });
-        menu.response
-            .on_hover_text("Disparadores, historial de órdenes y grabaciones de los terminales");
+        menu.response.on_hover_text(tr(
+            "Disparadores, historial de órdenes y grabaciones de los terminales",
+        ));
         match chosen {
             None => {}
             Some(Chosen::Triggers) => self.open_triggers_window(),
@@ -724,7 +768,14 @@ impl App {
                 let dir = self.settings.log.dir();
                 let _ = std::fs::create_dir_all(&dir);
                 if let Err(e) = crate::paths::open_with_system(&dir) {
-                    self.notify(format!("No se pudo abrir {}: {e}", dir.display()), true);
+                    self.notify(
+                        trf!(
+                            "No se pudo abrir {ruta}: {error}",
+                            ruta = dir.display(),
+                            error = e
+                        ),
+                        true,
+                    );
                 }
             }
         }

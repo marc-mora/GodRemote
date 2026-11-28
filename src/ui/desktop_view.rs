@@ -8,6 +8,8 @@ use egui::{Color32, Event, EventFilter, Key, Pos2, Rect, Sense, TextureHandle, T
 use crate::desktop::{
     CursorShape, DesktopBackend, DesktopCursor, DesktopEvent, DesktopInput, KeyCode, MouseButton,
 };
+use crate::i18n::tr;
+use crate::trf;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DesktopState {
@@ -414,7 +416,7 @@ impl DesktopView {
     pub fn new(backend: DesktopBackend, clipboard: bool) -> Self {
         Self {
             backend,
-            state: DesktopState::Connecting("Conectando…".into()),
+            state: DesktopState::Connecting(tr("Conectando…").into()),
             texture: None,
             texture_epoch: 0,
             size: (0, 0),
@@ -581,11 +583,11 @@ impl DesktopView {
                     Some(e) => {
                         ui.colored_label(
                             ui.visuals().error_fg_color,
-                            format!("Sesión cerrada: {e}"),
+                            trf!("Sesión cerrada: {error}", error = e),
                         );
                     }
                     None => {
-                        ui.label("Sesión de escritorio remoto finalizada.");
+                        ui.label(tr("Sesión de escritorio remoto finalizada."));
                     }
                 });
                 return;

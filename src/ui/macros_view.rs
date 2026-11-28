@@ -3,7 +3,9 @@
 use egui::{Event, Key};
 use uuid::Uuid;
 
+use crate::i18n::tr;
 use crate::macros::{Macro, MacroStore, Shortcut, is_modifier_key};
+use crate::trf;
 
 pub struct MacrosWindow {
     selected: Option<Uuid>,
@@ -37,7 +39,7 @@ impl MacrosWindow {
     /// Ventana lista para escribir un snippet nuevo.
     pub fn new_snippet() -> Self {
         let mut window = Self::blank();
-        window.name = "Nuevo snippet".into();
+        window.name = tr("Nuevo snippet").into();
         window
     }
 
@@ -100,7 +102,8 @@ impl MacrosWindow {
             }
             Some(Pressed::Clipboard) => {
                 self.message = Some((
-                    "Ctrl+C, Ctrl+V y Ctrl+X están reservados para copiar, pegar y cortar".into(),
+                    tr("Ctrl+C, Ctrl+V y Ctrl+X están reservados para copiar, pegar y cortar")
+                        .into(),
                     true,
                 ));
             }
@@ -124,7 +127,11 @@ impl MacrosWindow {
             && let Some(other) = store.shortcut_owner(shortcut, self.selected)
         {
             self.message = Some((
-                format!("El atajo {shortcut} ya lo usa «{}»", other.name),
+                trf!(
+                    "El atajo {shortcut} ya lo usa «{nombre}»",
+                    shortcut,
+                    nombre = other.name
+                ),
                 true,
             ));
             return false;
@@ -139,7 +146,7 @@ impl MacrosWindow {
             m.shortcut = self.shortcut;
         }
         self.selected = Some(id);
-        self.message = Some(("Snippet guardado".into(), false));
+        self.message = Some((tr("Snippet guardado").into(), false));
         true
     }
 
@@ -156,7 +163,7 @@ impl MacrosWindow {
         let mut open = true;
         let mut request = MacroRequest::None;
         let mut changed = false;
-        egui::Window::new("Snippets")
+        egui::Window::new(tr("Snippets"))
             .id(egui::Id::unique("macros_window"))
             .open(&mut open)
             .collapsible(false)
@@ -170,7 +177,7 @@ impl MacrosWindow {
                     |ui| {
                         ui.vertical(|ui| {
                             ui.set_width(230.0);
-                            ui.strong("Snippets guardados");
+                            ui.strong(tr("Snippets guardados"));
                             let mut pick = None;
                             egui::ScrollArea::vertical()
                                 .id_salt("macro_list")
@@ -178,7 +185,7 @@ impl MacrosWindow {
                                 .auto_shrink([false, true])
                                 .show(ui, |ui| {
                                     if store.macros.is_empty() {
-                                        ui.weak("Aún no hay snippets.");
+                                        ui.weak(tr("Aún no hay snippets."));
                                     }
                                     for m in &store.macros {
                                         let mut button = egui::Button::selectable(
@@ -197,7 +204,7 @@ impl MacrosWindow {
                                 self.load(&m);
                                 self.message = None;
                             }
-                            if ui.button("➕ Nuevo snippet").clicked() {
+                            if ui.button(tr("➕ Nuevo snippet")).clicked() {
                                 *self = Self::new_snippet();
                             }
                         });
@@ -205,7 +212,7 @@ impl MacrosWindow {
                         ui.vertical(|ui| {
                             ui.set_width(440.0);
                             ui.horizontal(|ui| {
-                                ui.label("Nombre");
+                                ui.label(tr("Nombre"));
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.name).desired_width(350.0),
                                 );
@@ -215,25 +222,25 @@ impl MacrosWindow {
                                     .font(egui::TextStyle::Monospace)
                                     .desired_rows(9)
                                     .desired_width(f32::INFINITY)
-                                    .hint_text("Texto u órdenes a enviar, una por línea"),
+                                    .hint_text(tr("Texto u órdenes a enviar, una por línea")),
                             );
-                            ui.weak(
+                            ui.weak(tr(
                                 "Cada salto de línea es Intro: sin salto al final, el texto se \
                                  escribe y queda a la espera. Teclas especiales: \\e (Escape), \
                                  \\t (tabulador), \\x03 (Ctrl+C), \\x04 (Ctrl+D)…",
-                            );
-                            ui.weak(
+                            ));
+                            ui.weak(tr(
                                 "Variables: {{host}}, {{usuario}}, {{puerto}}, {{nombre}}, \
                                  {{fecha}}, {{hora}}. Con {{?Pregunta}} o {{?Pregunta=valor}} se \
                                  pide un dato al lanzarlo.",
-                            );
+                            ));
                             ui.add_space(4.0);
                             self.shortcut_row(ui);
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 let valid = !self.name.trim().is_empty();
                                 if ui
-                                    .add_enabled(valid, egui::Button::new("Guardar"))
+                                    .add_enabled(valid, egui::Button::new(tr("Guardar")))
                                     .clicked()
                                 {
                                     changed |= self.save(store);
@@ -241,12 +248,14 @@ impl MacrosWindow {
                                 if ui
                                     .add_enabled(
                                         self.selected.is_some() && can_run,
-                                        egui::Button::new("▶ Lanzar"),
+                                        egui::Button::new(tr("▶ Lanzar")),
                                     )
-                                    .on_hover_text("Envía el snippet guardado al terminal activo")
-                                    .on_disabled_hover_text(
+                                    .on_hover_text(tr(
+                                        "Envía el snippet guardado al terminal activo",
+                                    ))
+                                    .on_disabled_hover_text(tr(
                                         "Guarda el snippet y abre un terminal conectado",
-                                    )
+                                    ))
                                     .clicked()
                                     && let Some(id) = self.selected
                                 {
@@ -255,7 +264,7 @@ impl MacrosWindow {
                                 if ui
                                     .add_enabled(
                                         self.selected.is_some(),
-                                        egui::Button::new("🗑 Eliminar"),
+                                        egui::Button::new(tr("🗑 Eliminar")),
                                     )
                                     .clicked()
                                     && let Some(id) = self.selected.take()
@@ -266,7 +275,7 @@ impl MacrosWindow {
                                     if let Some(first) = store.macros.first().cloned() {
                                         self.load(&first);
                                     }
-                                    self.message = Some(("Snippet eliminado".into(), false));
+                                    self.message = Some((tr("Snippet eliminado").into(), false));
                                 }
                             });
                             if let Some((msg, is_error)) = &self.message {
@@ -282,7 +291,13 @@ impl MacrosWindow {
                 );
             });
         if changed && let Err(e) = store.save(&crate::paths::macros_file()) {
-            self.message = Some((format!("No se pudieron guardar los snippets: {e:#}"), true));
+            self.message = Some((
+                trf!(
+                    "No se pudieron guardar los snippets: {error}",
+                    error = format!("{e:#}")
+                ),
+                true,
+            ));
         }
         (open, request)
     }
@@ -290,13 +305,13 @@ impl MacrosWindow {
     /// Fila del atajo de teclado: el actual y los botones para cambiarlo.
     fn shortcut_row(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label("Atajo");
+            ui.label(tr("Atajo"));
             if self.capturing {
                 ui.colored_label(
                     crate::theme::warn_color(),
-                    "Pulsa la combinación de teclas… (Esc para cancelar)",
+                    tr("Pulsa la combinación de teclas… (Esc para cancelar)"),
                 );
-                if ui.button("Cancelar").clicked() {
+                if ui.button(tr("Cancelar")).clicked() {
                     self.capturing = false;
                 }
                 return;
@@ -310,19 +325,19 @@ impl MacrosWindow {
                     );
                 }
                 None => {
-                    ui.weak("sin atajo");
+                    ui.weak(tr("sin atajo"));
                 }
             }
             if ui
                 .button(if self.shortcut.is_some() {
-                    "Cambiar…"
+                    tr("Cambiar…")
                 } else {
-                    "Asignar…"
+                    tr("Asignar…")
                 })
-                .on_hover_text(
+                .on_hover_text(tr(
                     "Elige la combinación que lanzará este snippet en el terminal activo: con \
                      Ctrl o Alt, o una tecla de función (F1–F12)",
-                )
+                ))
                 .clicked()
             {
                 self.capturing = true;
@@ -331,13 +346,13 @@ impl MacrosWindow {
                 // escribirse en ellos.
                 ui.memory_mut(|m| m.request_focus(egui::Id::NULL));
             }
-            if self.shortcut.is_some() && ui.button("Quitar").clicked() {
+            if self.shortcut.is_some() && ui.button(tr("Quitar")).clicked() {
                 self.shortcut = None;
             }
         });
-        ui.weak(
+        ui.weak(tr(
             "El atajo funciona con el foco en un terminal. Ctrl+letra suele tener ya un uso en \
              la shell; Ctrl+Alt+letra, Ctrl+Mayús+letra y F1–F12 no chocan con nada.",
-        );
+        ));
     }
 }

@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::cast::{Cast, Player, SPEEDS, Step, clock_text};
+use crate::i18n::{Lang, tr};
 use crate::terminal::TerminalView;
 use crate::theme::warn_color;
+use crate::trf;
 
 /// Salida que como mucho se aplica al terminal en un fotograma: un salto
 /// largo se reparte entre varios para no dejar la interfaz parada.
@@ -33,11 +35,21 @@ pub struct PlayerWindow {
     catching_up: bool,
 }
 
+/// Un número con los decimales justos y la coma (o el punto) del idioma en
+/// uso.
+fn number(value: impl std::fmt::Display) -> String {
+    let text = value.to_string();
+    match crate::i18n::current() {
+        Lang::Es => text.replace('.', ","),
+        Lang::En => text,
+    }
+}
+
 fn speed_label(speed: f32) -> String {
     if speed.fract() == 0.0 {
         format!("{speed:.0}×")
     } else {
-        format!("{speed}×").replace('.', ",")
+        format!("{}×", number(speed))
     }
 }
 
@@ -176,9 +188,9 @@ impl PlayerWindow {
     fn controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let (label, hover) = if self.player.playing {
-                ("⏸", "Pausa (Espacio)")
+                ("⏸", tr("Pausa (Espacio)"))
             } else {
-                ("▶", "Reproducir (Espacio)")
+                ("▶", tr("Reproducir (Espacio)"))
             };
             if ui
                 .add_sized([30.0, 20.0], egui::Button::new(label))
@@ -189,7 +201,7 @@ impl PlayerWindow {
             }
             if ui
                 .button("⏮")
-                .on_hover_text("Volver al principio (Inicio)")
+                .on_hover_text(tr("Volver al principio (Inicio)"))
                 .clicked()
             {
                 self.seek(0.0);
@@ -211,7 +223,9 @@ impl PlayerWindow {
                     duration > 0.0,
                     egui::Slider::new(&mut position, 0.0..=duration.max(0.001)).show_value(false),
                 )
-                .on_hover_text("Posición: arrastra para ir a cualquier punto (flechas: ±5 s)");
+                .on_hover_text(tr(
+                    "Posición: arrastra para ir a cualquier punto (flechas: ±5 s)",
+                ));
             if slider.changed() {
                 self.seek(position);
             }
@@ -224,13 +238,13 @@ impl PlayerWindow {
                     }
                 })
                 .response
-                .on_hover_text("Velocidad");
+                .on_hover_text(tr("Velocidad"));
             let mut skip = self.player.idle_limit().is_some();
             if ui
-                .checkbox(&mut skip, "Saltar silencios")
-                .on_hover_text(format!(
-                    "Ningún silencio dura más de {} s",
-                    format!("{}", self.idle_limit).replace('.', ",")
+                .checkbox(&mut skip, tr("Saltar silencios"))
+                .on_hover_text(trf!(
+                    "Ningún silencio dura más de {segundos} s",
+                    segundos = number(self.idle_limit)
                 ))
                 .changed()
             {
@@ -262,19 +276,19 @@ impl PlayerWindow {
             parts.push(format!("asciicast v{}", cast.version));
             ui.weak(parts.join(" · "));
             if cast.event_count() == 0 {
-                ui.colored_label(warn_color(), "La grabación está vacía");
+                ui.colored_label(warn_color(), tr("La grabación está vacía"));
             }
             if cast.skipped > 0 {
                 ui.colored_label(
                     warn_color(),
                     match cast.skipped {
-                        1 => "⚠ 1 línea ilegible se ha saltado".to_string(),
-                        n => format!("⚠ {n} líneas ilegibles se han saltado"),
+                        1 => tr("⚠ 1 línea ilegible se ha saltado").to_string(),
+                        n => trf!("⚠ {n} líneas ilegibles se han saltado", n),
                     },
                 );
             }
             if self.catching_up {
-                ui.weak("⌛ avanzando…");
+                ui.weak(tr("⌛ avanzando…"));
             }
         });
     }

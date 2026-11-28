@@ -1,15 +1,18 @@
 //! Utilidades de presentación.
 
+use crate::i18n::tr;
 use crate::model::{AuthMethod, Protocol, Session};
+use crate::{mark, trf};
 
-/// Colores listos para marcar pestañas (el primero, para producción).
+/// Colores listos para marcar pestañas (el primero, para producción). El
+/// nombre va sin traducir: se traduce al enseñarlo.
 pub const TAB_COLORS: [(&str, u32); 6] = [
-    ("Rojo", 0xd9453c),
-    ("Naranja", 0xe08a2b),
-    ("Amarillo", 0xd9b93c),
-    ("Verde", 0x4fae5b),
-    ("Azul", 0x3f8fd9),
-    ("Morado", 0x9a63d6),
+    (mark!("Rojo"), 0xd9453c),
+    (mark!("Naranja"), 0xe08a2b),
+    (mark!("Amarillo"), 0xd9b93c),
+    (mark!("Verde"), 0x4fae5b),
+    (mark!("Azul"), 0x3f8fd9),
+    (mark!("Morado"), 0x9a63d6),
 ];
 
 /// Elección del color con el que se marcan las pestañas: ninguno propio
@@ -38,18 +41,24 @@ pub fn tab_color_ui(ui: &mut egui::Ui, label: &str, color: &mut Option<crate::th
                         egui::StrokeKind::Inside,
                     );
                 }
-                if response.on_hover_text(name).clicked() {
+                if response.on_hover_text(tr(name)).clicked() {
                     *current = preset;
                     changed = true;
                 }
             }
             changed |= ui
                 .color_edit_button_srgb(&mut current.0)
-                .on_hover_text("Otro color")
+                .on_hover_text(tr("Otro color"))
                 .changed();
         }
     });
     changed
+}
+
+/// Un porcentaje sin decimales, como se escribe en el idioma en uso
+/// («37 %» en español, «37%» en inglés).
+pub fn percent(value: f32) -> String {
+    trf!("{n} %", n = format!("{value:.0}"))
 }
 
 pub fn format_size(bytes: u64) -> String {
@@ -113,15 +122,15 @@ pub fn parse_quick_connect(input: &str, protocol: Protocol) -> Result<Session, S
         None => ("", input),
     };
     if rest.is_empty() {
-        return Err("Escribe usuario@host[:puerto]".into());
+        return Err(tr("Escribe usuario@host[:puerto]").into());
     }
     let (host, port) = if let Some(stripped) = rest.strip_prefix('[') {
         // [IPv6]:puerto
         let (h, tail) = stripped
             .split_once(']')
-            .ok_or("Dirección IPv6 mal formada")?;
+            .ok_or(tr("Dirección IPv6 mal formada"))?;
         let port = match tail.strip_prefix(':') {
-            Some(p) => p.parse::<u16>().map_err(|_| "Puerto no válido")?,
+            Some(p) => p.parse::<u16>().map_err(|_| tr("Puerto no válido"))?,
             None => protocol.default_port(),
         };
         (h.to_string(), port)
@@ -130,19 +139,19 @@ pub fn parse_quick_connect(input: &str, protocol: Protocol) -> Result<Session, S
             // Un solo ':' => host:puerto; varios => IPv6 sin corchetes.
             Some((h, p)) if !h.contains(':') => (
                 h.to_string(),
-                p.parse::<u16>().map_err(|_| "Puerto no válido")?,
+                p.parse::<u16>().map_err(|_| tr("Puerto no válido"))?,
             ),
             _ => (rest.to_string(), protocol.default_port()),
         }
     };
     if host.is_empty() || port == 0 {
-        return Err("Host o puerto no válidos".into());
+        return Err(tr("Host o puerto no válidos").into());
     }
     if protocol == Protocol::Serial {
-        return Err("La conexión rápida no admite el puerto serie".into());
+        return Err(tr("La conexión rápida no admite el puerto serie").into());
     }
     if user.is_empty() && protocol.is_ssh() {
-        return Err("Falta el usuario: usuario@host".into());
+        return Err(tr("Falta el usuario: usuario@host").into());
     }
     Ok(Session {
         name: String::new(),

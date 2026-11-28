@@ -3,8 +3,10 @@
 
 use uuid::Uuid;
 
+use crate::i18n::tr;
 use crate::model::Tree;
 use crate::theme::{error_color, ok_color, warn_color};
+use crate::trf;
 use crate::triggers::{
     Line, LongCommand, MAX_COOLDOWN, MAX_PATTERN_CHARS, MAX_RULES, MAX_SEND_CHARS,
     MIN_SEND_COOLDOWN, Pattern, Scope, Trigger, TriggerSettings,
@@ -24,19 +26,19 @@ pub struct TriggersWindow {
 /// Texto del ámbito de una regla.
 fn scope_label(scope: &Scope, tree: &Tree) -> String {
     match scope {
-        Scope::All => "Todos los terminales".to_string(),
+        Scope::All => tr("Todos los terminales").to_string(),
         Scope::Folder(id) => tree
             .folder_paths()
             .into_iter()
             .find(|(folder, _)| folder == id)
-            .map_or("(carpeta eliminada)".to_string(), |(_, path)| {
+            .map_or(tr("(carpeta eliminada)").to_string(), |(_, path)| {
                 format!("📁 {path}")
             }),
         Scope::Session(id) => tree
             .session_paths()
             .into_iter()
             .find(|(session, _)| session == id)
-            .map_or("(equipo eliminado)".to_string(), |(_, path)| path),
+            .map_or(tr("(equipo eliminado)").to_string(), |(_, path)| path),
     }
 }
 
@@ -84,13 +86,13 @@ impl TriggersWindow {
                 settings.rules[index] = self.draft.clone();
             }
             None if settings.rules.len() >= MAX_RULES => {
-                self.message = Some((format!("No caben más de {MAX_RULES} reglas"), true));
+                self.message = Some((trf!("No caben más de {max} reglas", max = MAX_RULES), true));
                 return false;
             }
             None => settings.rules.push(self.draft.clone()),
         }
         self.selected = Some(self.draft.id);
-        self.message = Some(("Regla guardada".into(), false));
+        self.message = Some((tr("Regla guardada").into(), false));
         true
     }
 
@@ -103,7 +105,7 @@ impl TriggersWindow {
     ) -> (bool, bool) {
         let mut open = true;
         let before = settings.clone();
-        egui::Window::new("Disparadores")
+        egui::Window::new(tr("Disparadores"))
             .id(egui::Id::unique("triggers_window"))
             .open(&mut open)
             .collapsible(false)
@@ -111,10 +113,10 @@ impl TriggersWindow {
             .default_pos([240.0, 60.0])
             .show(ctx, |ui| {
                 ui.set_width(800.0);
-                ui.weak(
+                ui.weak(tr(
                     "Reglas que reaccionan cuando en la salida de un terminal aparece un texto: \
                      avisan y marcan la pestaña o, si lo pides expresamente, contestan por ti.",
-                );
+                ));
                 ui.add_space(4.0);
                 ui.allocate_ui_with_layout(
                     egui::vec2(800.0, 390.0),
@@ -138,7 +140,7 @@ impl TriggersWindow {
     }
 
     fn rule_list(&mut self, ui: &mut egui::Ui, settings: &mut TriggerSettings) {
-        ui.strong(format!("Reglas ({})", settings.rules.len()));
+        ui.strong(trf!("Reglas ({n})", n = settings.rules.len()));
         let mut pick = None;
         egui::ScrollArea::vertical()
             .id_salt("trigger_list")
@@ -146,12 +148,12 @@ impl TriggersWindow {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if settings.rules.is_empty() {
-                    ui.weak("Aún no hay reglas.");
+                    ui.weak(tr("Aún no hay reglas."));
                 }
                 for rule in &mut settings.rules {
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut rule.enabled, "")
-                            .on_hover_text("Regla activa");
+                            .on_hover_text(tr("Regla activa"));
                         let mut name = egui::RichText::new(rule.display_name());
                         if !rule.enabled {
                             name = name.weak();
@@ -161,7 +163,10 @@ impl TriggersWindow {
                                 egui::Button::selectable(self.selected == Some(rule.id), name)
                                     .truncate(),
                             )
-                            .on_hover_text(format!("Cuando aparezca «{}»", rule.pattern.trim()));
+                            .on_hover_text(trf!(
+                                "Cuando aparezca «{texto}»",
+                                texto = rule.pattern.trim()
+                            ));
                         if label.clicked() {
                             pick = Some(rule.clone());
                         }
@@ -171,21 +176,25 @@ impl TriggersWindow {
                         ui.add_space(26.0);
                         if rule.sends() {
                             ui.label(
-                                egui::RichText::new("⚠ ENVÍA TEXTO")
+                                egui::RichText::new(tr("⚠ ENVÍA TEXTO"))
                                     .strong()
                                     .color(warn_color()),
                             )
-                            .on_hover_text(format!(
-                                "Escribe en el terminal sin preguntar:\n{}",
-                                rule.send.as_deref().unwrap_or_default()
+                            .on_hover_text(trf!(
+                                "Escribe en el terminal sin preguntar:\n{texto}",
+                                texto = rule.send.as_deref().unwrap_or_default()
                             ));
                         }
                         let mut what = vec![];
                         if rule.notify {
-                            what.push(if rule.bell { "avisa 🔔" } else { "avisa" });
+                            what.push(if rule.bell {
+                                tr("avisa 🔔")
+                            } else {
+                                tr("avisa")
+                            });
                         }
                         if !matches!(rule.scope, Scope::All) {
-                            what.push("ámbito limitado");
+                            what.push(tr("ámbito limitado"));
                         }
                         ui.weak(what.join(" · "));
                     });
@@ -198,7 +207,7 @@ impl TriggersWindow {
         if ui
             .add_enabled(
                 settings.rules.len() < MAX_RULES,
-                egui::Button::new("➕ Nueva regla"),
+                egui::Button::new(tr("➕ Nueva regla")),
             )
             .clicked()
         {
@@ -212,41 +221,45 @@ impl TriggersWindow {
             .num_columns(2)
             .spacing([8.0, 6.0])
             .show(ui, |ui| {
-                ui.label("Nombre");
+                ui.label(tr("Nombre"));
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.name)
                         .desired_width(380.0)
-                        .hint_text("opcional"),
+                        .hint_text(tr("opcional")),
                 );
                 ui.end_row();
 
-                ui.label("Cuando aparezca");
+                ui.label(tr("Cuando aparezca"));
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.pattern)
                         .font(egui::TextStyle::Monospace)
                         .char_limit(MAX_PATTERN_CHARS)
                         .desired_width(380.0)
-                        .hint_text("texto que dispara la regla"),
+                        .hint_text(tr("texto que dispara la regla")),
                 );
                 ui.end_row();
 
                 ui.label("");
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut draft.wildcards, "Comodines")
-                        .on_hover_text(
+                    ui.checkbox(&mut draft.wildcards, tr("Comodines"))
+                        .on_hover_text(tr(
                             "* vale por cualquier texto y ? por un carácter cualquiera; \\* y \
                              \\? son los signos tal cual",
-                        );
-                    ui.checkbox(&mut draft.case_sensitive, "Distinguir mayúsculas");
+                        ));
+                    ui.checkbox(&mut draft.case_sensitive, tr("Distinguir mayúsculas"));
                 });
                 ui.end_row();
 
-                ui.label("En");
+                ui.label(tr("En"));
                 egui::ComboBox::from_id_salt("trigger_scope")
                     .selected_text(scope_label(&draft.scope, tree))
                     .width(380.0)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut draft.scope, Scope::All, "Todos los terminales");
+                        ui.selectable_value(
+                            &mut draft.scope,
+                            Scope::All,
+                            tr("Todos los terminales"),
+                        );
                         for (id, path) in tree.folder_paths() {
                             ui.selectable_value(
                                 &mut draft.scope,
@@ -262,25 +275,27 @@ impl TriggersWindow {
             });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.checkbox(&mut draft.notify, "Avisar")
-                .on_hover_text("Un aviso en la barra de estado y una marca en la pestaña");
+            ui.checkbox(&mut draft.notify, tr("Avisar"))
+                .on_hover_text(tr(
+                    "Un aviso en la barra de estado y una marca en la pestaña",
+                ));
             ui.add_enabled(
                 draft.notify,
-                egui::Checkbox::new(&mut draft.bell, "con campana 🔔"),
+                egui::Checkbox::new(&mut draft.bell, tr("con campana 🔔")),
             )
-            .on_hover_text(
+            .on_hover_text(tr(
                 "La pestaña lleva la campana y, si GodRemote no está en primer plano, pide \
                  atención en la barra de tareas",
-            );
+            ));
         });
         // Enviar texto: hay que pedirlo y confirmarlo.
         let mut sends = draft.send.is_some();
         let asked = ui
             .checkbox(
                 &mut sends,
-                egui::RichText::new("⚠ Enviar un texto al terminal").color(warn_color()),
+                egui::RichText::new(tr("⚠ Enviar un texto al terminal")).color(warn_color()),
             )
-            .on_hover_text("La regla escribe en el terminal sin preguntar")
+            .on_hover_text(tr("La regla escribe en el terminal sin preguntar"))
             .changed();
         if asked {
             if sends {
@@ -294,21 +309,23 @@ impl TriggersWindow {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.colored_label(
                     warn_color(),
-                    "Esta regla escribirá en el terminal por su cuenta cada vez que el texto \
+                    tr(
+                        "Esta regla escribirá en el terminal por su cuenta cada vez que el texto \
                      aparezca en la línea donde espera el cursor.",
+                    ),
                 );
-                ui.label(
+                ui.label(tr(
                     "Lo recibirá cualquier servidor o programa que escriba ese texto, no solo \
                      el que tienes en mente. No pongas contraseñas: se guardan sin cifrar con \
                      los ajustes.",
-                );
+                ));
                 ui.horizontal(|ui| {
-                    if ui.button("Sí, que envíe texto").clicked() {
+                    if ui.button(tr("Sí, que envíe texto")).clicked() {
                         draft.send = Some(String::new());
                         draft.cooldown_secs = draft.cooldown_secs.max(MIN_SEND_COOLDOWN);
                         self.confirming_send = false;
                     }
-                    if ui.button("No").clicked() {
+                    if ui.button(tr("No")).clicked() {
                         self.confirming_send = false;
                     }
                 });
@@ -321,17 +338,17 @@ impl TriggersWindow {
                     .char_limit(MAX_SEND_CHARS)
                     .desired_rows(2)
                     .desired_width(f32::INFINITY)
-                    .hint_text("Respuesta; cada salto de línea es Intro"),
+                    .hint_text(tr("Respuesta; cada salto de línea es Intro")),
             );
-            ui.weak(
+            ui.weak(tr(
                 "Como en los snippets: un salto de línea es Intro; \\e, \\t y \\x03 son teclas \
                  especiales. Solo se envía si el texto está en la línea donde espera el cursor \
                  y lleva un momento quieta; nunca a lo que pasa de largo en un listado ni a una \
                  aplicación a pantalla completa.",
-            );
+            ));
         }
         ui.horizontal(|ui| {
-            ui.label("No volver a dispararse en");
+            ui.label(tr("No volver a dispararse en"));
             let min = if draft.send.is_some() {
                 MIN_SEND_COOLDOWN
             } else {
@@ -342,24 +359,24 @@ impl TriggersWindow {
                     .range(min..=MAX_COOLDOWN)
                     .suffix(" s"),
             )
-            .on_hover_text("Enfriamiento: evita que la regla se dispare en bucle");
-            ui.weak("en el mismo terminal");
+            .on_hover_text(tr("Enfriamiento: evita que la regla se dispare en bucle"));
+            ui.weak(tr("en el mismo terminal"));
         });
         ui.horizontal(|ui| {
-            ui.label("Probar con");
+            ui.label(tr("Probar con"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.sample)
                     .font(egui::TextStyle::Monospace)
                     .desired_width(280.0)
-                    .hint_text("una línea de ejemplo"),
+                    .hint_text(tr("una línea de ejemplo")),
             );
             if !self.sample.is_empty() {
                 match Pattern::new(&draft.pattern, draft.wildcards, draft.case_sensitive) {
                     Some(pattern) if pattern.is_match(&Line::new(&self.sample)) => {
-                        ui.colored_label(ok_color(), "✔ se dispara")
+                        ui.colored_label(ok_color(), tr("✔ se dispara"))
                     }
-                    Some(_) => ui.weak("no se dispara"),
-                    None => ui.weak("falta el texto"),
+                    Some(_) => ui.weak(tr("no se dispara")),
+                    None => ui.weak(tr("falta el texto")),
                 };
             }
         });
@@ -368,10 +385,10 @@ impl TriggersWindow {
         let mut remove = false;
         ui.horizontal(|ui| {
             save = ui
-                .add_enabled(!self.confirming_send, egui::Button::new("Guardar"))
+                .add_enabled(!self.confirming_send, egui::Button::new(tr("Guardar")))
                 .clicked();
             remove = ui
-                .add_enabled(self.selected.is_some(), egui::Button::new("🗑 Eliminar"))
+                .add_enabled(self.selected.is_some(), egui::Button::new(tr("🗑 Eliminar")))
                 .clicked();
             if let Some((message, is_error)) = &self.message {
                 let color = if *is_error { error_color() } else { ok_color() };
@@ -387,18 +404,18 @@ impl TriggersWindow {
                 Some(first) => self.load(&first),
                 None => self.blank(),
             }
-            self.message = Some(("Regla eliminada".into(), false));
+            self.message = Some((tr("Regla eliminada").into(), false));
         }
     }
 }
 
 /// El aviso incorporado de fin de orden larga.
 fn long_command_section(ui: &mut egui::Ui, long: &mut LongCommand) {
-    ui.strong("Órdenes largas");
+    ui.strong(tr("Órdenes largas"));
     ui.horizontal(|ui| {
         ui.checkbox(
             &mut long.enabled,
-            "Avisar cuando termine una orden que dure más de",
+            tr("Avisar cuando termine una orden que dure más de"),
         );
         ui.add_enabled(
             long.enabled,
@@ -406,17 +423,17 @@ fn long_command_section(ui: &mut egui::Ui, long: &mut LongCommand) {
                 .range(LongCommand::MIN_SECONDS..=LongCommand::MAX_SECONDS)
                 .suffix(" s"),
         );
-        ui.label("en una pestaña que no estoy mirando");
+        ui.label(tr("en una pestaña que no estoy mirando"));
         ui.add_enabled(
             long.enabled,
-            egui::Checkbox::new(&mut long.bell, "con campana 🔔"),
+            egui::Checkbox::new(&mut long.bell, tr("con campana 🔔")),
         );
     });
-    ui.weak(
+    ui.weak(tr(
         "Si la shell marca sus órdenes (integración de shell, OSC 133: fish, PowerShell en \
          Windows Terminal, o bash y zsh con la integración de kitty, WezTerm, iTerm2…) el aviso \
          es exacto y dice si terminó con error. Si no, se deduce: se pulsó Intro, hubo salida \
          durante ese tiempo y después silencio con el cursor en algo que parece un indicador \
          o una pregunta.",
-    );
+    ));
 }

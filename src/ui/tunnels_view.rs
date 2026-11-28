@@ -5,8 +5,10 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
+use crate::i18n::tr;
 use crate::model::TunnelKind;
 use crate::theme::{error_color, ok_color, warn_color};
+use crate::trf;
 use crate::tunnel_manager::{RunState, SavedTunnel, TunnelStore};
 
 /// Estado de un túnel, tal como lo ve la ventana.
@@ -89,11 +91,11 @@ impl TunnelsWindow {
         });
         if let Some(other) = clash {
             self.message = Some((
-                format!(
-                    "«{}» ya escucha en {}:{}",
-                    other.display_name(),
-                    other.tunnel.listen_host.trim(),
-                    other.tunnel.listen_port
+                trf!(
+                    "«{nombre}» ya escucha en {host}:{puerto}",
+                    nombre = other.display_name(),
+                    host = other.tunnel.listen_host.trim(),
+                    puerto = other.tunnel.listen_port
                 ),
                 true,
             ));
@@ -103,10 +105,13 @@ impl TunnelsWindow {
         store.upsert(self.draft.clone());
         self.selected = Some(self.draft.id);
         if let Err(e) = store.save(&crate::paths::tunnels_file()) {
-            self.message = Some((format!("No se pudo guardar: {e:#}"), true));
+            self.message = Some((
+                trf!("No se pudo guardar: {error}", error = format!("{e:#}")),
+                true,
+            ));
             return false;
         }
-        self.message = Some(("Túnel guardado".into(), false));
+        self.message = Some((tr("Túnel guardado").into(), false));
         true
     }
 
@@ -120,7 +125,7 @@ impl TunnelsWindow {
     ) -> (bool, Vec<TunnelRequest>) {
         let mut open = true;
         let mut requests = vec![];
-        egui::Window::new("Túneles")
+        egui::Window::new(tr("Túneles"))
             .id(egui::Id::unique("tunnels_window"))
             .open(&mut open)
             .collapsible(false)
@@ -144,11 +149,11 @@ impl TunnelsWindow {
                     },
                 );
                 ui.separator();
-                ui.weak(
+                ui.weak(tr(
                     "Cada túnel abre su propia conexión SSH con el equipo elegido (pasando por \
                      sus saltos, si los tiene) y sigue en marcha aunque no haya ningún terminal \
                      abierto. Los cambios en un túnel en marcha se aplican al volver a iniciarlo.",
-                );
+                ));
             });
         (open, requests)
     }
@@ -160,7 +165,7 @@ impl TunnelsWindow {
         states: &HashMap<Uuid, TunnelView>,
         requests: &mut Vec<TunnelRequest>,
     ) {
-        ui.strong("Túneles guardados");
+        ui.strong(tr("Túneles guardados"));
         let mut pick = None;
         egui::ScrollArea::vertical()
             .id_salt("tunnel_list")
@@ -168,7 +173,7 @@ impl TunnelsWindow {
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 if store.tunnels.is_empty() {
-                    ui.weak("Aún no hay túneles.");
+                    ui.weak(tr("Aún no hay túneles."));
                 }
                 for tunnel in &store.tunnels {
                     let view = states.get(&tunnel.id);
@@ -176,9 +181,9 @@ impl TunnelsWindow {
                         super::status_dot(ui, state_color(ui, view));
                         let running = is_running(view);
                         let (icon, hint) = if running {
-                            ("⏹", "Detener")
+                            ("⏹", tr("Detener"))
                         } else {
-                            ("▶", "Iniciar")
+                            ("▶", tr("Iniciar"))
                         };
                         if ui.small_button(icon).on_hover_text(hint).clicked() {
                             requests.push(if running {
@@ -202,7 +207,7 @@ impl TunnelsWindow {
         if let Some(tunnel) = pick {
             self.load(&tunnel);
         }
-        if ui.button("➕ Nuevo túnel").clicked() {
+        if ui.button(tr("➕ Nuevo túnel")).clicked() {
             self.blank();
         }
     }
@@ -220,30 +225,30 @@ impl TunnelsWindow {
             .num_columns(2)
             .spacing([10.0, 6.0])
             .show(ui, |ui| {
-                ui.label("Nombre");
+                ui.label(tr("Nombre"));
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.name)
                         .desired_width(280.0)
-                        .hint_text("opcional; por ejemplo «BD de producción»"),
+                        .hint_text(tr("opcional; por ejemplo «BD de producción»")),
                 );
                 ui.end_row();
 
-                ui.label("Equipo SSH");
+                ui.label(tr("Equipo SSH"));
                 let current = draft
                     .session
                     .and_then(|id| sessions.iter().find(|(sid, _)| *sid == id))
                     .map(|(_, label)| label.as_str());
                 let text = match (current, draft.session) {
                     (Some(label), _) => label,
-                    (None, Some(_)) => "(el equipo ya no existe)",
-                    (None, None) => "Elige un equipo…",
+                    (None, Some(_)) => tr("(el equipo ya no existe)"),
+                    (None, None) => tr("Elige un equipo…"),
                 };
                 egui::ComboBox::from_id_salt("tunnel_session")
                     .selected_text(text)
                     .width(288.0)
                     .show_ui(ui, |ui| {
                         if sessions.is_empty() {
-                            ui.weak("No hay equipos SSH guardados");
+                            ui.weak(tr("No hay equipos SSH guardados"));
                         }
                         for (id, label) in sessions {
                             ui.selectable_value(&mut draft.session, Some(*id), label);
@@ -251,20 +256,20 @@ impl TunnelsWindow {
                     });
                 ui.end_row();
 
-                ui.label("Tipo");
+                ui.label(tr("Tipo"));
                 egui::ComboBox::from_id_salt("tunnel_kind_standalone")
-                    .selected_text(draft.tunnel.kind.label())
+                    .selected_text(tr(draft.tunnel.kind.label()))
                     .width(190.0)
                     .show_ui(ui, |ui| {
                         for kind in TunnelKind::ALL {
-                            ui.selectable_value(&mut draft.tunnel.kind, kind, kind.label());
+                            ui.selectable_value(&mut draft.tunnel.kind, kind, tr(kind.label()));
                         }
                     });
                 ui.end_row();
 
                 ui.label(match draft.tunnel.kind {
-                    TunnelKind::Remote => "Escucha en el servidor",
-                    _ => "Escucha en este equipo",
+                    TunnelKind::Remote => tr("Escucha en el servidor"),
+                    _ => tr("Escucha en este equipo"),
                 });
                 ui.horizontal(|ui| {
                     ui.add(
@@ -272,18 +277,18 @@ impl TunnelsWindow {
                             .desired_width(180.0)
                             .hint_text("127.0.0.1"),
                     )
-                    .on_hover_text(
+                    .on_hover_text(tr(
                         "127.0.0.1 solo deja entrar desde el propio equipo; 0.0.0.0 lo abre a \
                          toda su red",
-                    );
+                    ));
                     ui.add(egui::DragValue::new(&mut draft.tunnel.listen_port).range(1..=65535));
                 });
                 ui.end_row();
 
                 if draft.tunnel.kind != TunnelKind::Dynamic {
                     ui.label(match draft.tunnel.kind {
-                        TunnelKind::Remote => "Destino, visto desde aquí",
-                        _ => "Destino, visto desde el servidor",
+                        TunnelKind::Remote => tr("Destino, visto desde aquí"),
+                        _ => tr("Destino, visto desde el servidor"),
                     });
                     ui.horizontal(|ui| {
                         ui.add(
@@ -299,42 +304,42 @@ impl TunnelsWindow {
                 }
 
                 ui.label("");
-                ui.checkbox(&mut draft.autostart, "Iniciarlo al abrir GodRemote");
+                ui.checkbox(&mut draft.autostart, tr("Iniciarlo al abrir GodRemote"));
                 ui.end_row();
             });
         ui.add_space(2.0);
         ui.weak(match draft.tunnel.kind {
-            TunnelKind::Local => {
+            TunnelKind::Local => tr(
                 "Local: lo que se conecte al puerto de este equipo sale por el servidor hacia \
-                 el destino."
-            }
-            TunnelKind::Remote => {
+                 el destino.",
+            ),
+            TunnelKind::Remote => tr(
                 "Remoto: lo que se conecte al puerto del servidor llega, a través de este \
-                 equipo, al destino."
-            }
-            TunnelKind::Dynamic => {
+                 equipo, al destino.",
+            ),
+            TunnelKind::Dynamic => tr(
                 "Dinámico: un proxy SOCKS5 en este equipo; cada programa que lo use sale a la \
-                 red por el servidor."
-            }
+                 red por el servidor.",
+            ),
         });
         ui.add_space(6.0);
 
         let view = self.selected.and_then(|id| states.get(&id));
         let running = is_running(view);
         ui.horizontal(|ui| {
-            if ui.button("Guardar").clicked() {
+            if ui.button(tr("Guardar")).clicked() {
                 self.save(store);
             }
             let saved = self.selected.is_some();
             if running {
-                if ui.button("⏹ Detener").clicked()
+                if ui.button(tr("⏹ Detener")).clicked()
                     && let Some(id) = self.selected
                 {
                     requests.push(TunnelRequest::Stop(id));
                 }
             } else if ui
-                .add_enabled(saved, egui::Button::new("▶ Iniciar"))
-                .on_disabled_hover_text("Guarda el túnel para poder iniciarlo")
+                .add_enabled(saved, egui::Button::new(tr("▶ Iniciar")))
+                .on_disabled_hover_text(tr("Guarda el túnel para poder iniciarlo"))
                 .clicked()
                 && let Some(id) = self.selected
             {
@@ -345,7 +350,7 @@ impl TunnelsWindow {
                 }
             }
             if ui
-                .add_enabled(saved, egui::Button::new("🗑 Eliminar"))
+                .add_enabled(saved, egui::Button::new(tr("🗑 Eliminar")))
                 .clicked()
                 && let Some(id) = self.selected
             {
@@ -357,9 +362,14 @@ impl TunnelsWindow {
                             Some(first) => self.load(&first),
                             None => self.blank(),
                         }
-                        self.message = Some(("Túnel eliminado".into(), false));
+                        self.message = Some((tr("Túnel eliminado").into(), false));
                     }
-                    Err(e) => self.message = Some((format!("No se pudo guardar: {e:#}"), true)),
+                    Err(e) => {
+                        self.message = Some((
+                            trf!("No se pudo guardar: {error}", error = format!("{e:#}")),
+                            true,
+                        ))
+                    }
                 }
             }
         });
@@ -375,13 +385,16 @@ impl TunnelsWindow {
                 Some(TunnelView { state, .. }) => match state {
                     RunState::Active => ui.colored_label(
                         ok_color(),
-                        format!("En marcha: {}", self.draft_saved(store).tunnel.describe()),
+                        trf!(
+                            "En marcha: {tunel}",
+                            tunel = self.draft_saved(store).tunnel.describe()
+                        ),
                     ),
                     RunState::Connecting(text) => ui.colored_label(warn_color(), text),
                     RunState::Failed(error) => ui.colored_label(error_color(), error),
-                    RunState::Stopped => ui.weak("Detenido"),
+                    RunState::Stopped => ui.weak(tr("Detenido")),
                 },
-                None => ui.weak("Detenido"),
+                None => ui.weak(tr("Detenido")),
             };
         });
         if let Some((message, is_error)) = &self.message {

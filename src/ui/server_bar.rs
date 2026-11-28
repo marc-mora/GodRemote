@@ -3,11 +3,14 @@
 
 use egui::{Color32, FontId, RichText};
 
+use super::util;
+use crate::i18n::tr;
 use crate::model::Session;
 use crate::monitor::{
     BarItem, Monitor, ServerBar, Stats, format_kb, format_rate, format_uptime, parse_disks,
 };
 use crate::theme;
+use crate::trf;
 
 /// Un dato de la barra: etiqueta tenue, valor y, si es un porcentaje, su
 /// barrita de uso.
@@ -39,17 +42,20 @@ impl Chip {
     }
 }
 
+/// Con la coma (o el punto) decimal del idioma en uso.
 fn decimal(value: f32) -> String {
-    format!("{value:.2}").replace('.', ",")
+    crate::i18n::decimal(f64::from(value), 2)
 }
 
 /// Datos que se muestran para un elemento. Vacío si el servidor no lo da.
 fn chips(item: BarItem, session: &Session, stats: Option<&Stats>) -> Vec<Chip> {
     // Lo que no depende del servidor se muestra desde el primer momento.
     match item {
-        BarItem::Name => return vec![Chip::new("", session.display_name()).hover("Sesión")],
+        BarItem::Name => return vec![Chip::new("", session.display_name()).hover(tr("Sesión"))],
         BarItem::Target => {
-            return vec![Chip::new("", session.target()).hover("Usuario y dirección de conexión")];
+            return vec![
+                Chip::new("", session.target()).hover(tr("Usuario y dirección de conexión")),
+            ];
         }
         _ => {}
     }
@@ -60,7 +66,7 @@ fn chips(item: BarItem, session: &Session, stats: Option<&Stats>) -> Vec<Chip> {
     match item {
         BarItem::Name | BarItem::Target => vec![],
         BarItem::Host if !s.host.is_empty() => {
-            one(Chip::new("", s.host.clone()).hover("Nombre del servidor"))
+            one(Chip::new("", s.host.clone()).hover(tr("Nombre del servidor")))
         }
         BarItem::Ip if !s.ips.is_empty() => {
             one(Chip::new("IP", s.ips[0].clone()).hover(s.ips.join("\n")))
@@ -75,17 +81,17 @@ fn chips(item: BarItem, session: &Session, stats: Option<&Stats>) -> Vec<Chip> {
         )),
         BarItem::Uptime => s
             .uptime_secs
-            .map(|u| Chip::new("Encendido", format_uptime(u)))
+            .map(|u| Chip::new(tr("Encendido"), format_uptime(u)))
             .into_iter()
             .collect(),
         BarItem::Load => s
             .load
             .map(|l| {
                 let chip = Chip::new(
-                    "Carga",
+                    tr("Carga"),
                     format!("{} {} {}", decimal(l[0]), decimal(l[1]), decimal(l[2])),
                 )
-                .hover("Carga media en 1, 5 y 15 minutos");
+                .hover(tr("Carga media en 1, 5 y 15 minutos"));
                 // Con los núcleos se sabe cuánta carga es mucha.
                 match s.cores {
                     Some(cores) => Chip {
@@ -100,10 +106,10 @@ fn chips(item: BarItem, session: &Session, stats: Option<&Stats>) -> Vec<Chip> {
         BarItem::Cpu => {
             let cores = s
                 .cores
-                .map(|c| format!("{c} núcleo(s)"))
+                .map(|c| trf!("{c} núcleo(s)", c))
                 .unwrap_or_default();
             match s.cpu {
-                Some(cpu) => one(Chip::new("CPU", format!("{cpu:.0} %"))
+                Some(cpu) => one(Chip::new("CPU", util::percent(cpu))
                     .percent(cpu)
                     .hover(cores)),
                 // Hace falta una segunda muestra para saber el uso.
@@ -117,9 +123,10 @@ fn chips(item: BarItem, session: &Session, stats: Option<&Stats>) -> Vec<Chip> {
                 let percent = used as f32 * 100.0 / total.max(1) as f32;
                 Chip::new("Mem", format!("{} / {}", format_kb(used), format_kb(total)))
                     .percent(percent)
-                    .hover(format!(
-                        "Memoria en uso: {percent:.0} %\nDisponible: {}",
-                        format_kb(total.saturating_sub(used))
+                    .hover(trf!(
+                        "Memoria en uso: {uso}\nDisponible: {libre}",
+                        uso = util::percent(percent),
+                        libre = format_kb(total.saturating_sub(used))
                     ))
             })
             .into_iter()
@@ -133,7 +140,10 @@ fn chips(item: BarItem, session: &Session, stats: Option<&Stats>) -> Vec<Chip> {
                     format!("{} / {}", format_kb(used), format_kb(total)),
                 )
                 .percent(percent)
-                .hover(format!("Intercambio en uso: {percent:.0} %"))
+                .hover(trf!(
+                    "Intercambio en uso: {uso}",
+                    uso = util::percent(percent)
+                ))
             })
             .into_iter()
             .collect(),
@@ -142,42 +152,47 @@ fn chips(item: BarItem, session: &Session, stats: Option<&Stats>) -> Vec<Chip> {
             .iter()
             .map(|d| {
                 Chip::new(
-                    &format!("Disco {}", d.mount),
-                    format!("{} libres", format_kb(d.available)),
+                    &trf!("Disco {disco}", disco = d.mount),
+                    trf!("{espacio} libres", espacio = format_kb(d.available)),
                 )
                 .percent(d.used_percent())
-                .hover(format!(
-                    "{}\nTotal: {}\nUsado: {} ({:.0} %)",
-                    d.filesystem,
-                    format_kb(d.total),
-                    format_kb(d.used),
-                    d.used_percent()
+                .hover(trf!(
+                    "{sistema}\nTotal: {total}\nUsado: {usado} ({uso})",
+                    sistema = d.filesystem,
+                    total = format_kb(d.total),
+                    usado = format_kb(d.used),
+                    uso = util::percent(d.used_percent())
                 ))
             })
             .collect(),
         BarItem::Network => match s.network {
             Some((rx, tx)) => one(Chip::new(
-                "Red",
+                tr("Red"),
                 format!("⬇ {}  ⬆ {}", format_rate(rx), format_rate(tx)),
             )
-            .hover("Tráfico recibido y enviado (sin contar interfaces virtuales)")),
-            None if s.memory.is_some() => one(Chip::new("Red", "…")),
+            .hover(tr(
+                "Tráfico recibido y enviado (sin contar interfaces virtuales)",
+            ))),
+            None if s.memory.is_some() => one(Chip::new(tr("Red"), "…")),
             None => vec![],
         },
         BarItem::Users => s
             .users
-            .map(|u| Chip::new("Usuarios", u.to_string()).hover("Sesiones de usuario abiertas"))
+            .map(|u| {
+                Chip::new(tr("Usuarios"), u.to_string()).hover(tr("Sesiones de usuario abiertas"))
+            })
             .into_iter()
             .collect(),
         BarItem::Processes => s
             .processes
-            .map(|p| Chip::new("Procesos", p.to_string()))
+            .map(|p| Chip::new(tr("Procesos"), p.to_string()))
             .into_iter()
             .collect(),
         BarItem::Time if !s.time.is_empty() => {
             // «2026-11-27 16:20:01 UTC»: en la barra, solo la hora.
             let short = s.time.split_once(' ').map(|(_, t)| t).unwrap_or(&s.time);
-            one(Chip::new("Hora", short).hover(format!("Hora del servidor: {}", s.time)))
+            one(Chip::new(tr("Hora"), short)
+                .hover(trf!("Hora del servidor: {hora}", hora = s.time)))
         }
         _ => vec![],
     }
@@ -224,7 +239,7 @@ pub fn show(
                         .frame(false)
                         .small(),
                 )
-                .on_hover_text("Elegir qué se muestra en esta barra")
+                .on_hover_text(tr("Elegir qué se muestra en esta barra"))
                 .clicked()
             {
                 open_settings = true;
@@ -246,13 +261,13 @@ pub fn show(
                         }
                         let note = match monitor {
                             Some(m) if m.stats.is_none() => match &m.error {
-                                Some(error) => Some(format!("Sin datos del servidor: {error}")),
-                                None => Some("Consultando el servidor…".to_string()),
+                                Some(error) => Some(trf!("Sin datos del servidor: {error}", error)),
+                                None => Some(tr("Consultando el servidor…").to_string()),
                             },
                             Some(m) => m
                                 .error
                                 .as_ref()
-                                .map(|e| format!("Datos sin actualizar: {e}")),
+                                .map(|error| trf!("Datos sin actualizar: {error}", error)),
                             // Conectando o desconectado: ya lo dice la
                             // cabecera de la pestaña.
                             None => None,
@@ -319,7 +334,7 @@ impl ServerBarWindow {
     pub fn show(&mut self, ctx: &egui::Context, config: &mut ServerBar) -> (bool, bool) {
         let mut open = true;
         let before = config.clone();
-        egui::Window::new("Barra de información del servidor")
+        egui::Window::new(tr("Barra de información del servidor"))
             .id(egui::Id::unique("server_bar_window"))
             .open(&mut open)
             .collapsible(false)
@@ -329,37 +344,37 @@ impl ServerBarWindow {
                 ui.set_width(460.0);
                 ui.checkbox(
                     &mut config.enabled,
-                    "Mostrar la barra bajo los terminales SSH",
+                    tr("Mostrar la barra bajo los terminales SSH"),
                 );
-                ui.weak(
+                ui.weak(tr(
                     "Los datos se piden por un canal aparte de la misma conexión, sin escribir \
                      nada en tu terminal. Hace falta que el servidor tenga una shell POSIX; el \
                      uso de CPU, memoria y red sale de /proc (Linux). Cada equipo puede \
                      desactivarla en su ficha.",
-                );
+                ));
                 ui.add_space(6.0);
                 ui.add_enabled_ui(config.enabled, |ui| {
                     egui::Grid::new("server_bar_grid")
                         .num_columns(2)
                         .show(ui, |ui| {
-                            ui.label("Actualizar cada");
+                            ui.label(tr("Actualizar cada"));
                             ui.add(
                                 egui::DragValue::new(&mut config.interval)
                                     .range(1..=3600)
                                     .suffix(" s"),
                             );
                             ui.end_row();
-                            ui.label("Discos");
+                            ui.label(tr("Discos"));
                             let response = ui
                                 .add(
                                     egui::TextEdit::singleline(&mut self.disks)
                                         .desired_width(260.0)
                                         .hint_text("/, /home, /var"),
                                 )
-                                .on_hover_text(
+                                .on_hover_text(tr(
                                     "Rutas del servidor cuyo espacio libre se muestra, \
                                      separadas por comas",
-                                );
+                                ));
                             if response.changed() {
                                 let (good, bad) = parse_disks(&self.disks);
                                 self.rejected = bad;
@@ -370,20 +385,20 @@ impl ServerBarWindow {
                                 };
                             }
                             ui.end_row();
-                            ui.label("Barritas de uso");
-                            ui.checkbox(&mut config.gauges, "Junto a CPU, memoria y disco");
+                            ui.label(tr("Barritas de uso"));
+                            ui.checkbox(&mut config.gauges, tr("Junto a CPU, memoria y disco"));
                             ui.end_row();
-                            ui.label("Color de aviso desde");
+                            ui.label(tr("Color de aviso desde"));
                             ui.add(
                                 egui::Slider::new(&mut config.warn, 1.0..=100.0)
-                                    .suffix(" %")
+                                    .suffix(tr(" %"))
                                     .max_decimals(0),
                             );
                             ui.end_row();
-                            ui.label("Color de error desde");
+                            ui.label(tr("Color de error desde"));
                             ui.add(
                                 egui::Slider::new(&mut config.critical, 1.0..=100.0)
-                                    .suffix(" %")
+                                    .suffix(tr(" %"))
                                     .max_decimals(0),
                             );
                             ui.end_row();
@@ -391,18 +406,18 @@ impl ServerBarWindow {
                     if !self.rejected.is_empty() {
                         ui.colored_label(
                             theme::error_color(),
-                            format!(
-                                "Rutas no admitidas (solo letras, números y / _ . -): {}",
-                                self.rejected.join(" ")
+                            trf!(
+                                "Rutas no admitidas (solo letras, números y / _ . -): {rutas}",
+                                rutas = self.rejected.join(" ")
                             ),
                         );
                     }
                     ui.add_space(6.0);
-                    ui.strong("Qué se muestra, y en qué orden");
+                    ui.strong(tr("Qué se muestra, y en qué orden"));
                     items_ui(ui, config);
                 });
                 ui.add_space(6.0);
-                if ui.button("Restablecer").clicked() {
+                if ui.button(tr("Restablecer")).clicked() {
                     *config = ServerBar::default();
                     *self = Self::new(config);
                 }
@@ -431,20 +446,20 @@ fn items_ui(ui: &mut egui::Ui, config: &mut ServerBar) {
                 .show(ui, |ui| {
                     for (i, item) in config.items.iter().enumerate() {
                         let mut visible = true;
-                        if ui.checkbox(&mut visible, item.label()).changed() {
+                        if ui.checkbox(&mut visible, tr(item.label())).changed() {
                             action = Some(Action::Hide(i));
                         }
                         ui.horizontal(|ui| {
                             if ui
                                 .add_enabled(i > 0, egui::Button::new("⬆").small())
-                                .on_hover_text("Antes")
+                                .on_hover_text(tr("Antes"))
                                 .clicked()
                             {
                                 action = Some(Action::Up(i));
                             }
                             if ui
                                 .add_enabled(i + 1 < count, egui::Button::new("⬇").small())
-                                .on_hover_text("Después")
+                                .on_hover_text(tr("Después"))
                                 .clicked()
                             {
                                 action = Some(Action::Down(i));
@@ -457,7 +472,7 @@ fn items_ui(ui: &mut egui::Ui, config: &mut ServerBar) {
                             continue;
                         }
                         let mut visible = false;
-                        if ui.checkbox(&mut visible, item.label()).changed() {
+                        if ui.checkbox(&mut visible, tr(item.label())).changed() {
                             action = Some(Action::Show(item));
                         }
                         ui.end_row();
