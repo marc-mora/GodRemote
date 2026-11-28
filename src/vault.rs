@@ -310,16 +310,16 @@ impl Vault {
     /// del mismo baúl o, si no, con `master`.
     pub fn read_other(&self, raw: &[u8], master: Option<&str>) -> Result<Secrets> {
         let (salt, nonce, ciphertext, params) =
-            parts(raw).ok_or_else(|| anyhow!("El otro baúl no es válido"))?;
+            parts(raw).ok_or_else(|| anyhow!("{}", tr("El otro baúl no es válido")))?;
         let key = if salt == self.salt && params == self.params {
             self.key.clone()
         } else if let Some(master) = master.filter(|m| !m.is_empty()) {
             derive_key(master, &salt, params)?
         } else {
-            bail!("El otro baúl tiene otra contraseña maestra");
+            bail!("{}", tr("El otro baúl tiene otra contraseña maestra"));
         };
         let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
-            .map_err(|_| anyhow!("clave no válida"))?;
+            .map_err(|_| anyhow!("{}", tr("clave no válida")))?;
         let plain = Zeroizing::new(
             cipher
                 .decrypt(
@@ -329,10 +329,10 @@ impl Vault {
                         aad: AAD,
                     },
                 )
-                .map_err(|_| anyhow!("La contraseña maestra del otro baúl no es esa"))?,
+                .map_err(|_| anyhow!("{}", tr("La contraseña maestra del otro baúl no es esa")))?,
         );
         Ok(Secrets(
-            serde_json::from_slice(&plain).context("el otro baúl está dañado")?,
+            serde_json::from_slice(&plain).context(tr("el otro baúl está dañado"))?,
         ))
     }
 
@@ -356,7 +356,7 @@ impl Vault {
     /// otro baúl (otra contraseña maestra): hay que volver a abrirlo.
     pub fn reload(&mut self) -> Result<()> {
         let raw = std::fs::read(&self.path)
-            .with_context(|| format!("leyendo {}", self.path.display()))?;
+            .with_context(|| trf!("leyendo {path}", path = self.path.display()))?;
         let fresh = self.read_other(&raw, None)?;
         for value in self.secrets.values_mut() {
             value.zeroize();

@@ -43,10 +43,12 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::i18n::tr;
 use crate::macros::{Macro, MacroStore};
 use crate::model::{Folder, FolderDefaults, Node, Session, Tree};
 use crate::theme::{Settings, Theme, ThemeStore};
 use crate::tunnel_manager::{SavedTunnel, TunnelStore};
+use crate::{mark, trf};
 
 // ----------------------------------------------------------------------
 // Ficheros cifrados
@@ -168,19 +170,17 @@ impl std::fmt::Display for SealError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SealError::Incomplete => {
-                write!(f, "El fichero está incompleto (quizá se está copiando)")
+                f.write_str(tr("El fichero está incompleto (quizá se está copiando)"))
             }
-            SealError::WrongPassword => write!(f, "La contraseña no es la de este fichero"),
-            SealError::Corrupt => write!(
-                f,
-                "El fichero está dañado o no es de GodRemote (no se ha tocado nada)"
-            ),
-            SealError::Newer => write!(
-                f,
-                "El fichero es de una versión más reciente de GodRemote: actualiza este equipo"
-            ),
-            SealError::TooBig => write!(f, "El fichero es demasiado grande"),
-            SealError::Internal(e) => write!(f, "No se pudo cifrar: {e}"),
+            SealError::WrongPassword => f.write_str(tr("La contraseña no es la de este fichero")),
+            SealError::Corrupt => f.write_str(tr(
+                "El fichero está dañado o no es de GodRemote (no se ha tocado nada)",
+            )),
+            SealError::Newer => f.write_str(tr(
+                "El fichero es de una versión más reciente de GodRemote: actualiza este equipo",
+            )),
+            SealError::TooBig => f.write_str(tr("El fichero es demasiado grande")),
+            SealError::Internal(e) => f.write_str(&trf!("No se pudo cifrar: {e}", e)),
         }
     }
 }
@@ -260,7 +260,7 @@ pub fn seal(
     rand::fill(&mut nonce);
     let check = B64.encode(&material[32..]);
     let cipher = XChaCha20Poly1305::new_from_slice(&material[..32])
-        .map_err(|_| internal(&"clave no válida"))?;
+        .map_err(|_| internal(&tr("clave no válida")))?;
     let data = cipher
         .encrypt(
             &XNonce::from(nonce),
@@ -269,7 +269,7 @@ pub fn seal(
                 aad: &aad(kind, params, &check),
             },
         )
-        .map_err(|_| internal(&"fallo al cifrar"))?;
+        .map_err(|_| internal(&tr("fallo al cifrar")))?;
     let file = SealedFile {
         version: SEAL_VERSION,
         kind: kind.tag().to_string(),
@@ -366,12 +366,12 @@ pub fn read_limited(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
     let file = std::fs::File::open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
-        return Err(std::io::Error::other("no es un fichero"));
+        return Err(std::io::Error::other(tr("no es un fichero")));
     }
     if meta.len() > max {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "es demasiado grande",
+            tr("es demasiado grande"),
         ));
     }
     let mut data = Vec::with_capacity(meta.len() as usize);
@@ -379,7 +379,7 @@ pub fn read_limited(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
     if data.len() as u64 > max {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "es demasiado grande",
+            tr("es demasiado grande"),
         ));
     }
     Ok(data)
@@ -393,7 +393,7 @@ pub fn write_atomic(path: &Path, data: &[u8], tag: &str) -> std::io::Result<()> 
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| std::io::Error::other("ruta sin nombre de fichero"))?;
+        .ok_or_else(|| std::io::Error::other(tr("ruta sin nombre de fichero")))?;
     let tmp = path.with_file_name(format!(".{name}.{tag}.tmp"));
     let result = (|| {
         let mut file = std::fs::File::create(&tmp)?;
@@ -475,7 +475,7 @@ pub const LOCAL_SETTINGS: [&str; 6] = [
 fn json<T: Serialize>(value: &T) -> Result<Value, SyncError> {
     serde_json::to_string(value)
         .and_then(|text| serde_json::from_str(&text))
-        .map_err(|e| SyncError::Local(format!("no se pudo preparar un elemento: {e}")))
+        .map_err(|e| SyncError::Local(trf!("no se pudo preparar un elemento: {e}", e)))
 }
 
 /// Huella de un valor (o de su ausencia), para atar una decisión a lo que
@@ -614,8 +614,10 @@ struct LocalRead {
 }
 
 fn local_error(what: &str, e: impl std::fmt::Display) -> SyncError {
-    SyncError::Local(format!(
-        "{what} no se puede leer ({e}); no se sincroniza para no propagar el fallo"
+    SyncError::Local(trf!(
+        "{what} no se puede leer ({e}); no se sincroniza para no propagar el fallo",
+        what,
+        e
     ))
 }
 
@@ -651,9 +653,10 @@ fn tree_items(tree: &Tree, excluded: &BTreeSet<Uuid>, items: &mut Items) -> Resu
             set_parent(&mut value, parent);
             let id = node.id();
             if items.contains_key(&format!("c/{id}")) || items.contains_key(&format!("s/{id}")) {
-                return Err(SyncError::Local(format!(
+                return Err(SyncError::Local(trf!(
                     "sessions.json tiene dos elementos con el mismo identificador ({id}); \
-                     no se sincroniza"
+                     no se sincroniza",
+                    id
                 )));
             }
             items.insert(key, value);
@@ -726,7 +729,7 @@ fn read_local(dir: &Path) -> Result<LocalRead, SyncError> {
                 .ok()
                 .is_some_and(|v| serde_json::from_value::<Settings>(v).is_ok());
             if !valid {
-                return Err(local_error("settings.json", "no es válido"));
+                return Err(local_error("settings.json", tr("no es válido")));
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -745,7 +748,7 @@ fn read_local(dir: &Path) -> Result<LocalRead, SyncError> {
             let text = String::from_utf8(data)
                 .ok()
                 .filter(|text| crate::vault::looks_valid(text.as_bytes()))
-                .ok_or_else(|| local_error("vault.json", "no es un baúl válido"))?;
+                .ok_or_else(|| local_error("vault.json", tr("no es un baúl válido")))?;
             items.insert(VAULT.to_string(), Value::String(text));
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -993,7 +996,7 @@ fn apply_local(
     notes: &mut Vec<String>,
 ) -> Result<Applied, SyncError> {
     let io = |what: &str, e: &dyn std::fmt::Display| {
-        SyncError::Local(format!("no se pudo escribir {what}: {e}"))
+        SyncError::Local(trf!("no se pudo escribir {what}: {e}", what, e))
     };
     let mut applied = Applied::default();
 
@@ -1011,11 +1014,12 @@ fn apply_local(
                     let previous = store.exists(name).then_some(name);
                     store
                         .save_user(theme, previous)
-                        .map_err(|e| io("un tema", &format!("{e:#}")))?;
+                        .map_err(|e| io(tr("un tema"), &format!("{e:#}")))?;
                     applied.themes = true;
                 }
-                _ => notes.push(format!(
-                    "El tema «{name}» no se puede usar en esta versión y se ha dejado como está"
+                _ => notes.push(trf!(
+                    "El tema «{name}» no se puede usar en esta versión y se ha dejado como está",
+                    name
                 )),
             }
         }
@@ -1024,7 +1028,7 @@ fn apply_local(
             if !after.contains_key(key) && store.exists(name) && !store.is_builtin(name) {
                 store
                     .delete_user(name)
-                    .map_err(|e| io("un tema", &format!("{e:#}")))?;
+                    .map_err(|e| io(tr("un tema"), &format!("{e:#}")))?;
                 applied.themes = true;
             }
         }
@@ -1087,7 +1091,7 @@ fn apply_local(
         let file = dir.join("settings.json");
         let known = known_settings();
         let Value::Object(mut object) = json(&Settings::load(&file))? else {
-            return Err(SyncError::Local("los ajustes no son un objeto".into()));
+            return Err(SyncError::Local(tr("los ajustes no son un objeto").into()));
         };
         let mut rejected = vec![];
         for (key, value) in after.iter().filter(|(k, _)| k.starts_with("a/")) {
@@ -1110,13 +1114,13 @@ fn apply_local(
             }
         }
         if !rejected.is_empty() {
-            notes.push(format!(
-                "Ajustes que esta versión no entiende y se han dejado como estaban: {}",
-                rejected.join(", ")
+            notes.push(trf!(
+                "Ajustes que esta versión no entiende y se han dejado como estaban: {lista}",
+                lista = rejected.join(", ")
             ));
         }
         let settings: Settings = serde_json::from_value(Value::Object(object))
-            .map_err(|e| SyncError::Local(format!("los ajustes recibidos no son válidos: {e}")))?;
+            .map_err(|e| SyncError::Local(trf!("los ajustes recibidos no son válidos: {e}", e)))?;
         settings
             .save(&file)
             .map_err(|e| io("settings.json", &format!("{e:#}")))?;
@@ -1131,7 +1135,9 @@ fn apply_local(
                 .map_err(|e| io("vault.json", &e))?;
             applied.vault = true;
         } else {
-            notes.push("El baúl recibido no es válido y se ha conservado el de este equipo".into());
+            notes.push(
+                tr("El baúl recibido no es válido y se ha conservado el de este equipo").into(),
+            );
         }
     }
     Ok(applied)
@@ -1164,24 +1170,89 @@ pub struct Decision {
     pub theirs: String,
 }
 
+/// Un campo de un elemento que vale una cosa en cada lado.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Clash {
+    #[serde(rename = "campo")]
+    pub field: String,
+    /// Lo que vale aquí y en la carpeta, si son valores cortos de enseñar.
+    #[serde(default, rename = "valores")]
+    pub values: Option<(Value, Value)>,
+}
+
+/// En qué difieren los dos lados de un conflicto. Es el dato, no el texto:
+/// el estado se guarda en disco y puede leerse luego en otro idioma.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Difference {
+    /// El elemento entero, sin más que decir.
+    #[default]
+    #[serde(rename = "distinto")]
+    Whole,
+    #[serde(rename = "borrado_aqui")]
+    DeletedHere,
+    #[serde(rename = "borrado_en_la_carpeta")]
+    DeletedThere,
+    /// Un valor suelto (un ajuste): lo que vale aquí y en la carpeta.
+    #[serde(rename = "valores")]
+    Values(Value, Value),
+    /// Los campos que chocan.
+    #[serde(rename = "campos")]
+    Fields(Vec<Clash>),
+}
+
 /// Un elemento que ha cambiado en los dos lados de forma distinta.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Conflict {
     #[serde(rename = "clave")]
     pub key: String,
-    /// Qué es, para el usuario: «Equipo «web-01»», «Ajuste «Tema»»…
-    #[serde(rename = "titulo")]
-    pub title: String,
-    /// En qué difieren los dos lados.
-    #[serde(rename = "detalle")]
-    pub detail: String,
+    /// Nombre del elemento, si lo tiene: con la clave dice qué es.
+    #[serde(default, rename = "nombre", skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, rename = "diferencia")]
+    pub difference: Difference,
     #[serde(rename = "mio")]
     pub mine: String,
     #[serde(rename = "carpeta")]
     pub theirs: String,
+    /// Qué es, para el usuario: «Equipo «web-01»», «Ajuste «tema»»… Como
+    /// `detail`, es texto en el idioma que había al crear el conflicto o al
+    /// leerlo del disco: no se guarda, y quien lo pinta lo redacta en el
+    /// momento con [`Conflict::texts`].
+    #[serde(skip)]
+    pub title: String,
+    /// En qué difieren los dos lados.
+    #[serde(skip)]
+    pub detail: String,
 }
 
 impl Conflict {
+    fn new(key: &str, local: Option<&Value>, remote: Option<&Value>, fields: &[String]) -> Self {
+        let mut conflict = Self {
+            key: key.to_string(),
+            name: item_name(key, local.or(remote)),
+            difference: difference(key, local, remote, fields),
+            mine: digest(local),
+            theirs: digest(remote),
+            title: String::new(),
+            detail: String::new(),
+        };
+        conflict.redraft();
+        conflict
+    }
+
+    /// Título y detalle en el idioma en uso.
+    pub fn texts(&self) -> (String, String) {
+        (
+            conflict_title(&self.key, &self.name),
+            conflict_detail(&self.key, &self.difference),
+        )
+    }
+
+    /// Pone `title` y `detail` en el idioma en uso.
+    fn redraft(&mut self) {
+        (self.title, self.detail) = self.texts();
+    }
+
     pub fn is_vault(&self) -> bool {
         self.key == VAULT
     }
@@ -1301,114 +1372,209 @@ fn merge_order(
 /// Nombre legible de un campo de un equipo o de un ajuste.
 fn field_label(field: &str) -> &str {
     match field {
-        PARENT => "carpeta",
-        "name" | "nombre" => "nombre",
-        "port" => "puerto",
-        "username" => "usuario",
-        "auth" => "autenticación",
-        "key_path" => "clave privada",
-        "cert_path" => "certificado",
-        "protocol" => "protocolo",
-        "jumps" => "saltos",
-        "tunnels" => "túneles",
-        "notes" => "notas",
-        "on_connect" => "órdenes al conectar",
-        "defaults" => "valores para sus equipos",
-        "text" => "texto",
-        "atajo" => "atajo",
-        "equipo" => "equipo",
-        "tunel" => "túnel",
-        "autoarranque" => "arranque automático",
-        "backdrop" => "fondo",
-        "color" => "color",
+        PARENT => tr("carpeta"),
+        "name" | "nombre" => tr("nombre"),
+        "port" => tr("puerto"),
+        "username" => tr("usuario"),
+        "auth" => tr("autenticación"),
+        "key_path" => tr("clave privada"),
+        "cert_path" => tr("certificado"),
+        "protocol" => tr("protocolo"),
+        "jumps" => tr("saltos"),
+        "tunnels" => tr("túneles"),
+        "notes" => tr("notas"),
+        "on_connect" => tr("órdenes al conectar"),
+        "defaults" => tr("valores para sus equipos"),
+        "text" => tr("texto"),
+        "atajo" => tr("atajo"),
+        "equipo" => tr("equipo"),
+        "tunel" => tr("túnel"),
+        "autoarranque" => tr("arranque automático"),
+        "backdrop" => tr("fondo"),
+        "color" => tr("color"),
         other => other,
     }
 }
 
-fn short(value: Option<&Value>) -> Option<String> {
-    let text = match value? {
-        Value::String(s) => s.clone(),
-        Value::Bool(true) => "sí".to_string(),
-        Value::Bool(false) => "no".to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::Null => "(nada)".to_string(),
-        _ => return None,
-    };
-    let clean: String = text
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    Some(if clean.chars().count() > 40 {
-        format!("{}…", clean.chars().take(40).collect::<String>())
-    } else {
-        clean
-    })
-}
+/// Los ajustes que se sincronizan, como se le nombran al usuario (su clave
+/// de `settings.json` sin guiones bajos), para poder traducirlos.
+const SETTING_LABELS: [&str; 20] = [
+    mark!("tema"),
+    mark!("tema automatico"),
+    mark!("tema claro"),
+    mark!("tema oscuro"),
+    mark!("barra servidor"),
+    mark!("rdp integrado"),
+    mark!("reconectar"),
+    mark!("reintentos"),
+    mark!("restaurar pestanas"),
+    mark!("avisar actividad"),
+    mark!("resaltado"),
+    mark!("bloqueo baul"),
+    mark!("atajos"),
+    mark!("confirmar pegado"),
+    mark!("confirmar cierre"),
+    mark!("avisar versiones"),
+    mark!("idioma"),
+    mark!("panel estado"),
+    mark!("disparadores"),
+    mark!("historial"),
+];
 
-fn conflict_title(key: &str, value: Option<&Value>) -> String {
-    let named = |fields: &[&str]| -> String {
-        fields
-            .iter()
-            .find_map(|f| value?.get(*f)?.as_str().filter(|s| !s.trim().is_empty()))
-            .unwrap_or("(sin nombre)")
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(80)
-            .collect()
-    };
-    if key_id(key, "s").is_some() {
-        format!("Equipo «{}»", named(&["name", "host"]))
-    } else if key_id(key, "c").is_some() {
-        format!("Carpeta «{}»", named(&["name"]))
-    } else if key_id(key, "m").is_some() {
-        format!("Snippet «{}»", named(&["name"]))
-    } else if key_id(key, "t").is_some() {
-        format!("Túnel «{}»", named(&["nombre"]))
-    } else if let Some(name) = key.strip_prefix("tema/") {
-        format!("Tema «{name}»")
-    } else if let Some(name) = key.strip_prefix("a/") {
-        format!("Ajuste «{}»", name.replace('_', " "))
-    } else if key == VAULT {
-        "Baúl de credenciales".to_string()
-    } else {
-        format!("Elemento «{key}»")
+/// Nombre de un ajuste para el usuario. Uno que esta versión no conozca se
+/// queda con su clave.
+fn setting_label(setting: &str) -> String {
+    let label = setting.replace('_', " ");
+    match SETTING_LABELS.iter().find(|known| **known == label) {
+        Some(known) => tr(known).to_string(),
+        None => label,
     }
 }
 
-fn conflict_detail(
+/// Un valor corto de enseñar (texto, número, sí o no), recortado; `None`
+/// si es una lista o un objeto.
+fn short(value: Option<&Value>) -> Option<Value> {
+    match value? {
+        Value::String(text) => {
+            let clean: String = text
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            Some(Value::String(if clean.chars().count() > 40 {
+                format!("{}…", clean.chars().take(40).collect::<String>())
+            } else {
+                clean
+            }))
+        }
+        scalar @ (Value::Bool(_) | Value::Number(_) | Value::Null) => Some(scalar.clone()),
+        _ => None,
+    }
+}
+
+/// Un valor de los que deja [`short`], como se le enseña al usuario.
+fn shown(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Bool(true) => tr("sí").to_string(),
+        Value::Bool(false) => tr("no").to_string(),
+        Value::Null => tr("(nada)").to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Nombre del elemento de un conflicto, si es de los que tienen nombre.
+fn item_name(key: &str, value: Option<&Value>) -> String {
+    let fields: &[&str] = if key_id(key, "s").is_some() {
+        &["name", "host"]
+    } else if key_id(key, "c").is_some() || key_id(key, "m").is_some() {
+        &["name"]
+    } else if key_id(key, "t").is_some() {
+        &["nombre"]
+    } else {
+        &[]
+    };
+    fields
+        .iter()
+        .find_map(|f| value?.get(*f)?.as_str().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(80)
+        .collect()
+}
+
+fn conflict_title(key: &str, name: &str) -> String {
+    let name = if name.is_empty() {
+        tr("(sin nombre)")
+    } else {
+        name
+    };
+    if key_id(key, "s").is_some() {
+        trf!("Equipo «{name}»", name)
+    } else if key_id(key, "c").is_some() {
+        trf!("Carpeta «{name}»", name)
+    } else if key_id(key, "m").is_some() {
+        trf!("Snippet «{name}»", name)
+    } else if key_id(key, "t").is_some() {
+        trf!("Túnel «{name}»", name)
+    } else if let Some(name) = key.strip_prefix("tema/") {
+        trf!("Tema «{name}»", name)
+    } else if let Some(setting) = key.strip_prefix("a/") {
+        trf!("Ajuste «{name}»", name = setting_label(setting))
+    } else if key == VAULT {
+        tr("Baúl de credenciales").to_string()
+    } else {
+        trf!("Elemento «{key}»", key)
+    }
+}
+
+/// En qué difieren los dos lados de un elemento en conflicto.
+fn difference(
     key: &str,
     local: Option<&Value>,
     remote: Option<&Value>,
     fields: &[String],
-) -> String {
+) -> Difference {
+    // Del baúl no se enseña nada: va cifrado.
     if key == VAULT {
-        return "Se han guardado o cambiado credenciales en los dos lados.".to_string();
+        return Difference::Whole;
     }
     match (local, remote) {
-        (None, Some(_)) => "Borrado en este equipo y modificado en la carpeta.".to_string(),
-        (Some(_), None) => "Modificado en este equipo y borrado en la carpeta.".to_string(),
+        (None, Some(_)) => Difference::DeletedHere,
+        (Some(_), None) => Difference::DeletedThere,
         _ if fields.is_empty() => match (short(local), short(remote)) {
-            (Some(mine), Some(theirs)) => format!("Aquí: {mine} · En la carpeta: {theirs}"),
-            _ => "Distinto en los dos lados.".to_string(),
+            (Some(mine), Some(theirs)) => Difference::Values(mine, theirs),
+            _ => Difference::Whole,
         },
-        _ => fields
+        _ => Difference::Fields(
+            fields
+                .iter()
+                .map(|field| Clash {
+                    field: field.clone(),
+                    // La carpeta de destino es un identificador: no dice nada.
+                    values: (field != PARENT)
+                        .then(|| {
+                            Some((
+                                short(local.and_then(|v| v.get(field)))?,
+                                short(remote.and_then(|v| v.get(field)))?,
+                            ))
+                        })
+                        .flatten(),
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn conflict_detail(key: &str, difference: &Difference) -> String {
+    if key == VAULT {
+        return tr("Se han guardado o cambiado credenciales en los dos lados.").to_string();
+    }
+    match difference {
+        Difference::DeletedHere => {
+            tr("Borrado en este equipo y modificado en la carpeta.").to_string()
+        }
+        Difference::DeletedThere => {
+            tr("Modificado en este equipo y borrado en la carpeta.").to_string()
+        }
+        Difference::Values(mine, theirs) => trf!(
+            "Aquí: {mine} · En la carpeta: {theirs}",
+            mine = shown(mine),
+            theirs = shown(theirs)
+        ),
+        Difference::Whole => tr("Distinto en los dos lados.").to_string(),
+        Difference::Fields(clashes) => clashes
             .iter()
-            .map(|field| {
-                let label = field_label(field);
-                // La carpeta de destino es un identificador: no dice nada.
-                let values = (field != PARENT)
-                    .then(|| {
-                        Some((
-                            short(local.and_then(|v| v.get(field)))?,
-                            short(remote.and_then(|v| v.get(field)))?,
-                        ))
-                    })
-                    .flatten();
-                match values {
-                    Some((mine, theirs)) => {
-                        format!("{label}: aquí «{mine}», en la carpeta «{theirs}»")
-                    }
-                    None => format!("{label}: distinto en los dos lados"),
+            .map(|clash| {
+                let label = field_label(&clash.field);
+                match &clash.values {
+                    Some((mine, theirs)) => trf!(
+                        "{label}: aquí «{mine}», en la carpeta «{theirs}»",
+                        label,
+                        mine = shown(mine),
+                        theirs = shown(theirs)
+                    ),
+                    None => trf!("{label}: distinto en los dos lados", label),
                 }
             })
             .collect::<Vec<_>>()
@@ -1458,13 +1624,7 @@ pub fn merge(
                 if let Some(r) = r {
                     out.remote.insert(key.clone(), r.clone());
                 }
-                out.conflicts.push(Conflict {
-                    key: key.clone(),
-                    title: conflict_title(key, l.or(r)),
-                    detail: conflict_detail(key, l, r, &fields),
-                    mine: digest(l),
-                    theirs: digest(r),
-                });
+                out.conflicts.push(Conflict::new(key, l, r, &fields));
             }
         }
     }
@@ -1606,16 +1766,17 @@ impl Snapshot {
             return Err(SyncError::Seal(SealError::Newer));
         }
         if self.format == 0 {
-            return Err(SyncError::Invalid("formato desconocido".into()));
+            return Err(SyncError::Invalid(tr("formato desconocido").into()));
         }
         if self.items.len() > MAX_ITEMS {
-            return Err(SyncError::Invalid(format!(
-                "tiene {} elementos (el máximo es {MAX_ITEMS})",
-                self.items.len()
+            return Err(SyncError::Invalid(trf!(
+                "tiene {n} elementos (el máximo es {max})",
+                n = self.items.len(),
+                max = MAX_ITEMS
             )));
         }
         if self.items.keys().any(|k| k.len() > MAX_KEY || k.is_empty()) {
-            return Err(SyncError::Invalid("tiene claves no admitidas".into()));
+            return Err(SyncError::Invalid(tr("tiene claves no admitidas").into()));
         }
         self.ancestors.truncate(MAX_LINEAGE);
         trim_devices(&mut self.devices);
@@ -1755,10 +1916,13 @@ impl SyncState {
     }
 
     pub fn load(dir: &Path) -> Self {
-        read_limited(&Self::file(dir), 4 * MAX_PLAIN)
+        let mut state: Self = read_limited(&Self::file(dir), 4 * MAX_PLAIN)
             .ok()
             .and_then(|data| serde_json::from_slice(&data).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Los textos de los conflictos no se guardan.
+        state.conflicts.iter_mut().for_each(Conflict::redraft);
+        state
     }
 
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
@@ -1849,26 +2013,23 @@ impl SyncError {
 impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SyncError::Unavailable(e) => {
-                write!(f, "La carpeta de sincronización no está disponible ({e})")
-            }
-            SyncError::Seal(SealError::WrongPassword) => {
-                write!(
-                    f,
-                    "La contraseña de sincronización no es la de esta carpeta"
-                )
-            }
+            SyncError::Unavailable(e) => f.write_str(&trf!(
+                "La carpeta de sincronización no está disponible ({e})",
+                e
+            )),
+            SyncError::Seal(SealError::WrongPassword) => f.write_str(tr(
+                "La contraseña de sincronización no es la de esta carpeta",
+            )),
             SyncError::Seal(e) => write!(f, "{e}"),
-            SyncError::Invalid(e) => write!(
-                f,
-                "Lo que hay en la carpeta no es válido ({e}); no se ha tocado nada"
-            ),
+            SyncError::Invalid(e) => f.write_str(&trf!(
+                "Lo que hay en la carpeta no es válido ({e}); no se ha tocado nada",
+                e
+            )),
             SyncError::Local(e) => write!(f, "{e}"),
-            SyncError::Changed => write!(
-                f,
-                "Otro equipo ha escrito en la carpeta a la vez; se vuelve a intentar"
-            ),
-            SyncError::Io(e) => write!(f, "No se pudo escribir en la carpeta ({e})"),
+            SyncError::Changed => f.write_str(tr(
+                "Otro equipo ha escrito en la carpeta a la vez; se vuelve a intentar",
+            )),
+            SyncError::Io(e) => f.write_str(&trf!("No se pudo escribir en la carpeta ({e})", e)),
         }
     }
 }
@@ -1920,7 +2081,7 @@ fn conflict_copies(folder: &Path) -> Vec<String> {
 pub fn read_folder(folder: &Path, keys: &mut Keyring) -> Result<Remote, SyncError> {
     match std::fs::metadata(folder) {
         Ok(meta) if meta.is_dir() => {}
-        Ok(_) => return Err(SyncError::Unavailable("no es una carpeta".into())),
+        Ok(_) => return Err(SyncError::Unavailable(tr("no es una carpeta").into())),
         Err(e) => return Err(folder_error(folder, &e)),
     }
     let copies = conflict_copies(folder);
@@ -1939,7 +2100,7 @@ pub fn read_folder(folder: &Path, keys: &mut Keyring) -> Result<Remote, SyncErro
     };
     let (plain, params) = open(SealKind::Sync, keys, &raw)?;
     let snapshot: Snapshot = serde_json::from_slice(&plain)
-        .map_err(|e| SyncError::Invalid(format!("no se entiende: {e}")))?;
+        .map_err(|e| SyncError::Invalid(trf!("no se entiende: {e}", e)))?;
     Ok(Remote {
         snapshot: Some(snapshot.validate()?),
         fingerprint: Some(fingerprint(&raw)),
@@ -1967,16 +2128,16 @@ pub fn write_folder(
     expect: &Expect,
 ) -> Result<String, SyncError> {
     if !folder.is_dir() {
-        return Err(SyncError::Unavailable(format!(
-            "{} no existe",
-            folder.display()
+        return Err(SyncError::Unavailable(trf!(
+            "{carpeta} no existe",
+            carpeta = folder.display()
         )));
     }
     let plain =
         Zeroizing::new(serde_json::to_vec(snapshot).map_err(|e| SyncError::Io(e.to_string()))?);
     if plain.len() as u64 > MAX_PLAIN {
         return Err(SyncError::Local(
-            "la configuración es demasiado grande para sincronizarla".into(),
+            tr("la configuración es demasiado grande para sincronizarla").into(),
         ));
     }
     // La misma sal que había, si no rebaja los costes: así los demás
@@ -2036,8 +2197,9 @@ pub fn safety_copy(dir: &Path) -> Result<Option<PathBuf>, SyncError> {
         COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 10_000
     ));
     backup.write(&path).map_err(|e| {
-        SyncError::Local(format!(
-            "no se pudo guardar la copia previa ({e:#}); no se ha cambiado nada"
+        SyncError::Local(trf!(
+            "no se pudo guardar la copia previa ({e}); no se ha cambiado nada",
+            e = format!("{e:#}")
         ))
     })?;
     let mut copies: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -2094,10 +2256,10 @@ pub fn merge_local(
                 outcome.applied = apply_local(dir, &local, &merged.local, &mut outcome.notes)?;
             }
             if merged.moved_to_root > 0 {
-                outcome.notes.push(format!(
-                    "{} elemento(s) se han dejado en la raíz: su carpeta se borró o se movió \
+                outcome.notes.push(trf!(
+                    "{n} elemento(s) se han dejado en la raíz: su carpeta se borró o se movió \
                      en otro equipo",
-                    merged.moved_to_root
+                    n = merged.moved_to_root
                 ));
             }
             if merged.conflicts.iter().any(Conflict::is_vault) {
@@ -2166,7 +2328,7 @@ pub fn merge_local(
         state.last_sync = Some(now());
         state
             .save(dir)
-            .map_err(|e| SyncError::Local(format!("no se pudo guardar el estado: {e}")))?;
+            .map_err(|e| SyncError::Local(trf!("no se pudo guardar el estado: {e}", e)))?;
     }
     state.last_sync = Some(now());
     Ok(outcome)
@@ -2937,5 +3099,101 @@ mod tests {
         let mut long_key = snapshot;
         long_key.items.insert("k".repeat(MAX_KEY + 1), Value::Null);
         assert!(matches!(long_key.validate(), Err(SyncError::Invalid(_))));
+    }
+
+    // --- Textos de los conflictos ---------------------------------------
+
+    #[test]
+    fn conflicts_are_stored_as_data_and_drafted_when_read() {
+        let mut base = Tree::default();
+        let (a, b) = (host("a"), host("b"));
+        base.upsert_session(None, a.clone());
+        base.upsert_session(None, b.clone());
+        let mut local = base.clone();
+        edit(&mut local, a.id, |s| {
+            s.port = 2200;
+            s.x11_forwarding = true;
+            s.tunnels = vec![Default::default()];
+        });
+        local.remove(b.id);
+        let mut remote = base.clone();
+        edit(&mut remote, a.id, |s| {
+            s.port = 2222;
+            s.tunnels = vec![Default::default(), Default::default()];
+        });
+        edit(&mut remote, b.id, |s| s.notes = "sigue en uso".into());
+        let (mut l, mut r) = (items(&local), items(&remote));
+        l.insert("a/reconectar".into(), Value::from(true));
+        r.insert("a/reconectar".into(), Value::from(false));
+        l.insert("a/tema".into(), Value::Null);
+        r.insert("a/tema".into(), Value::from("Nord"));
+        let mut base = items(&base);
+        // (Sin el reenvío de X11 en la base, lo han puesto los dos lados.)
+        base.get_mut(&format!("s/{}", a.id))
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .remove("x11_forwarding");
+        let conflicts = merge(&base, &l, &r, &none()).conflicts;
+        assert_eq!(conflicts.len(), 4, "{conflicts:?}");
+        let text = |key: &str| {
+            let conflict = conflicts.iter().find(|c| c.key == key).unwrap();
+            assert_eq!(
+                conflict.texts(),
+                (conflict.title.clone(), conflict.detail.clone())
+            );
+            format!("{} | {}", conflict.title, conflict.detail)
+        };
+        assert_eq!(
+            text(&format!("s/{}", a.id)),
+            "Equipo «a» | puerto: aquí «2200», en la carpeta «2222» · túneles: distinto en \
+             los dos lados · x11_forwarding: aquí «sí», en la carpeta «no»"
+        );
+        assert_eq!(
+            text(&format!("s/{}", b.id)),
+            "Equipo «b» | Borrado en este equipo y modificado en la carpeta."
+        );
+        assert_eq!(
+            text("a/reconectar"),
+            "Ajuste «reconectar» | Aquí: sí · En la carpeta: no"
+        );
+        assert_eq!(
+            text("a/tema"),
+            "Ajuste «tema» | Aquí: (nada) · En la carpeta: Nord"
+        );
+
+        // En disco va el dato y no el texto: lo que se guarde en un idioma
+        // se tiene que poder leer en otro.
+        let state = SyncState {
+            conflicts: conflicts.clone(),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        state.save(dir.path()).unwrap();
+        let saved = std::fs::read_to_string(SyncState::file(dir.path())).unwrap();
+        for drafted in [
+            "Equipo", "Ajuste", "puerto", "aquí", "Borrado", "nada", "sí",
+        ] {
+            assert!(!saved.contains(drafted), "«{drafted}» está en {saved}");
+        }
+        // Al leerlo se redacta otra vez, y sale lo mismo.
+        assert_eq!(SyncState::load(dir.path()).conflicts, conflicts);
+        // Un estado de antes, con los textos dentro, también se lee.
+        let old = r#"{"conflictos":[{"clave":"a/tema","titulo":"Ajuste «Tema»",
+            "detalle":"Aquí: a · En la carpeta: b","mio":"1","carpeta":"2"}]}"#;
+        std::fs::write(SyncState::file(dir.path()), old).unwrap();
+        let read = SyncState::load(dir.path()).conflicts;
+        assert_eq!(read[0].title, "Ajuste «tema»");
+        assert_eq!(read[0].detail, "Distinto en los dos lados.");
+    }
+
+    #[test]
+    fn every_synced_setting_has_a_label_to_translate() {
+        for key in default_settings_items().keys() {
+            let label = key["a/".len()..].replace('_', " ");
+            assert!(
+                SETTING_LABELS.contains(&label.as_str()),
+                "falta «{label}» en SETTING_LABELS (y su traducción)"
+            );
+        }
     }
 }

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use egui::RichText;
 
 use super::{App, VaultDialog};
+use crate::i18n::tr;
 use crate::macros::MacroStore;
 use crate::model::Tree;
 use crate::sync::{
@@ -22,6 +23,7 @@ use crate::sync::{
     SyncConfig, SyncError, SyncState,
 };
 use crate::theme::{Settings, ThemeStore, error_color, ok_color, warn_color};
+use crate::trf;
 use crate::tunnel_manager::TunnelStore;
 
 /// Nombre con el que se guarda en el baúl la contraseña de sincronización.
@@ -156,13 +158,13 @@ impl SyncUi {
 
     fn save_config(&mut self) {
         if let Err(e) = self.config.save(&crate::paths::data_dir()) {
-            self.note(format!("No se pudo guardar la configuración: {e}"), true);
+            self.note(trf!("No se pudo guardar la configuración: {e}", e), true);
         }
     }
 
     fn save_state(&mut self) {
         if let Err(e) = self.state.save(&crate::paths::data_dir()) {
-            self.note(format!("No se pudo guardar el estado: {e}"), true);
+            self.note(trf!("No se pudo guardar el estado: {e}", e), true);
         }
     }
 
@@ -182,26 +184,29 @@ impl SyncUi {
         }
         let conflicts = self.state.conflicts.len();
         Some(if self.keys.is_none() {
-            ("Sincronización: falta la contraseña".into(), warn_color())
+            (
+                tr("Sincronización: falta la contraseña").into(),
+                warn_color(),
+            )
         } else if self.syncing {
-            ("Sincronizando…".into(), ok_color())
+            (tr("Sincronizando…").into(), ok_color())
         } else if conflicts > 0 {
             (
-                format!("Sincronización: {conflicts} conflicto(s)"),
+                trf!("Sincronización: {conflicts} conflicto(s)", conflicts),
                 warn_color(),
             )
         } else {
             match &self.health {
-                Health::UpToDate => ("Sincronizado".into(), ok_color()),
+                Health::UpToDate => (tr("Sincronizado").into(), ok_color()),
                 Health::Unknown | Health::Pending => {
-                    ("Sincronización pendiente".into(), warn_color())
+                    (tr("Sincronización pendiente").into(), warn_color())
                 }
-                Health::Offline(_) => ("Sincronización: sin carpeta".into(), warn_color()),
+                Health::Offline(_) => (tr("Sincronización: sin carpeta").into(), warn_color()),
                 Health::WrongPassword => (
-                    "Sincronización: contraseña incorrecta".into(),
+                    tr("Sincronización: contraseña incorrecta").into(),
                     error_color(),
                 ),
-                Health::Failed(_) => ("Sincronización: error".into(), error_color()),
+                Health::Failed(_) => (tr("Sincronización: error").into(), error_color()),
             }
         })
     }
@@ -243,10 +248,10 @@ fn secret_label(key: &str, tree: &Tree) -> String {
         .map(|node| node.name())
         .unwrap_or_else(|| owner.to_string());
     match what {
-        "password" => format!("contraseña de «{owner}»"),
-        "passphrase" => format!("passphrase de «{owner}»"),
-        "totp" => format!("secreto TOTP de «{owner}»"),
-        _ => format!("secreto de «{owner}»"),
+        "password" => trf!("contraseña de «{owner}»", owner),
+        "passphrase" => trf!("passphrase de «{owner}»", owner),
+        "totp" => trf!("secreto TOTP de «{owner}»", owner),
+        _ => trf!("secreto de «{owner}»", owner),
     }
 }
 
@@ -287,9 +292,9 @@ impl App {
                 egui::Label::new(RichText::new(format!("🔄 {text}")).color(color))
                     .sense(egui::Sense::click()),
             )
-            .on_hover_text(
+            .on_hover_text(tr(
                 "Sincronización de la configuración entre tus equipos (pulsa para abrirla)",
-            );
+            ));
         if label.clicked() {
             self.open_sync_window();
         }
@@ -299,17 +304,17 @@ impl App {
     /// ventana de edición abierta se quedaría con datos viejos.
     pub(super) fn sync_blocked_by(&self) -> Option<&'static str> {
         if self.editor.is_some() {
-            Some("el editor de equipos")
+            Some(tr("el editor de equipos"))
         } else if self.folder_editor.is_some() {
-            Some("el editor de carpetas")
+            Some(tr("el editor de carpetas"))
         } else if self.macros_window.is_some() {
-            Some("la ventana de snippets")
+            Some(tr("la ventana de snippets"))
         } else if self.themes_window.is_some() {
-            Some("la ventana de temas")
+            Some(tr("la ventana de temas"))
         } else if self.tunnels_window.is_some() {
-            Some("el gestor de túneles")
+            Some(tr("el gestor de túneles"))
         } else if self.confirm_delete.is_some() || self.vault_dialog.is_some() {
-            Some("un diálogo")
+            Some(tr("un diálogo"))
         } else {
             None
         }
@@ -336,8 +341,10 @@ impl App {
                     .unwrap_or_default();
                 if !password.is_empty() {
                     if let Err(e) = vault.set(PASSWORD_KEY, &password) {
-                        self.sync
-                            .note(format!("No se pudo guardar en el baúl: {e:#}"), true);
+                        self.sync.note(
+                            trf!("No se pudo guardar en el baúl: {e}", e = format!("{e:#}")),
+                            true,
+                        );
                     }
                     self.sync.stored = true;
                 }
@@ -367,7 +374,7 @@ impl App {
             let seen = sync::stamp(&folder.join(SYNC_FILE));
             let result = match keys.lock() {
                 Ok(mut keys) => sync::read_folder(&folder, &mut keys),
-                Err(_) => Err(SyncError::Io("el llavero no está disponible".into())),
+                Err(_) => Err(SyncError::Io(tr("el llavero no está disponible").into())),
             };
             Done::Read(Box::new(result), seen)
         });
@@ -385,7 +392,7 @@ impl App {
                 Ok(mut keys) => {
                     sync::write_folder(&folder, &snapshot, &mut keys, params.as_ref(), &expect)
                 }
-                Err(_) => Err(SyncError::Io("el llavero no está disponible".into())),
+                Err(_) => Err(SyncError::Io(tr("el llavero no está disponible").into())),
             };
             Done::Written(result, sync::stamp(&folder.join(SYNC_FILE)))
         });
@@ -398,7 +405,13 @@ impl App {
         if applied.tree {
             match Tree::load(&crate::paths::sessions_file()) {
                 Ok(tree) => self.tree = tree,
-                Err(e) => self.notify(format!("No se pudieron leer las sesiones: {e:#}"), true),
+                Err(e) => self.notify(
+                    trf!(
+                        "No se pudieron leer las sesiones: {e}",
+                        e = format!("{e:#}")
+                    ),
+                    true,
+                ),
             }
             if self.selected.is_some_and(|id| self.tree.find(id).is_none()) {
                 self.selected = None;
@@ -440,12 +453,12 @@ impl App {
                         focus: true,
                     });
                     self.notify(
-                        "El baúl ha cambiado en otro equipo: ábrelo con su contraseña maestra",
+                        tr("El baúl ha cambiado en otro equipo: ábrelo con su contraseña maestra"),
                         false,
                     );
                 }
                 None => self.notify(
-                    "La sincronización ha traído el baúl de otro equipo: ya puedes abrirlo",
+                    tr("La sincronización ha traído el baúl de otro equipo: ya puedes abrirlo"),
                     false,
                 ),
             }
@@ -460,7 +473,7 @@ impl App {
             self.sync.held = Some(remote);
             self.sync.health = Health::Pending;
             self.sync.note(
-                format!("A la espera de que cierres {what} para sincronizar"),
+                trf!("A la espera de que cierres {what} para sincronizar", what),
                 false,
             );
             return;
@@ -488,10 +501,10 @@ impl App {
                     let missing = missing_keys(&self.tree);
                     if !missing.is_empty() {
                         self.sync.note(
-                            format!(
+                            trf!(
                                 "Claves privadas que no están en este equipo (se avisará al \
-                                 conectar): {}",
-                                missing.join(", ")
+                                 conectar): {lista}",
+                                lista = missing.join(", ")
                             ),
                             false,
                         );
@@ -499,18 +512,19 @@ impl App {
                 }
                 if outcome.pulled + outcome.pushed > 0 || rewrite {
                     self.sync.note(
-                        format!(
-                            "Sincronizado: {} cambio(s) recibidos y {} enviados",
-                            outcome.pulled, outcome.pushed
+                        trf!(
+                            "Sincronizado: {recibidos} cambio(s) recibidos y {enviados} enviados",
+                            recibidos = outcome.pulled,
+                            enviados = outcome.pushed
                         ),
                         false,
                     );
                 }
                 if let Some(copy) = &outcome.safety_copy {
                     self.sync.note(
-                        format!(
-                            "Antes de aplicar los cambios se guardó una copia en {}",
-                            copy.display()
+                        trf!(
+                            "Antes de aplicar los cambios se guardó una copia en {ruta}",
+                            ruta = copy.display()
                         ),
                         false,
                     );
@@ -523,14 +537,15 @@ impl App {
                 let conflicts = outcome.conflicts.len();
                 if conflicts > had_conflicts {
                     self.notify(
-                        format!(
+                        trf!(
                             "Sincronización: {conflicts} conflicto(s) por resolver (ábrela desde \
-                             la barra de estado)"
+                             la barra de estado)",
+                            conflicts
                         ),
                         true,
                     );
                 } else if by_hand && conflicts == 0 {
-                    self.notify("Configuración sincronizada", false);
+                    self.notify(tr("Configuración sincronizada"), false);
                 }
                 self.sync.health = Health::UpToDate;
                 self.sync.next_sync =
@@ -678,9 +693,11 @@ impl App {
             Ok(Some((added, removed))) => {
                 self.sync.save_state();
                 self.sync.note(
-                    format!(
+                    trf!(
                         "Baúl combinado con el de la carpeta: {added} secreto(s) añadidos o \
-                         cambiados y {removed} quitados"
+                         cambiados y {removed} quitados",
+                        added,
+                        removed
                     ),
                     false,
                 );
@@ -806,7 +823,7 @@ impl App {
             Some(Err(_)) if window.other_preview.is_some() => window.other_preview.clone(),
             other => other,
         };
-        egui::Window::new("Sincronización")
+        egui::Window::new(tr("Sincronización"))
             .id(egui::Id::unique("sync_window"))
             .open(&mut open)
             .collapsible(false)
@@ -814,78 +831,78 @@ impl App {
             .default_pos([260.0, 60.0])
             .show(ctx, |ui| {
                 ui.set_width(620.0);
-                ui.weak(
+                ui.weak(tr(
                     "Guarda tu configuración, cifrada, en una carpeta que ya repliques entre tus \
                      equipos (Dropbox, OneDrive, Syncthing, una unidad de red…) y la mantiene al \
                      día en todos.",
-                );
+                ));
                 let sync = &mut self.sync;
                 ui.checkbox(
                     &mut sync.config.enabled,
-                    "Sincronizar la configuración de este equipo",
+                    tr("Sincronizar la configuración de este equipo"),
                 );
                 egui::Grid::new("sync_grid")
                     .num_columns(2)
                     .spacing([8.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("Carpeta");
+                        ui.label(tr("Carpeta"));
                         ui.horizontal(|ui| {
                             ui.add(
                                 egui::TextEdit::singleline(&mut window.folder)
-                                    .hint_text("carpeta que ya se replica entre tus equipos")
+                                    .hint_text(tr("carpeta que ya se replica entre tus equipos"))
                                     .desired_width(400.0),
                             );
-                            if ui.button("Elegir…").clicked()
+                            if ui.button(tr("Elegir…")).clicked()
                                 && let Some(folder) = rfd::FileDialog::new()
-                                    .set_title("Carpeta de sincronización")
+                                    .set_title(tr("Carpeta de sincronización"))
                                     .pick_folder()
                             {
                                 window.folder = folder.display().to_string();
                             }
                         });
                         ui.end_row();
-                        ui.label("Este equipo");
+                        ui.label(tr("Este equipo"));
                         ui.horizontal(|ui| {
                             ui.add(
                                 egui::TextEdit::singleline(&mut window.name)
-                                    .hint_text("nombre con el que lo verán los demás")
+                                    .hint_text(tr("nombre con el que lo verán los demás"))
                                     .desired_width(220.0),
                             );
-                            ui.label("Cada");
+                            ui.label(tr("Cada"));
                             ui.add(
                                 egui::DragValue::new(&mut sync.config.minutes)
                                     .range(1..=1440)
                                     .suffix(" min"),
                             )
-                            .on_hover_text(
+                            .on_hover_text(tr(
                                 "También se sincroniza al arrancar y a los pocos segundos de \
                                  cambiar algo aquí o en la carpeta",
-                            );
+                            ));
                         });
                         ui.end_row();
-                        ui.label("Contraseña");
+                        ui.label(tr("Contraseña"));
                         ui.horizontal(|ui| {
                             ui.add(
                                 egui::TextEdit::singleline(&mut window.password)
                                     .password(true)
                                     .hint_text(if sync.keys.is_some() {
-                                        "(puesta; escribe otra para cambiarla)"
+                                        tr("(puesta; escribe otra para cambiarla)")
                                     } else {
-                                        "contraseña de sincronización"
+                                        tr("contraseña de sincronización")
                                     })
                                     .desired_width(200.0),
                             );
                             ui.add(
                                 egui::TextEdit::singleline(&mut window.repeat)
                                     .password(true)
-                                    .hint_text("repítela")
+                                    .hint_text(tr("repítela"))
                                     .desired_width(140.0),
                             );
                             let valid =
                                 !window.password.is_empty() && window.password == window.repeat;
                             if ui
-                                .add_enabled(valid, egui::Button::new("Usar"))
-                                .on_disabled_hover_text("Escribe la contraseña dos veces")
+                                .add_enabled(valid, egui::Button::new(tr("Usar")))
+                                .on_disabled_hover_text(tr("Escribe la contraseña dos veces"))
                                 .clicked()
                             {
                                 new_password = Some(std::mem::take(&mut window.password));
@@ -897,64 +914,76 @@ impl App {
                 match (&sync.keys, vault_open) {
                     (None, true) => ui.colored_label(
                         warn_color(),
-                        "Falta la contraseña de sincronización: escríbela (la misma en todos tus \
-                         equipos).",
+                        tr(
+                            "Falta la contraseña de sincronización: escríbela (la misma en todos \
+                             tus equipos).",
+                        ),
                     ),
                     (None, false) => ui.colored_label(
                         warn_color(),
-                        "Falta la contraseña de sincronización: abre el baúl, donde se guarda, o \
-                         escríbela.",
+                        tr(
+                            "Falta la contraseña de sincronización: abre el baúl, donde se \
+                             guarda, o escríbela.",
+                        ),
                     ),
-                    (Some(_), true) => ui.weak("🔐 La contraseña está guardada en el baúl."),
-                    (Some(_), false) => ui.weak(
+                    (Some(_), true) => ui.weak(tr("🔐 La contraseña está guardada en el baúl.")),
+                    (Some(_), false) => ui.weak(tr(
                         "La contraseña está solo en memoria: con el baúl cerrado no se guarda y \
                          habrá que escribirla al volver a abrir GodRemote.",
-                    ),
+                    )),
                 };
 
                 ui.separator();
                 ui.horizontal(|ui| {
                     let (text, color) = if !sync.config.enabled {
-                        ("Desactivada".to_string(), ui.visuals().weak_text_color())
+                        (
+                            tr("Desactivada").to_string(),
+                            ui.visuals().weak_text_color(),
+                        )
                     } else if sync.syncing {
-                        ("Sincronizando…".to_string(), ok_color())
+                        (tr("Sincronizando…").to_string(), ok_color())
                     } else if !sync.state.conflicts.is_empty() {
                         (
-                            format!("{} conflicto(s) por resolver", sync.state.conflicts.len()),
+                            trf!(
+                                "{n} conflicto(s) por resolver",
+                                n = sync.state.conflicts.len()
+                            ),
                             warn_color(),
                         )
                     } else {
                         match &sync.health {
-                            Health::Unknown => ("Sin sincronizar todavía".into(), warn_color()),
-                            Health::UpToDate => ("Al día".into(), ok_color()),
-                            Health::Pending => ("Hay cambios por sincronizar".into(), warn_color()),
-                            Health::Offline(e) => (format!("{e}. Se reintentará."), warn_color()),
+                            Health::Unknown => (tr("Sin sincronizar todavía").into(), warn_color()),
+                            Health::UpToDate => (tr("Al día").into(), ok_color()),
+                            Health::Pending => {
+                                (tr("Hay cambios por sincronizar").into(), warn_color())
+                            }
+                            Health::Offline(e) => (trf!("{e}. Se reintentará.", e), warn_color()),
                             Health::WrongPassword => (
-                                "La contraseña no es la de esta carpeta".into(),
+                                tr("La contraseña no es la de esta carpeta").into(),
                                 error_color(),
                             ),
                             Health::Failed(e) => (e.clone(), error_color()),
                         }
                     };
-                    ui.strong("Estado:");
+                    ui.strong(tr("Estado:"));
                     ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
                 });
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
                             sync.ready() && !sync.syncing,
-                            egui::Button::new("🔄 Sincronizar ahora"),
+                            egui::Button::new(tr("🔄 Sincronizar ahora")),
                         )
-                        .on_disabled_hover_text("Actívala e indica la carpeta y la contraseña")
+                        .on_disabled_hover_text(tr("Actívala e indica la carpeta y la contraseña"))
                         .clicked()
                     {
                         sync_now = true;
                     }
                     if let Some(at) = sync.state.last_sync {
-                        ui.weak(format!(
-                            "Última: {} · revisión {}",
-                            clock(at),
-                            sync.state.revision
+                        ui.weak(trf!(
+                            "Última: {fecha} · revisión {revision}",
+                            fecha = clock(at),
+                            revision = sync.state.revision
                         ));
                     }
                 });
@@ -964,23 +993,25 @@ impl App {
                         if window.confirm_rewrite {
                             ui.colored_label(
                                 warn_color(),
-                                "Se sustituirá lo que haya en la carpeta por la configuración de \
-                                 este equipo, cifrada con la contraseña de ahora. Los demás \
-                                 equipos la fusionarán con la suya.",
+                                tr(
+                                    "Se sustituirá lo que haya en la carpeta por la configuración \
+                                     de este equipo, cifrada con la contraseña de ahora. Los \
+                                     demás equipos la fusionarán con la suya.",
+                                ),
                             );
-                            if ui.button("Sí, reescribir").clicked() {
+                            if ui.button(tr("Sí, reescribir")).clicked() {
                                 rewrite = true;
                                 window.confirm_rewrite = false;
                             }
-                            if ui.button("No").clicked() {
+                            if ui.button(tr("No")).clicked() {
                                 window.confirm_rewrite = false;
                             }
                         } else if ui
-                            .button("Reescribir la carpeta con lo de este equipo…")
-                            .on_hover_text(
+                            .button(tr("Reescribir la carpeta con lo de este equipo…"))
+                            .on_hover_text(tr(
                                 "Para cuando el fichero de la carpeta está dañado o se quiere \
                                  cambiar la contraseña",
-                            )
+                            ))
                             .clicked()
                         {
                             window.confirm_rewrite = true;
@@ -993,22 +1024,27 @@ impl App {
                     let list = devices
                         .iter()
                         .map(|(id, d)| {
-                            format!(
-                                "{}{} (revisión {}, {})",
-                                d.name,
-                                if **id == sync.config.device {
-                                    " · este"
-                                } else {
-                                    ""
-                                },
-                                d.revision,
-                                clock(d.seen)
-                            )
+                            let (nombre, revision, visto) = (&d.name, d.revision, clock(d.seen));
+                            if **id == sync.config.device {
+                                trf!(
+                                    "{nombre} · este (revisión {revision}, {visto})",
+                                    nombre,
+                                    revision,
+                                    visto
+                                )
+                            } else {
+                                trf!(
+                                    "{nombre} (revisión {revision}, {visto})",
+                                    nombre,
+                                    revision,
+                                    visto
+                                )
+                            }
                         })
                         .collect::<Vec<_>>()
                         .join(" · ");
                     ui.horizontal_wrapped(|ui| {
-                        ui.strong("Equipos vistos:");
+                        ui.strong(tr("Equipos vistos:"));
                         ui.label(list);
                     });
                 }
@@ -1016,14 +1052,14 @@ impl App {
                     ui.horizontal_wrapped(|ui| {
                         ui.colored_label(
                             warn_color(),
-                            format!(
-                                "El servicio que replica la carpeta ha dejado {} copia(s) «en \
+                            trf!(
+                                "El servicio que replica la carpeta ha dejado {n} copia(s) «en \
                                  conflicto». No hacen falta: cada equipo vuelve a enviar lo suyo.",
-                                sync.copies.len()
+                                n = sync.copies.len()
                             ),
                         )
                         .on_hover_text(sync.copies.join("\n"));
-                        if ui.button("Borrarlas").clicked() {
+                        if ui.button(tr("Borrarlas")).clicked() {
                             remove_copies = true;
                         }
                     });
@@ -1032,11 +1068,11 @@ impl App {
                 if !sync.state.conflicts.is_empty() {
                     ui.separator();
                     ui.horizontal(|ui| {
-                        ui.strong(format!(
-                            "Conflictos por resolver ({})",
-                            sync.state.conflicts.len()
+                        ui.strong(trf!(
+                            "Conflictos por resolver ({n})",
+                            n = sync.state.conflicts.len()
                         ));
-                        ui.weak("cambiados aquí y en otro equipo de forma distinta");
+                        ui.weak(tr("cambiados aquí y en otro equipo de forma distinta"));
                     });
                     let others: Vec<&Conflict> = sync
                         .state
@@ -1047,8 +1083,8 @@ impl App {
                     if others.len() > 1 {
                         ui.horizontal(|ui| {
                             for (label, side) in [
-                                ("Quedarme con todo lo mío", Side::Mine),
-                                ("Quedarme con todo lo de la carpeta", Side::Theirs),
+                                (tr("Quedarme con todo lo mío"), Side::Mine),
+                                (tr("Quedarme con todo lo de la carpeta"), Side::Theirs),
                             ] {
                                 if ui.button(label).clicked() {
                                     decisions.extend(others.iter().map(|c| ((*c).clone(), side)));
@@ -1063,8 +1099,11 @@ impl App {
                             for conflict in &sync.state.conflicts {
                                 ui.group(|ui| {
                                     ui.set_width(ui.available_width());
-                                    ui.strong(&conflict.title);
-                                    ui.label(&conflict.detail);
+                                    // Redactados ahora: el idioma puede no ser el de
+                                    // cuando se creó el conflicto.
+                                    let (title, detail) = conflict.texts();
+                                    ui.strong(title);
+                                    ui.label(detail);
                                     if conflict.is_vault() {
                                         vault_conflict_ui(
                                             ui,
@@ -1077,10 +1116,10 @@ impl App {
                                         );
                                     } else {
                                         ui.horizontal(|ui| {
-                                            if ui.button("Lo mío").clicked() {
+                                            if ui.button(tr("Lo mío")).clicked() {
                                                 decisions.push((conflict.clone(), Side::Mine));
                                             }
-                                            if ui.button("Lo de la carpeta").clicked() {
+                                            if ui.button(tr("Lo de la carpeta")).clicked() {
                                                 decisions.push((conflict.clone(), Side::Theirs));
                                             }
                                         });
@@ -1088,10 +1127,10 @@ impl App {
                                 });
                             }
                         });
-                    ui.weak(
+                    ui.weak(tr(
                         "Mientras no elijas, cada lado conserva lo suyo. Antes de cambiar nada \
                          en este equipo se guarda una copia de su configuración.",
-                    );
+                    ));
                 }
 
                 if let Some((message, is_error)) = &window.message {
@@ -1101,7 +1140,7 @@ impl App {
                 }
                 if !sync.log.is_empty() {
                     ui.separator();
-                    egui::CollapsingHeader::new("Últimos avisos")
+                    egui::CollapsingHeader::new(tr("Últimos avisos"))
                         .id_salt("sync_log")
                         .default_open(false)
                         .show(ui, |ui| {
@@ -1122,19 +1161,19 @@ impl App {
                 }
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
-                    ui.weak(
+                    ui.weak(tr(
                         "Se sincronizan los equipos y sus carpetas, los snippets, los túneles, \
                          los temas, los ajustes y el baúl (tal cual, cifrado con su contraseña \
                          maestra). No: las claves privadas (solo su ruta), los registros, las \
                          grabaciones, el historial de órdenes ni los ajustes propios de cada \
                          equipo (editor, shell local, carpeta de registros, proxy, servidor X).",
-                    );
+                    ));
                     if ui
-                        .small_button("Abrir la carpeta de las copias previas")
-                        .on_hover_text(
+                        .small_button(tr("Abrir la carpeta de las copias previas"))
+                        .on_hover_text(tr(
                             "Los ficheros «antes-de-sincronizar-…» se restauran desde \
                              «Importar y copias de seguridad»",
-                        )
+                        ))
                         .clicked()
                     {
                         open_folder = Some(crate::paths::data_dir());
@@ -1175,9 +1214,9 @@ impl App {
             self.sync.ask(true);
             window.message = Some((
                 if self.vault.is_some() {
-                    "Contraseña guardada en el baúl".into()
+                    tr("Contraseña guardada en el baúl").into()
                 } else {
-                    "Contraseña puesta (solo en memoria: el baúl está cerrado)".into()
+                    tr("Contraseña puesta (solo en memoria: el baúl está cerrado)").into()
                 },
                 false,
             ));
@@ -1186,7 +1225,7 @@ impl App {
             window.message = None;
             match self.sync_blocked_by() {
                 Some(what) => {
-                    window.message = Some((format!("Cierra antes {what}"), true));
+                    window.message = Some((trf!("Cierra antes {what}", what), true));
                 }
                 None => self.sync.ask(true),
             }
@@ -1226,8 +1265,10 @@ impl App {
         if remove_copies {
             let removed = sync::remove_conflict_copies(&self.sync.config.folder_path());
             self.sync.copies.clear();
-            self.sync
-                .note(format!("{removed} copia(s) en conflicto borradas"), false);
+            self.sync.note(
+                trf!("{removed} copia(s) en conflicto borradas", removed),
+                false,
+            );
         }
         if unlock {
             self.vault_dialog = Some(VaultDialog::Unlock {
@@ -1239,7 +1280,14 @@ impl App {
         if let Some(folder) = open_folder
             && let Err(e) = crate::paths::open_with_system(&folder)
         {
-            self.notify(format!("No se pudo abrir {}: {e}", folder.display()), true);
+            self.notify(
+                trf!(
+                    "No se pudo abrir {ruta}: {error}",
+                    ruta = folder.display(),
+                    error = e
+                ),
+                true,
+            );
         }
         if open {
             self.sync.window = Some(window);
@@ -1262,24 +1310,32 @@ fn vault_conflict_ui(
 ) {
     match plan {
         Some(Ok((added, removed, clashes))) => {
-            ui.label(format!(
+            ui.label(trf!(
                 "Se pueden combinar: de la carpeta entrarían {added} secreto(s) y se quitarían \
-                 {removed} que se borraron allí."
+                 {removed} que se borraron allí.",
+                added,
+                removed
             ));
             if clashes.is_empty() {
-                if ui.button("Combinar los dos baúles").clicked() {
+                if ui.button(tr("Combinar los dos baúles")).clicked() {
                     *choice = Some(VaultChoice::Combine(Side::Mine));
                 }
             } else {
                 ui.colored_label(
                     warn_color(),
-                    format!("Con valores distintos en los dos: {}", clashes.join(", ")),
+                    trf!(
+                        "Con valores distintos en los dos: {lista}",
+                        lista = clashes.join(", ")
+                    ),
                 );
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Combinar; en esos, lo mío").clicked() {
+                    if ui.button(tr("Combinar; en esos, lo mío")).clicked() {
                         *choice = Some(VaultChoice::Combine(Side::Mine));
                     }
-                    if ui.button("Combinar; en esos, lo de la carpeta").clicked() {
+                    if ui
+                        .button(tr("Combinar; en esos, lo de la carpeta"))
+                        .clicked()
+                    {
                         *choice = Some(VaultChoice::Combine(Side::Theirs));
                     }
                 });
@@ -1288,39 +1344,46 @@ fn vault_conflict_ui(
         Some(Err(e)) => {
             ui.colored_label(warn_color(), e);
             ui.horizontal(|ui| {
-                ui.label("Contraseña maestra del baúl de la carpeta:");
+                ui.label(tr("Contraseña maestra del baúl de la carpeta:"));
                 ui.add(
                     egui::TextEdit::singleline(&mut window.other_master)
                         .password(true)
                         .desired_width(180.0),
                 );
                 if ui
-                    .add_enabled(!window.other_master.is_empty(), egui::Button::new("Abrir"))
+                    .add_enabled(
+                        !window.other_master.is_empty(),
+                        egui::Button::new(tr("Abrir")),
+                    )
                     .clicked()
                 {
                     *try_other = true;
                 }
             });
-            ui.weak("Con ella se pueden combinar los dos baúles secreto a secreto.");
+            ui.weak(tr(
+                "Con ella se pueden combinar los dos baúles secreto a secreto.",
+            ));
         }
         None if !vault_open => {
             ui.horizontal_wrapped(|ui| {
-                ui.label("Abre el baúl para combinarlos secreto a secreto, sin perder nada.");
-                if ui.button("Desbloquear…").clicked() {
+                ui.label(tr(
+                    "Abre el baúl para combinarlos secreto a secreto, sin perder nada.",
+                ));
+                if ui.button(tr("Desbloquear…")).clicked() {
                     *unlock = true;
                 }
             });
         }
         None => {
-            ui.weak("Vuelve a sincronizar para ver cómo combinarlos.");
+            ui.weak(tr("Vuelve a sincronizar para ver cómo combinarlos."));
         }
     }
     ui.horizontal_wrapped(|ui| {
-        ui.weak("O uno entero (el otro queda en la copia previa):");
-        if ui.small_button("Mi baúl").clicked() {
+        ui.weak(tr("O uno entero (el otro queda en la copia previa):"));
+        if ui.small_button(tr("Mi baúl")).clicked() {
             *choice = Some(VaultChoice::Whole(Side::Mine));
         }
-        if ui.small_button("El de la carpeta").clicked() {
+        if ui.small_button(tr("El de la carpeta")).clicked() {
             *choice = Some(VaultChoice::Whole(Side::Theirs));
         }
     });

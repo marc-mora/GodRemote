@@ -34,8 +34,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::i18n::tr;
 use crate::model::{AuthMethod, Folder, MAX_JUMPS, Node, Protocol, Session, Tree};
 use crate::sync::{self, Keyring, SealError, SealKind, SealParams};
+use crate::trf;
 
 const FORMAT: u32 = 1;
 /// Equipos y carpetas que caben en una carpeta compartida.
@@ -84,23 +86,26 @@ impl std::fmt::Display for ShareError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ShareError::Unavailable(e) => {
-                write!(f, "El fichero compartido no está disponible ({e})")
+                f.write_str(&trf!("El fichero compartido no está disponible ({e})", e))
             }
             ShareError::Seal(SealError::WrongPassword) => {
-                write!(f, "La contraseña no es la de esta carpeta compartida")
+                f.write_str(tr("La contraseña no es la de esta carpeta compartida"))
             }
             ShareError::Seal(e) => write!(f, "{e}"),
-            ShareError::Invalid(e) => write!(
-                f,
-                "El fichero compartido no es válido ({e}); no se ha tocado nada"
-            ),
-            ShareError::Stale { seen, found } => write!(
-                f,
+            ShareError::Invalid(e) => f.write_str(&trf!(
+                "El fichero compartido no es válido ({e}); no se ha tocado nada",
+                e
+            )),
+            ShareError::Stale { seen, found } => f.write_str(&trf!(
                 "El fichero compartido es más antiguo (revisión {found}) que el último visto \
-                 (revisión {seen}); se conserva lo que había"
-            ),
+                 (revisión {seen}); se conserva lo que había",
+                found,
+                seen
+            )),
             ShareError::Occupied(e) => write!(f, "{e}"),
-            ShareError::Io(e) => write!(f, "No se pudo escribir el fichero compartido ({e})"),
+            ShareError::Io(e) => {
+                f.write_str(&trf!("No se pudo escribir el fichero compartido ({e})", e))
+            }
         }
     }
 }
@@ -171,15 +176,20 @@ fn disarm(session: &mut Session) -> bool {
 }
 
 /// Lo que se ha encontrado al sanear una carpeta.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Cleaning {
     /// Equipos que quedan.
+    #[serde(rename = "equipos")]
     pub sessions: usize,
     /// Equipos dejados fuera (puerto serie, sin dirección, repetidos).
+    #[serde(rename = "descartados")]
     pub dropped: usize,
     /// Equipos que traían órdenes al conectar, túneles o reenvíos.
+    #[serde(rename = "desarmados")]
     pub disarmed: usize,
     /// Saltos que apuntan a equipos de fuera de la carpeta.
+    #[serde(rename = "saltos_fuera")]
     pub outside_jumps: usize,
 }
 
@@ -188,23 +198,23 @@ impl Cleaning {
     pub fn warnings(&self) -> Vec<String> {
         let mut out = vec![];
         if self.disarmed > 0 {
-            out.push(format!(
-                "{} equipo(s) traían órdenes al conectar, túneles o reenvíos, que GodRemote no \
+            out.push(trf!(
+                "{n} equipo(s) traían órdenes al conectar, túneles o reenvíos, que GodRemote no \
                  publica: se han ignorado (¿seguro que el fichero es de quien dice?)",
-                self.disarmed
+                n = self.disarmed
             ));
         }
         if self.dropped > 0 {
-            out.push(format!(
-                "{} equipo(s) se han dejado fuera (puerto serie, sin dirección o repetidos)",
-                self.dropped
+            out.push(trf!(
+                "{n} equipo(s) se han dejado fuera (puerto serie, sin dirección o repetidos)",
+                n = self.dropped
             ));
         }
         if self.outside_jumps > 0 {
-            out.push(format!(
-                "{} salto(s) pasan por equipos que no están en la carpeta: esos equipos no \
+            out.push(trf!(
+                "{n} salto(s) pasan por equipos que no están en la carpeta: esos equipos no \
                  conectarán hasta que los dupliques y les pongas tu salto",
-                self.outside_jumps
+                n = self.outside_jumps
             ));
         }
         out
@@ -249,8 +259,9 @@ fn clean_folder(
     report: &mut Cleaning,
 ) -> Result<(), ShareError> {
     if depth > MAX_DEPTH {
-        return Err(ShareError::Invalid(format!(
-            "tiene más de {MAX_DEPTH} niveles de subcarpetas"
+        return Err(ShareError::Invalid(trf!(
+            "tiene más de {max} niveles de subcarpetas",
+            max = MAX_DEPTH
         )));
     }
     single_line(&mut folder.name, MAX_NAME);
@@ -280,8 +291,9 @@ fn clean_folder(
     let mut kept = vec![];
     for mut node in std::mem::take(&mut folder.children) {
         if seen.len() >= MAX_NODES {
-            return Err(ShareError::Invalid(format!(
-                "tiene más de {MAX_NODES} equipos y carpetas"
+            return Err(ShareError::Invalid(trf!(
+                "tiene más de {max} equipos y carpetas",
+                max = MAX_NODES
             )));
         }
         if !seen.insert(node.id()) {
@@ -402,7 +414,7 @@ pub fn export(tree: &Tree, folder: Uuid) -> Option<Result<Export, ShareError>> {
         let data = serde_json::to_vec(&folder).map_err(|e| ShareError::Io(e.to_string()))?;
         if data.len() > MAX_CONTENT {
             return Err(ShareError::Invalid(
-                "es demasiado grande para compartirla".into(),
+                tr("es demasiado grande para compartirla").into(),
             ));
         }
         Ok(Export {
@@ -427,7 +439,7 @@ fn read_raw(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // Sin su carpeta, no es que no exista: es que no se llega.
             return match path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                Some(parent) if !parent.is_dir() => Err(unavailable(parent, &"no existe")),
+                Some(parent) if !parent.is_dir() => Err(unavailable(parent, &tr("no existe"))),
                 _ => Ok(None),
             };
         }
@@ -441,12 +453,12 @@ fn read_raw(
         return Err(ShareError::Seal(SealError::TooBig));
     }
     let published: Published = serde_json::from_slice(&plain)
-        .map_err(|e| ShareError::Invalid(format!("no se entiende: {e}")))?;
+        .map_err(|e| ShareError::Invalid(trf!("no se entiende: {e}", e)))?;
     if published.format > FORMAT {
         return Err(ShareError::Seal(SealError::Newer));
     }
     if published.format == 0 {
-        return Err(ShareError::Invalid("formato desconocido".into()));
+        return Err(ShareError::Invalid(tr("formato desconocido").into()));
     }
     Ok(Some((published, params, sync::fingerprint(&raw))))
 }
@@ -459,19 +471,20 @@ pub fn publish(
     publisher: &str,
     keys: &mut Keyring,
 ) -> Result<Export, ShareError> {
-    let export = export(tree, publication.folder)
-        .ok_or_else(|| ShareError::Invalid("la carpeta ya no existe en este equipo".into()))??;
+    let export = export(tree, publication.folder).ok_or_else(|| {
+        ShareError::Invalid(tr("la carpeta ya no existe en este equipo").into())
+    })??;
     let path = crate::paths::expand_tilde(&publication.path);
     if path.is_dir() {
-        return Err(ShareError::Occupied(format!(
-            "{} es una carpeta: indica el nombre del fichero",
-            path.display()
+        return Err(ShareError::Occupied(trf!(
+            "{path} es una carpeta: indica el nombre del fichero",
+            path = path.display()
         )));
     }
     let occupied = || {
-        ShareError::Occupied(format!(
-            "Ya hay otro fichero en {}; elige otro nombre o bórralo antes",
-            path.display()
+        ShareError::Occupied(trf!(
+            "Ya hay otro fichero en {path}; elige otro nombre o bórralo antes",
+            path = path.display()
         ))
     };
     let (params, revision) = match read_raw(&path, keys) {
@@ -541,8 +554,17 @@ pub struct Subscription {
     /// Lo publicado, ya saneado, con sus identificadores originales.
     #[serde(rename = "contenido")]
     pub content: Option<Folder>,
-    /// Avisos de la última lectura.
-    #[serde(rename = "avisos")]
+    /// En la última lectura había en la ruta otra publicación.
+    #[serde(rename = "otra_publicacion")]
+    pub replaced: bool,
+    /// Lo que se encontró al sanear lo último que se leyó.
+    #[serde(rename = "saneado")]
+    pub report: Cleaning,
+    /// Avisos de la última lectura, en el idioma que había al leer el
+    /// fichero o la suscripción: no se guardan (salen de `replaced` y de
+    /// `report`), y quien los pinta los redacta en el momento con
+    /// [`Subscription::notices`].
+    #[serde(skip)]
     pub warnings: Vec<String>,
     /// Equipos cuya dirección ha cambiado: su contraseña guardada hay que
     /// olvidarla en cuanto el baúl esté abierto.
@@ -564,6 +586,8 @@ impl Default for Subscription {
             my_auth: None,
             my_key_path: String::new(),
             content: None,
+            replaced: false,
+            report: Cleaning::default(),
             warnings: vec![],
             forget: vec![],
         }
@@ -607,7 +631,7 @@ pub struct Fetched {
 /// Lee, descifra y sanea un fichero publicado. No toca nada.
 pub fn fetch(path: &Path, keys: &mut Keyring) -> Result<Fetched, ShareError> {
     let (mut published, _, fingerprint) =
-        read_raw(path, keys)?.ok_or_else(|| unavailable(path, &"no existe"))?;
+        read_raw(path, keys)?.ok_or_else(|| unavailable(path, &tr("no existe")))?;
     let report = clean(&mut published.folder)?;
     single_line(&mut published.publisher, 60);
     Ok(Fetched {
@@ -669,31 +693,32 @@ impl Changes {
     pub fn summary(&self) -> String {
         let mut parts = vec![];
         if !self.added.is_empty() {
-            parts.push(format!("{} equipo(s) nuevos", self.added.len()));
+            parts.push(trf!("{n} equipo(s) nuevos", n = self.added.len()));
         }
         if !self.removed.is_empty() {
-            parts.push(format!("{} quitados", self.removed.len()));
+            parts.push(trf!("{n} quitados", n = self.removed.len()));
         }
         if !self.readdressed.is_empty() {
-            parts.push(format!(
-                "{} con otra dirección ({})",
-                self.readdressed.len(),
-                self.readdressed
+            parts.push(trf!(
+                "{n} con otra dirección ({lista})",
+                n = self.readdressed.len(),
+                lista = self
+                    .readdressed
                     .iter()
                     .take(3)
-                    .map(|(_, name, old, new)| format!("«{name}»: {old} ➡ {new}"))
+                    .map(|(_, name, old, new)| trf!("«{name}»: {old} ➡ {new}", name, old, new))
                     .collect::<Vec<_>>()
                     .join("; ")
             ));
         }
         if self.rescued > 0 {
-            parts.push(format!(
-                "{} elemento(s) tuyos que estaban dentro han pasado a la raíz",
-                self.rescued
+            parts.push(trf!(
+                "{n} elemento(s) tuyos que estaban dentro han pasado a la raíz",
+                n = self.rescued
             ));
         }
         if parts.is_empty() {
-            "sin cambios en sus equipos".to_string()
+            tr("sin cambios en sus equipos").to_string()
         } else {
             parts.join(", ")
         }
@@ -725,6 +750,19 @@ impl Subscription {
 
     pub fn file_path(&self) -> PathBuf {
         crate::paths::expand_tilde(&self.path)
+    }
+
+    /// Avisos de la última lectura, en el idioma en uso.
+    pub fn notices(&self) -> Vec<String> {
+        let mut out = vec![];
+        if self.replaced {
+            out.push(
+                tr("En esa ruta hay ahora otra publicación (se ha vuelto a publicar desde cero)")
+                    .to_string(),
+            );
+        }
+        out.extend(self.report.warnings());
+        out
     }
 
     /// Identificadores que tienen en este equipo los nodos de `content`.
@@ -846,15 +884,9 @@ impl Subscription {
                 self.forget.push(*id);
             }
         }
-        if self.publication.is_some_and(|id| id != published.id) {
-            self.warnings = vec![
-                "En esa ruta hay ahora otra publicación (se ha vuelto a publicar desde cero)"
-                    .to_string(),
-            ];
-        } else {
-            self.warnings.clear();
-        }
-        self.warnings.extend(fetched.report.warnings());
+        self.replaced = self.publication.is_some_and(|id| id != published.id);
+        self.report = fetched.report.clone();
+        self.warnings = self.notices();
         self.publication = Some(published.id);
         self.revision = published.revision;
         self.publisher = published.publisher.clone();
@@ -961,10 +993,15 @@ impl ShareStore {
     }
 
     pub fn load(dir: &Path) -> Self {
-        sync::read_limited(&Self::file(dir), 4 * MAX_FILE)
+        let mut store: Self = sync::read_limited(&Self::file(dir), 4 * MAX_FILE)
             .ok()
             .and_then(|data| serde_json::from_slice(&data).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Los textos de los avisos no se guardan.
+        for sub in &mut store.subscriptions {
+            sub.warnings = sub.notices();
+        }
+        store
     }
 
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
@@ -1033,7 +1070,7 @@ pub fn is_shared_root(id: Uuid) -> bool {
 /// distinguen de las propias.
 pub fn folder_label(id: Uuid, name: &str) -> String {
     if is_shared_root(id) {
-        format!("👥 {name} (compartida)")
+        trf!("👥 {name} (compartida)", name)
     } else {
         format!("📁 {name}")
     }
@@ -1660,5 +1697,44 @@ mod tests {
         assert_eq!(ShareStore::load(dir.path()), store);
         assert_eq!(subscribed_roots(dir.path()), BTreeSet::from([shared]));
         assert!(subscribed_roots(&dir.path().join("nada")).is_empty());
+    }
+
+    #[test]
+    fn warnings_are_stored_as_data_and_drafted_when_read() {
+        let store = ShareStore {
+            publications: vec![],
+            subscriptions: vec![Subscription {
+                replaced: true,
+                report: Cleaning {
+                    sessions: 2,
+                    dropped: 1,
+                    disarmed: 3,
+                    outside_jumps: 4,
+                },
+                ..Default::default()
+            }],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        store.save(dir.path()).unwrap();
+        // En disco va el dato y no el texto: lo que se guarde en un idioma
+        // se tiene que poder leer en otro.
+        let saved = std::fs::read_to_string(ShareStore::file(dir.path())).unwrap();
+        for drafted in ["publicación", "equipo(s)", "salto(s)", "avisos"] {
+            assert!(!saved.contains(drafted), "«{drafted}» está en {saved}");
+        }
+        let read = ShareStore::load(dir.path());
+        let warnings = &read.subscriptions[0].warnings;
+        assert_eq!(warnings.len(), 4, "{warnings:?}");
+        assert!(warnings[0].contains("otra publicación"));
+        assert!(warnings[1].starts_with("3 equipo(s) traían órdenes"));
+        assert!(warnings[2].starts_with("1 equipo(s) se han dejado fuera"));
+        assert!(warnings[3].starts_with("4 salto(s) pasan"));
+        assert_eq!(*warnings, read.subscriptions[0].notices());
+        // Un fichero de antes, con los avisos ya redactados, también se lee.
+        let old = r#"{"suscripciones":[{"ruta":"/x/y.json","avisos":["un aviso viejo"]}]}"#;
+        std::fs::write(ShareStore::file(dir.path()), old).unwrap();
+        let read = ShareStore::load(dir.path());
+        assert_eq!(read.subscriptions[0].path, "/x/y.json");
+        assert!(read.subscriptions[0].warnings.is_empty());
     }
 }

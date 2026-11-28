@@ -842,7 +842,7 @@ password, the same on all of them.
   sends its own changes again; and you are told about any "conflicted"
   copies left by the sync service, and they can be deleted.
 - **Changing the password or repairing a damaged file**: type the new one
-  and press **Rewrite the folder with this computer's data…**; on the other
+  and press **Rewrite the folder with what this computer has…**; on the other
   computers, type the new one.
 
 ### Sharing a folder of hosts with teammates

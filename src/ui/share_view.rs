@@ -17,12 +17,14 @@ use uuid::Uuid;
 
 use super::sync_view::clock;
 use super::{App, TreeAction};
+use crate::i18n::tr;
 use crate::model::{AuthMethod, Tree};
 use crate::share::{
     self, Export, FILE_SUFFIX, Fetched, Publication, ShareError, ShareStore, Subscription,
 };
 use crate::sync::{self, Keyring, Stamp};
 use crate::theme::{error_color, ok_color, warn_color};
+use crate::{mark, trf};
 
 /// Cada cuánto se mira si ha cambiado un fichero que se sigue.
 const POLL_EVERY: Duration = Duration::from_secs(30);
@@ -120,7 +122,7 @@ impl ShareUi {
         self.store
             .save(&crate::paths::data_dir())
             .err()
-            .map(|e| format!("No se pudo guardar shares.json: {e}"))
+            .map(|e| trf!("No se pudo guardar shares.json: {e}", e))
     }
 
     fn is_empty(&self) -> bool {
@@ -159,23 +161,25 @@ impl App {
     /// Las carpetas compartidas son de solo lectura: lo que las cambiaría
     /// no se hace (y se explica). Devuelve la acción si puede seguir.
     pub(super) fn share_guard(&mut self, action: TreeAction) -> Option<TreeAction> {
-        const READ_ONLY: &str = "Es de una carpeta compartida, de solo lectura. Duplícalo para \
-                                 tener una copia tuya que puedas cambiar.";
+        const READ_ONLY: &str = mark!(
+            "Es de una carpeta compartida, de solo lectura. Duplícalo para tener una copia tuya \
+             que puedas cambiar."
+        );
         match action {
-            TreeAction::Edit(id) if share::is_shared(id) => self.notify(READ_ONLY, true),
+            TreeAction::Edit(id) if share::is_shared(id) => self.notify(tr(READ_ONLY), true),
             TreeAction::Delete(id) | TreeAction::RenameFolder(id) if share::is_shared_root(id) => {
                 // Lo que se puede cambiar de ella (o dejar de seguirla)
                 // está en su ventana.
                 self.open_share_window();
             }
             TreeAction::Delete(id) | TreeAction::RenameFolder(id) if share::is_shared(id) => {
-                self.notify(READ_ONLY, true);
+                self.notify(tr(READ_ONLY), true);
             }
             TreeAction::Move(id, parent)
                 if share::is_shared(id) || parent.is_some_and(share::is_shared) =>
             {
                 self.notify(
-                    "Las carpetas compartidas no se reorganizan: son de quien las publica",
+                    tr("Las carpetas compartidas no se reorganizan: son de quien las publica"),
                     true,
                 );
             }
@@ -183,7 +187,7 @@ impl App {
                 if share::is_shared(parent) =>
             {
                 self.notify(
-                    "No se puede crear nada dentro de una carpeta compartida",
+                    tr("No se puede crear nada dentro de una carpeta compartida"),
                     true,
                 );
             }
@@ -201,7 +205,7 @@ impl App {
         };
         let mut copy = resolved.clone();
         copy.id = Uuid::new_v4();
-        copy.name = format!("{} (copia)", resolved.display_name());
+        copy.name = trf!("{name} (copia)", name = resolved.display_name());
         copy.inherit_auth = false;
         copy.inherit_jumps = false;
         copy.secret_owner = None;
@@ -219,7 +223,7 @@ impl App {
         self.tree.upsert_session(None, copy);
         self.save_tree();
         self.notify(
-            "Copia creada fuera de la carpeta compartida: ya es tuya y la puedes cambiar",
+            tr("Copia creada fuera de la carpeta compartida: ya es tuya y la puedes cambiar"),
             false,
         );
     }
@@ -288,9 +292,10 @@ impl App {
         }
         if forgotten > 0 {
             self.notify(
-                format!(
+                trf!(
                     "Se ha olvidado la contraseña guardada de {forgotten} equipo(s) compartidos \
-                     cuya dirección ha cambiado: se te pedirá al conectar"
+                     cuya dirección ha cambiado: se te pedirá al conectar",
+                    forgotten
                 ),
                 false,
             );
@@ -311,7 +316,7 @@ impl App {
         if fetched.fingerprint == self.shares.store.subscriptions[index].file
             && self.tree.find(id).is_some()
         {
-            self.shares.set_status(id, "Al día", false);
+            self.shares.set_status(id, tr("Al día"), false);
             return;
         }
         if self.sync_blocked_by().is_some() {
@@ -331,7 +336,7 @@ impl App {
                     self.notify(e, true);
                 }
                 self.shares.stale_marks = true;
-                self.shares.set_status(id, "Al día", false);
+                self.shares.set_status(id, tr("Al día"), false);
                 // Las pestañas de un equipo que ya no está siguen como
                 // estaban, pero no se reabrirán al arrancar.
                 let orphans: Vec<&str> = changes
@@ -346,24 +351,31 @@ impl App {
                     .collect();
                 if !orphans.is_empty() {
                     self.notify(
-                        format!(
-                            "{} ya no está(n) en la carpeta compartida «{name}»: sus pestañas \
-                             siguen abiertas, pero no se volverán a abrir solas",
-                            orphans.join(", ")
+                        trf!(
+                            "{equipos} ya no está(n) en la carpeta compartida «{name}»: sus \
+                             pestañas siguen abiertas, pero no se volverán a abrir solas",
+                            equipos = orphans.join(", "),
+                            name
                         ),
                         true,
                     );
                 } else if previous.is_some() && !changes.is_empty() {
                     self.notify(
-                        format!("Carpeta compartida «{name}»: {}", changes.summary()),
+                        trf!(
+                            "Carpeta compartida «{name}»: {cambios}",
+                            name,
+                            cambios = changes.summary()
+                        ),
                         !changes.readdressed.is_empty(),
                     );
                 }
                 if pending_forget && self.vault.is_none() {
                     self.shares.set_status(
                         id,
-                        "Al día. Al abrir el baúl se olvidará la contraseña guardada de los \
-                         equipos que han cambiado de dirección",
+                        tr(
+                            "Al día. Al abrir el baúl se olvidará la contraseña guardada de los \
+                             equipos que han cambiado de dirección",
+                        ),
                         false,
                     );
                 }
@@ -431,9 +443,10 @@ impl App {
                 }
                 if rescued > 0 {
                     self.notify(
-                        format!(
+                        trf!(
                             "{rescued} elemento(s) que estaban dentro de una carpeta compartida \
-                             han pasado a la raíz: esa carpeta es de quien la publica"
+                             han pasado a la raíz: esa carpeta es de quien la publica",
+                            rescued
                         ),
                         false,
                     );
@@ -505,7 +518,9 @@ impl App {
                                 }
                                 let result = match keys.lock() {
                                     Ok(mut keys) => share::fetch(&path, &mut keys),
-                                    Err(_) => Err(ShareError::Io("llavero no disponible".into())),
+                                    Err(_) => {
+                                        Err(ShareError::Io(tr("llavero no disponible").into()))
+                                    }
                                 };
                                 (id, stamp, Some(result))
                             })
@@ -532,7 +547,7 @@ impl App {
         self.share_spawn(move || {
             let result = match keys.lock() {
                 Ok(mut keys) => share::publish(&tree, &mut publication, &publisher, &mut keys),
-                Err(_) => Err(ShareError::Io("llavero no disponible".into())),
+                Err(_) => Err(ShareError::Io(tr("llavero no disponible").into())),
             };
             Done::Published(Box::new(publication), Box::new(result))
         });
@@ -554,7 +569,7 @@ impl App {
                                 self.shares.seen.insert(id, stamp);
                             }
                             let text = if e.is_transient() {
-                                format!("{e}. Se usa la última copia y se reintentará.")
+                                trf!("{e}. Se usa la última copia y se reintentará.", e)
                             } else {
                                 e.to_string()
                             };
@@ -567,23 +582,25 @@ impl App {
                 let id = publication.id;
                 match *result {
                     Ok(export) => {
-                        let mut text = format!(
-                            "Publicada: {} equipo(s), revisión {}",
-                            export.report.sessions, publication.revision
-                        );
+                        let mut parts = vec![trf!(
+                            "Publicada: {n} equipo(s), revisión {revision}",
+                            n = export.report.sessions,
+                            revision = publication.revision
+                        )];
                         if export.report.outside_jumps > 0 {
-                            text.push_str(&format!(
-                                " · {} salto(s) pasan por equipos de fuera de la carpeta: a \
-                                 quien la siga no le funcionarán",
-                                export.report.outside_jumps
+                            parts.push(trf!(
+                                "{n} salto(s) pasan por equipos de fuera de la carpeta: a quien \
+                                 la siga no le funcionarán",
+                                n = export.report.outside_jumps
                             ));
                         }
                         if export.report.dropped > 0 {
-                            text.push_str(&format!(
-                                " · {} equipo(s) no se publican (puerto serie o sin dirección)",
-                                export.report.dropped
+                            parts.push(trf!(
+                                "{n} equipo(s) no se publican (puerto serie o sin dirección)",
+                                n = export.report.dropped
                             ));
                         }
+                        let text = parts.join(" · ");
                         let store = &mut self.shares.store;
                         match store.publications.iter_mut().find(|p| p.id == id) {
                             Some(existing) => {
@@ -597,9 +614,9 @@ impl App {
                                 store.publications.push(*publication);
                                 if let Some(window) = &mut self.shares.window {
                                     window.message = Some((
-                                        "Carpeta publicada. Da a tus compañeros la ruta del \
-                                         fichero y la contraseña."
-                                            .into(),
+                                        tr("Carpeta publicada. Da a tus compañeros la ruta del \
+                                            fichero y la contraseña.")
+                                        .into(),
                                         false,
                                     ));
                                 }
@@ -654,14 +671,14 @@ impl App {
             .iter()
             .any(|p| p.id == fetched.published.id)
         {
-            return Err("Esa carpeta la publicas tú desde este equipo".into());
+            return Err(tr("Esa carpeta la publicas tú desde este equipo").into());
         }
         let sub = Subscription::new(path, &fetched);
         if store.subscriptions.iter().any(|s| s.id == sub.id) {
-            return Err("Ya sigues esa carpeta".into());
+            return Err(tr("Ya sigues esa carpeta").into());
         }
         if self.tree.find(sub.id).is_some() {
-            return Err("Ya tienes en el árbol una carpeta con ese identificador".into());
+            return Err(tr("Ya tienes en el árbol una carpeta con ese identificador").into());
         }
         let id = sub.id;
         let name = fetched.published.folder.name.clone();
@@ -673,8 +690,10 @@ impl App {
         }
         self.share_apply(id, fetched);
         self.selected = Some(id);
-        Ok(format!(
-            "Ahora sigues «{name}»: {count} equipo(s). Está en el árbol, marcada como compartida."
+        Ok(trf!(
+            "Ahora sigues «{name}»: {count} equipo(s). Está en el árbol, marcada como compartida.",
+            name,
+            count
         ))
     }
 
@@ -716,9 +735,9 @@ impl App {
         share::mark(&self.tree, &self.shares.store.roots());
         self.notify(
             if keep {
-                "Ya no sigues la carpeta: sus equipos se quedan como una carpeta tuya"
+                tr("Ya no sigues la carpeta: sus equipos se quedan como una carpeta tuya")
             } else {
-                "Ya no sigues la carpeta: se ha quitado del árbol"
+                tr("Ya no sigues la carpeta: se ha quitado del árbol")
             },
             false,
         );
@@ -743,7 +762,7 @@ impl App {
         let mut passwords: Vec<(Uuid, String)> = vec![];
         let mut mine: Option<Uuid> = None;
         let mut changed_auto = false;
-        egui::Window::new("Carpetas compartidas")
+        egui::Window::new(tr("Carpetas compartidas"))
             .id(egui::Id::unique("share_window"))
             .open(&mut open)
             .collapsible(false)
@@ -757,29 +776,29 @@ impl App {
                     .id_salt("share_scroll")
                     .max_height(640.0)
                     .show(ui, |ui| {
-                        ui.strong("Carpetas de compañeros que sigo");
-                        ui.weak(
+                        ui.strong(tr("Carpetas de compañeros que sigo"));
+                        ui.weak(tr(
                             "Aparecen en el árbol, de solo lectura, y se actualizan solas. Puedes \
                              conectar a sus equipos, duplicarlos a una carpeta tuya y usar tu \
                              usuario y tu clave sin tocar lo publicado.",
-                        );
+                        ));
                         if shares.store.subscriptions.is_empty() {
-                            ui.weak("(ninguna todavía)");
+                            ui.weak(tr("(ninguna todavía)"));
                         }
                         for sub in &shares.store.subscriptions {
                             ui.group(|ui| {
                                 ui.set_width(ui.available_width());
                                 ui.horizontal_wrapped(|ui| {
                                     ui.strong(format!("👥 {}", sub.name()));
-                                    ui.weak(format!(
-                                        "de {} · revisión {} · publicada el {}",
-                                        if sub.publisher.is_empty() {
-                                            "(sin nombre)"
+                                    ui.weak(trf!(
+                                        "de {autor} · revisión {revision} · publicada el {fecha}",
+                                        autor = if sub.publisher.is_empty() {
+                                            tr("(sin nombre)")
                                         } else {
                                             &sub.publisher
                                         },
-                                        sub.revision,
-                                        clock(sub.published_at)
+                                        revision = sub.revision,
+                                        fecha = clock(sub.published_at)
                                     ));
                                 });
                                 ui.add(
@@ -791,7 +810,9 @@ impl App {
                                         egui::Label::new(RichText::new(text).color(color)).wrap(),
                                     );
                                 }
-                                for warning in &sub.warnings {
+                                // Redactados ahora: el idioma puede no ser el de
+                                // cuando se leyó el fichero.
+                                for warning in sub.notices() {
                                     ui.add(
                                         egui::Label::new(
                                             RichText::new(format!("• {warning}"))
@@ -818,30 +839,34 @@ impl App {
                                     )
                                 });
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.label("Mi usuario");
+                                    ui.label(tr("Mi usuario"));
                                     ui.add(
                                         egui::TextEdit::singleline(&mut entry.0)
-                                            .hint_text("el publicado")
+                                            .hint_text(tr("el publicado"))
                                             .desired_width(110.0),
                                     );
-                                    ui.label("Mi autenticación");
+                                    ui.label(tr("Mi autenticación"));
                                     egui::ComboBox::from_id_salt(("share_auth", sub.id))
                                         .selected_text(match entry.1 {
-                                            Some(AuthMethod::Key) => "Clave privada",
-                                            Some(AuthMethod::Agent) => "Agente SSH",
-                                            _ => "La publicada",
+                                            Some(AuthMethod::Key) => tr("Clave privada"),
+                                            Some(AuthMethod::Agent) => tr("Agente SSH"),
+                                            _ => tr("La publicada"),
                                         })
                                         .show_ui(ui, |ui| {
-                                            ui.selectable_value(&mut entry.1, None, "La publicada");
+                                            ui.selectable_value(
+                                                &mut entry.1,
+                                                None,
+                                                tr("La publicada"),
+                                            );
                                             ui.selectable_value(
                                                 &mut entry.1,
                                                 Some(AuthMethod::Key),
-                                                "Clave privada",
+                                                tr("Clave privada"),
                                             );
                                             ui.selectable_value(
                                                 &mut entry.1,
                                                 Some(AuthMethod::Agent),
-                                                "Agente SSH",
+                                                tr("Agente SSH"),
                                             );
                                         });
                                     if entry.1 == Some(AuthMethod::Key) {
@@ -859,12 +884,12 @@ impl App {
                                     if ui
                                         .add_enabled(
                                             *entry != current,
-                                            egui::Button::new("Aplicar"),
+                                            egui::Button::new(tr("Aplicar")),
                                         )
-                                        .on_hover_text(
+                                        .on_hover_text(tr(
                                             "Tu usuario y tu clave para los equipos SSH de esta \
                                              carpeta. No cambia nada para los demás",
-                                        )
+                                        ))
                                         .clicked()
                                     {
                                         mine = Some(sub.id);
@@ -874,47 +899,47 @@ impl App {
                                     if ui
                                         .add_enabled(
                                             has_key && !busy,
-                                            egui::Button::new("🔄 Actualizar ahora"),
+                                            egui::Button::new(tr("🔄 Actualizar ahora")),
                                         )
                                         .clicked()
                                     {
                                         refresh = Some(sub.id);
                                     }
                                     if window.leaving == Some(sub.id) {
-                                        ui.label("¿Qué hago con sus equipos?");
-                                        if ui.button("Quitarlos").clicked() {
+                                        ui.label(tr("¿Qué hago con sus equipos?"));
+                                        if ui.button(tr("Quitarlos")).clicked() {
                                             leave = Some((sub.id, false));
                                         }
                                         if ui
-                                            .button("Dejarlos como carpeta mía")
-                                            .on_hover_text(
+                                            .button(tr("Dejarlos como carpeta mía"))
+                                            .on_hover_text(tr(
                                                 "Se quedan como están ahora, ya no se actualizan y \
                                                  puedes cambiarlos",
-                                            )
+                                            ))
                                             .clicked()
                                         {
                                             leave = Some((sub.id, true));
                                         }
-                                        if ui.button("Cancelar").clicked() {
+                                        if ui.button(tr("Cancelar")).clicked() {
                                             window.leaving = None;
                                         }
-                                    } else if ui.button("Dejar de seguir…").clicked() {
+                                    } else if ui.button(tr("Dejar de seguir…")).clicked() {
                                         window.leaving = Some(sub.id);
                                     }
                                 });
                             });
                         }
                         ui.horizontal(|ui| {
-                            ui.label("Seguir otra:");
+                            ui.label(tr("Seguir otra:"));
                             ui.add(
                                 egui::TextEdit::singleline(&mut window.path)
-                                    .hint_text("fichero publicado por un compañero")
+                                    .hint_text(tr("fichero publicado por un compañero"))
                                     .desired_width(250.0),
                             );
-                            if ui.button("Elegir…").clicked()
+                            if ui.button(tr("Elegir…")).clicked()
                                 && let Some(file) = rfd::FileDialog::new()
-                                    .set_title("Fichero de la carpeta compartida")
-                                    .add_filter("Carpeta de GodRemote", &["json"])
+                                    .set_title(tr("Fichero de la carpeta compartida"))
+                                    .add_filter(tr("Carpeta de GodRemote"), &["json"])
                                     .pick_file()
                             {
                                 window.path = file.display().to_string();
@@ -922,14 +947,14 @@ impl App {
                             ui.add(
                                 egui::TextEdit::singleline(&mut window.password)
                                     .password(true)
-                                    .hint_text("contraseña")
+                                    .hint_text(tr("contraseña"))
                                     .desired_width(120.0),
                             );
                             let ready = !window.path.trim().is_empty()
                                 && !window.password.is_empty()
                                 && !busy;
                             if ui
-                                .add_enabled(ready, egui::Button::new("Suscribirme"))
+                                .add_enabled(ready, egui::Button::new(tr("Suscribirme")))
                                 .clicked()
                             {
                                 subscribe = true;
@@ -937,16 +962,16 @@ impl App {
                         });
 
                         ui.separator();
-                        ui.strong("Carpetas mías que publico");
-                        ui.weak(
+                        ui.strong(tr("Carpetas mías que publico"));
+                        ui.weak(tr(
                             "Se publican los equipos de la carpeta y de sus subcarpetas con su \
                              dirección, usuario, ruta de la clave, saltos, notas y colores. No se \
                              publican contraseñas ni nada del baúl, ni las órdenes al conectar, \
                              los túneles, los reenvíos del agente o de X11, ni los equipos de \
                              puerto serie.",
-                        );
+                        ));
                         if shares.store.publications.is_empty() {
-                            ui.weak("(ninguna todavía)");
+                            ui.weak(tr("(ninguna todavía)"));
                         }
                         for publication in &mut shares.store.publications {
                             ui.group(|ui| {
@@ -960,14 +985,14 @@ impl App {
                                         Some(name) => ui.strong(format!("📁 {name}")),
                                         None => ui.colored_label(
                                             error_color(),
-                                            "(la carpeta ya no existe en este equipo)",
+                                            tr("(la carpeta ya no existe en este equipo)"),
                                         ),
                                     };
                                     if let Some(at) = publication.published_at {
-                                        ui.weak(format!(
-                                            "revisión {} · publicada el {}",
-                                            publication.revision,
-                                            clock(at)
+                                        ui.weak(trf!(
+                                            "revisión {revision} · publicada el {fecha}",
+                                            revision = publication.revision,
+                                            fecha = clock(at)
                                         ));
                                     }
                                 });
@@ -995,7 +1020,7 @@ impl App {
                                     if ui
                                         .checkbox(
                                             &mut publication.auto,
-                                            "Volver a publicarla sola cuando cambie",
+                                            tr("Volver a publicarla sola cuando cambie"),
                                         )
                                         .changed()
                                     {
@@ -1004,18 +1029,18 @@ impl App {
                                     if ui
                                         .add_enabled(
                                             has_key && !busy && name.is_some(),
-                                            egui::Button::new("Publicar ahora"),
+                                            egui::Button::new(tr("Publicar ahora")),
                                         )
                                         .clicked()
                                     {
                                         republish = Some(publication.id);
                                     }
                                     if ui
-                                        .button("Dejar de publicar")
-                                        .on_hover_text(
+                                        .button(tr("Dejar de publicar"))
+                                        .on_hover_text(tr(
                                             "El fichero ya publicado no se borra: quien lo siga \
                                              conserva lo último. Bórralo tú si quieres retirarlo",
-                                        )
+                                        ))
                                         .clicked()
                                     {
                                         stop = Some(publication.id);
@@ -1023,17 +1048,17 @@ impl App {
                                 });
                             });
                         }
-                        ui.label("Publicar otra:");
+                        ui.label(tr("Publicar otra:"));
                         egui::Grid::new("share_publish")
                             .num_columns(2)
                             .spacing([8.0, 6.0])
                             .show(ui, |ui| {
-                                ui.label("Carpeta");
+                                ui.label(tr("Carpeta"));
                                 let current = window
                                     .folder
                                     .and_then(|id| folders.iter().find(|(fid, _)| *fid == id))
                                     .map(|(_, path)| path.clone())
-                                    .unwrap_or_else(|| "(elige una)".to_string());
+                                    .unwrap_or_else(|| tr("(elige una)").to_string());
                                 egui::ComboBox::from_id_salt("share_folder")
                                     .selected_text(current)
                                     .width(320.0)
@@ -1047,16 +1072,16 @@ impl App {
                                         }
                                     });
                                 ui.end_row();
-                                ui.label("Fichero");
+                                ui.label(tr("Fichero"));
                                 ui.horizontal(|ui| {
                                     ui.add(
                                         egui::TextEdit::singleline(&mut window.target)
-                                            .hint_text(
+                                            .hint_text(tr(
                                                 "en una carpeta a la que lleguen tus compañeros",
-                                            )
+                                            ))
                                             .desired_width(400.0),
                                     );
-                                    if ui.button("Elegir…").clicked() {
+                                    if ui.button(tr("Elegir…")).clicked() {
                                         let name = window
                                             .folder
                                             .and_then(|id| {
@@ -1070,7 +1095,7 @@ impl App {
                                             })
                                             .unwrap_or_else(|| "carpeta".to_string());
                                         if let Some(file) = rfd::FileDialog::new()
-                                            .set_title("Dónde publicar la carpeta")
+                                            .set_title(tr("Dónde publicar la carpeta"))
                                             .set_file_name(format!("{name}{FILE_SUFFIX}"))
                                             .save_file()
                                         {
@@ -1079,36 +1104,39 @@ impl App {
                                     }
                                 });
                                 ui.end_row();
-                                ui.label("Contraseña");
+                                ui.label(tr("Contraseña"));
                                 ui.horizontal(|ui| {
                                     ui.add(
                                         egui::TextEdit::singleline(&mut window.new_password)
                                             .password(true)
-                                            .hint_text("la que darás a tus compañeros")
+                                            .hint_text(tr("la que darás a tus compañeros"))
                                             .desired_width(200.0),
                                     );
                                     ui.add(
                                         egui::TextEdit::singleline(&mut window.repeat)
                                             .password(true)
-                                            .hint_text("repítela")
+                                            .hint_text(tr("repítela"))
                                             .desired_width(140.0),
                                     );
                                 });
                                 ui.end_row();
                             });
                         ui.horizontal(|ui| {
-                            ui.checkbox(&mut window.auto, "Volver a publicarla sola cuando cambie");
+                            ui.checkbox(
+                                &mut window.auto,
+                                tr("Volver a publicarla sola cuando cambie"),
+                            );
                             let ready = window.folder.is_some()
                                 && !window.target.trim().is_empty()
                                 && !window.new_password.is_empty()
                                 && window.new_password == window.repeat
                                 && !busy;
                             if ui
-                                .add_enabled(ready, egui::Button::new("Publicar"))
-                                .on_disabled_hover_text(
+                                .add_enabled(ready, egui::Button::new(tr("Publicar")))
+                                .on_disabled_hover_text(tr(
                                     "Elige la carpeta y el fichero, y escribe la contraseña dos \
                                      veces",
-                                )
+                                ))
                                 .clicked()
                             {
                                 publish = true;
@@ -1120,12 +1148,12 @@ impl App {
                             ui.add(egui::Label::new(RichText::new(message).color(color)).wrap());
                         }
                         ui.separator();
-                        ui.weak(
+                        ui.weak(tr(
                             "Las contraseñas de las carpetas se guardan en el baúl; con el baúl \
                              cerrado se piden y solo duran hasta cerrar GodRemote. Quien tenga la \
                              contraseña y pueda escribir en la ruta puede sustituir lo publicado: \
                              compártela solo con quien deba publicar o leer.",
-                        );
+                        ));
                     });
             });
 
@@ -1141,11 +1169,11 @@ impl App {
             let path = window.path.trim().to_string();
             let keys = keyring(&std::mem::take(&mut window.password));
             let file = crate::paths::expand_tilde(&path);
-            window.message = Some(("Leyendo la carpeta…".into(), false));
+            window.message = Some((tr("Leyendo la carpeta…").into(), false));
             self.share_spawn(move || {
                 let result = match keys.lock() {
                     Ok(mut ring) => share::fetch(&file, &mut ring),
-                    Err(_) => Err(ShareError::Io("llavero no disponible".into())),
+                    Err(_) => Err(ShareError::Io(tr("llavero no disponible").into())),
                 };
                 Done::Subscribed(path, keys, Box::new(result))
             });
@@ -1188,7 +1216,7 @@ impl App {
             && let Some((username, auth, key_path)) = window.mine.get(&id).cloned()
         {
             match self.sync_blocked_by() {
-                Some(what) => window.message = Some((format!("Cierra antes {what}"), true)),
+                Some(what) => window.message = Some((trf!("Cierra antes {what}", what), true)),
                 None => {
                     if let Some(sub) = self
                         .shares
@@ -1236,9 +1264,9 @@ fn missing_password_ui(
         ui.colored_label(
             warn_color(),
             if vault_open {
-                "Falta su contraseña:"
+                tr("Falta su contraseña:")
             } else {
-                "Falta su contraseña (abre el baúl, donde se guarda, o escríbela):"
+                tr("Falta su contraseña (abre el baúl, donde se guarda, o escríbela):")
             },
         );
         let text = window.missing.entry(id).or_default();
@@ -1248,7 +1276,7 @@ fn missing_password_ui(
                 .desired_width(160.0),
         );
         if ui
-            .add_enabled(!text.is_empty(), egui::Button::new("Usar"))
+            .add_enabled(!text.is_empty(), egui::Button::new(tr("Usar")))
             .clicked()
         {
             passwords.push((id, std::mem::take(text)));
