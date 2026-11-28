@@ -1,6 +1,7 @@
 //! Interfaz gráfica: árbol de equipos, pestañas y diálogos.
 
 pub mod backdrop_view;
+pub mod dashboard_view;
 pub mod desktop_view;
 pub mod editor;
 pub mod fleet_view;
@@ -227,6 +228,8 @@ enum TreeAction {
     RenameFolder(Uuid),
     /// Ejecutar una orden en los equipos de una carpeta.
     RunOnFolder(Uuid),
+    /// Abrir el panel de estado de los equipos de una carpeta.
+    Dashboard(Uuid),
     Move(Uuid, Option<Uuid>),
 }
 
@@ -300,6 +303,8 @@ pub struct App {
     palette: Option<Palette>,
     /// Ventana para ejecutar una orden en varios equipos.
     fleet_window: Option<FleetWindow>,
+    /// Panel de estado de los equipos de una carpeta.
+    dashboard_window: Option<dashboard_view::DashboardWindow>,
     /// Visor de lo guardado en el baúl.
     vault_window: Option<vault_view::VaultWindow>,
     /// Última vez que el usuario tocó el teclado o el ratón.
@@ -515,6 +520,7 @@ impl App {
             pending_autostart: true,
             palette: None,
             fleet_window: None,
+            dashboard_window: None,
             vault_window: None,
             last_activity: Instant::now(),
             applied_proxy: None,
@@ -1279,6 +1285,7 @@ impl App {
         self.tunnel_runs.clear();
         self.tunnel_store = TunnelStore::load(&crate::paths::tunnels_file());
         self.tunnels_window = None;
+        self.dashboard_window = None;
         self.vault = None;
         self.selected = None;
         self.editor = None;
@@ -1381,6 +1388,7 @@ impl App {
                 TreeAction::RunOnFolder(id) => {
                     self.fleet_window = Some(FleetWindow::new(Some(id)));
                 }
+                TreeAction::Dashboard(id) => self.open_dashboard(Some(id)),
                 TreeAction::Move(id, parent) => {
                     if self.tree.move_node(id, parent) {
                         self.save_tree();
@@ -2229,6 +2237,11 @@ impl App {
             "",
             Command::RunOnFolder,
         );
+        command(
+            "Panel de estado de los equipos de una carpeta",
+            "CPU, memoria, disco y alertas",
+            Command::Dashboard,
+        );
         command("Túneles", "gestor de túneles", Command::Tunnels);
         command("Snippets y atajos", "", Command::Snippets);
         command("Claves SSH", "", Command::Keys);
@@ -2375,6 +2388,7 @@ impl App {
             Command::RunOnFolder => {
                 self.fleet_window = Some(FleetWindow::new(self.target_folder()));
             }
+            Command::Dashboard => self.open_dashboard(self.target_folder()),
             Command::VaultContents => {
                 if self.vault.is_some() {
                     self.vault_window = Some(Default::default());
@@ -4163,6 +4177,17 @@ fn tree_ui(
                         actions.push(TreeAction::RunOnFolder(f.id));
                         ui.close();
                     }
+                    if ui
+                        .button("📊 Panel de estado")
+                        .on_hover_text(
+                            "Vigila a la vez todos sus equipos SSH: conexión, CPU, memoria, \
+                             disco y alertas",
+                        )
+                        .clicked()
+                    {
+                        actions.push(TreeAction::Dashboard(f.id));
+                        ui.close();
+                    }
                     move_menu(ui, f.id, folders, actions);
                     ui.separator();
                     if ui.button("🗑 Eliminar…").clicked() {
@@ -4509,6 +4534,7 @@ impl eframe::App for App {
         self.tunnels_window_ui(&ctx);
         self.vault_guard(&ctx);
         self.fleet_window_ui(&ctx);
+        self.dashboard_ui(&ctx);
         self.palette_ui(&ctx);
         self.close_confirm_ui(&ctx);
         self.quit_guard(&ctx);

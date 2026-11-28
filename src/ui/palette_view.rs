@@ -26,6 +26,7 @@ pub enum Command {
     XServer,
     RunOnFolder,
     VaultContents,
+    Dashboard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

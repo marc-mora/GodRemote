@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod backdrop;
 pub mod backup;
+pub mod dashboard;
 pub mod desktop;
 pub mod fleet;
 pub mod fonts;

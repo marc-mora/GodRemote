@@ -6,6 +6,7 @@
 //! segundos. Los porcentajes y velocidades se calculan aquí, comparando cada
 //! muestra con la anterior. No toca la shell del usuario.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -232,49 +233,88 @@ impl ServerBar {
     }
 }
 
+/// Qué se pregunta al servidor en cada muestra.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probe<'a> {
+    /// Todo lo que puede mostrar la barra, con el espacio de estas rutas.
+    Full(&'a [String]),
+    /// Lo justo para vigilar muchos equipos a la vez (el panel de estado):
+    /// tiempo encendido, carga, CPU, memoria y el espacio de todos los
+    /// sistemas de ficheros montados, con su tipo para poder descartar los
+    /// que no son discos. Casi todo sale de `/proc` sin lanzar programas.
+    Light,
+}
+
 /// Orden que se deja ejecutándose en el servidor. Va en una sola línea y sin
 /// comillas simples ni barras invertidas para que la entienda cualquier shell
 /// de entrada (bash, zsh, fish, csh…), que solo tiene que lanzar `sh`.
 pub fn command(interval: u32, disks: &[String]) -> String {
-    let disks: Vec<&str> = disks
-        .iter()
-        .map(String::as_str)
-        .filter(|d| valid_disk(d))
-        .collect();
-    let disks = if disks.is_empty() {
-        "/".to_string()
-    } else {
-        disks.join(" ")
-    };
+    probe_command(interval, Probe::Full(disks))
+}
+
+/// Como [`command`], eligiendo qué se pregunta.
+pub fn probe_command(interval: u32, probe: Probe) -> String {
     let interval = interval.clamp(1, 3600);
-    let script = [
-        "export LC_ALL=C".to_string(),
+    let mut script: Vec<String> = vec![
+        "export LC_ALL=C".into(),
         "s=1".into(),
         "while :".into(),
         "do echo @@begin".into(),
-        r#"echo "host=$(hostname 2>/dev/null || uname -n)""#.into(),
-        r#"echo "kernel=$(uname -sr)""#.into(),
-        r#"echo "arch=$(uname -m)""#.into(),
-        r#"if [ -r /etc/os-release ]; then ( . /etc/os-release; echo "os=$PRETTY_NAME" ); fi"#
-            .into(),
-        r#"echo "time=$(date "+%Y-%m-%d %H:%M:%S %Z")""#.into(),
-        r#"if [ -r /proc/uptime ]; then read up rest < /proc/uptime; echo "uptime=$up"; fi"#.into(),
+    ];
+    if matches!(probe, Probe::Full(_)) {
+        script.extend([
+            r#"echo "host=$(hostname 2>/dev/null || uname -n)""#.to_string(),
+            r#"echo "kernel=$(uname -sr)""#.into(),
+            r#"echo "arch=$(uname -m)""#.into(),
+            r#"if [ -r /etc/os-release ]; then ( . /etc/os-release; echo "os=$PRETTY_NAME" ); fi"#
+                .into(),
+            r#"echo "time=$(date "+%Y-%m-%d %H:%M:%S %Z")""#.into(),
+        ]);
+    }
+    script.extend([
+        r#"if [ -r /proc/uptime ]; then read up rest < /proc/uptime; echo "uptime=$up"; fi"#
+            .to_string(),
         r#"if [ -r /proc/loadavg ]; then read l < /proc/loadavg; echo "load=$l"; fi"#.into(),
         r#"if [ -r /proc/stat ]; then read l < /proc/stat; echo "cpu=$l"; fi"#.into(),
         r#"echo "ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null)""#.into(),
         r#"if [ -r /proc/meminfo ]; then while read k v u; do case $k in MemTotal:|MemAvailable:|MemFree:|Buffers:|Cached:|SwapTotal:|SwapFree:) echo "mem=$k$v";; esac; done < /proc/meminfo; fi"#.into(),
-        r#"if [ -r /proc/net/dev ]; then while read l; do echo "net=$l"; done < /proc/net/dev; fi"#
-            .into(),
-        format!(r#"df -Pk {disks} 2>/dev/null | while read l; do echo "disk=$l"; done"#),
-        r#"echo "users=$(who 2>/dev/null | wc -l)""#.into(),
-        r#"echo "procs=$(ls -d /proc/[0-9]* 2>/dev/null | wc -l)""#.into(),
-        r#"echo "ip=$(hostname -I 2>/dev/null)""#.into(),
-        "echo @@end".into(),
+    ]);
+    match probe {
+        Probe::Full(disks) => {
+            let disks: Vec<&str> = disks
+                .iter()
+                .map(String::as_str)
+                .filter(|d| valid_disk(d))
+                .collect();
+            let disks = if disks.is_empty() {
+                "/".to_string()
+            } else {
+                disks.join(" ")
+            };
+            script.extend([
+                r#"if [ -r /proc/net/dev ]; then while read l; do echo "net=$l"; done < /proc/net/dev; fi"#
+                    .to_string(),
+                format!(r#"df -Pk {disks} 2>/dev/null | while read l; do echo "disk=$l"; done"#),
+                r#"echo "users=$(who 2>/dev/null | wc -l)""#.into(),
+                r#"echo "procs=$(ls -d /proc/[0-9]* 2>/dev/null | wc -l)""#.into(),
+                r#"echo "ip=$(hostname -I 2>/dev/null)""#.into(),
+            ]);
+        }
+        Probe::Light => script.extend([
+            // Tipo y opciones de cada sistema de ficheros, y su punto de
+            // montaje al final (puede llevar espacios).
+            r#"if [ -r /proc/mounts ]; then while read -r d m t o r; do echo "mount=$t $o $m"; done < /proc/mounts; fi"#
+                .to_string(),
+            r#"df -Pk 2>/dev/null | while read l; do echo "disk=$l"; done"#.into(),
+        ]),
+    }
+    script.extend([
+        "echo @@end".to_string(),
         "sleep $s".into(),
         format!("s={interval}"),
         "done".into(),
-    ]
-    .join("; ");
+    ]);
+    let script = script.join("; ");
     debug_assert!(!script.contains('\'') && !script.contains('\\'));
     format!("exec sh -c '{script}'")
 }
@@ -287,6 +327,11 @@ pub struct Disk {
     pub total: u64,
     pub used: u64,
     pub available: u64,
+    /// Tipo de sistema de ficheros (`ext4`, `tmpfs`…); vacío si el servidor
+    /// no lo dijo (solo lo pregunta la consulta ligera).
+    pub kind: String,
+    /// Montado en solo lectura.
+    pub read_only: bool,
 }
 
 impl Disk {
@@ -342,6 +387,36 @@ struct Raw {
     cached: Option<u64>,
     swap_total: Option<u64>,
     swap_free: Option<u64>,
+    /// Punto de montaje → (tipo, solo lectura), si el servidor lo dijo.
+    mounts: HashMap<String, (String, bool)>,
+}
+
+/// Sistemas de ficheros que se anotan de cada muestra, como mucho: un
+/// servidor no debe poder llenar la memoria con una lista interminable.
+const MAX_MOUNTS: usize = 4096;
+
+/// `/proc/mounts` escribe los espacios y otros caracteres raros de las
+/// rutas como `\040` (barra invertida y tres cifras en octal).
+fn unescape_mount(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let octal = bytes.get(i + 1..i + 4).filter(|d| {
+            bytes[i] == b'\\' && d[0] <= b'3' && d.iter().all(|c| (b'0'..=b'7').contains(c))
+        });
+        match octal {
+            Some(d) => {
+                out.push((d[0] - b'0') * 64 + (d[1] - b'0') * 8 + (d[2] - b'0'));
+                i += 4;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Interfaces que no se suman al tráfico: la de bucle local y las virtuales,
@@ -427,6 +502,7 @@ impl Raw {
                 // Filesystem 1024-blocks Used Available Capacity Mounted on
                 let f: Vec<&str> = value.split_whitespace().collect();
                 if f.len() >= 6
+                    && s.disks.len() < MAX_MOUNTS
                     && let (Ok(total), Ok(used), Ok(available)) =
                         (f[1].parse(), f[2].parse(), f[3].parse())
                 {
@@ -438,8 +514,23 @@ impl Raw {
                             total,
                             used,
                             available,
+                            kind: String::new(),
+                            read_only: false,
                         });
                     }
+                }
+            }
+            "mount" => {
+                // «tipo opciones punto de montaje»
+                let mut parts = value.splitn(3, ' ');
+                if let (Some(kind), Some(options), Some(mount)) =
+                    (parts.next(), parts.next(), parts.next())
+                    && self.mounts.len() < MAX_MOUNTS
+                {
+                    let read_only = options.split(',').any(|o| o == "ro");
+                    // Si hay varios en el mismo sitio, el que se ve es el último.
+                    self.mounts
+                        .insert(unescape_mount(mount), (kind.to_string(), read_only));
                 }
             }
             "users" => s.users = value.parse().ok(),
@@ -458,6 +549,12 @@ impl Raw {
         }
         if let Some(total) = self.swap_total.filter(|t| *t > 0) {
             self.stats.swap = Some((total.saturating_sub(self.swap_free.unwrap_or(0)), total));
+        }
+        for disk in &mut self.stats.disks {
+            if let Some((kind, read_only)) = self.mounts.get(&disk.mount) {
+                disk.kind = kind.clone();
+                disk.read_only = *read_only;
+            }
         }
         if let Some((prev, at)) = previous {
             if let (Some((total, idle)), Some((ptotal, pidle))) = (self.cpu, prev.cpu) {
@@ -566,6 +663,73 @@ impl Monitor {
 /// protocolo esperado no debe llenar la memoria.
 const MAX_PENDING: usize = 256 * 1024;
 
+/// La consulta ejecutándose en un canal propio de una conexión SSH: entrega
+/// las muestras una a una, a quien las vaya pidiendo.
+pub struct Sampler {
+    channel: russh::Channel<russh::client::Msg>,
+    collector: Collector,
+    pending: Vec<u8>,
+    samples: u64,
+}
+
+impl Sampler {
+    /// Abre el canal y lanza en él la orden (la de [`command`] o la de
+    /// [`probe_command`]).
+    pub async fn start(handle: SshHandle, command: String) -> Result<Self> {
+        let channel = handle
+            .channel_open_session()
+            .await
+            .context("El servidor no dejó abrir otro canal")?;
+        // El canal no necesita la referencia a la conexión: si el terminal se
+        // cierra, esta consulta no debe mantenerla viva.
+        drop(handle);
+        channel
+            .exec(true, command)
+            .await
+            .context("No se pudo lanzar la consulta")?;
+        Ok(Self {
+            channel,
+            collector: Collector::default(),
+            pending: vec![],
+            samples: 0,
+        })
+    }
+
+    /// Espera a la siguiente muestra. Da error si el servidor corta o no
+    /// habla el protocolo esperado. Se puede abandonar la espera y volver a
+    /// llamar: no se pierde nada de lo ya recibido.
+    pub async fn next(&mut self) -> Result<Stats> {
+        loop {
+            while let Some(end) = self.pending.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = self.pending.drain(..=end).collect();
+                if let Some(stats) = self.collector.feed(&String::from_utf8_lossy(&line)) {
+                    self.samples += 1;
+                    return Ok(stats);
+                }
+            }
+            if self.pending.len() > MAX_PENDING {
+                let _ = self.channel.close().await;
+                bail!("El servidor respondió algo inesperado");
+            }
+            match self.channel.wait().await {
+                Some(ChannelMsg::Data { data }) => self.pending.extend_from_slice(&data),
+                Some(ChannelMsg::Failure) => bail!("El servidor no permite ejecutar órdenes"),
+                Some(ChannelMsg::Close) | None => break,
+                _ => {}
+            }
+        }
+        if self.samples == 0 {
+            bail!("El servidor no devolvió datos (hace falta una shell POSIX)");
+        }
+        bail!("La consulta se interrumpió")
+    }
+
+    /// Cierra el canal: la orden deja de ejecutarse en el servidor.
+    pub async fn close(self) {
+        let _ = self.channel.close().await;
+    }
+}
+
 async fn run(
     handle: SshHandle,
     command: String,
@@ -573,55 +737,22 @@ async fn run(
     waker: &Waker,
     mut stop: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
-    let mut channel = handle
-        .channel_open_session()
-        .await
-        .context("El servidor no dejó abrir otro canal")?;
-    // El canal no necesita la referencia a la conexión: si el terminal se
-    // cierra, esta consulta no debe mantenerla viva.
-    drop(handle);
-    channel
-        .exec(true, command)
-        .await
-        .context("No se pudo lanzar la consulta")?;
-    let mut collector = Collector::default();
-    let mut pending: Vec<u8> = vec![];
-    let mut samples = 0u64;
+    let mut sampler = Sampler::start(handle, command).await?;
     loop {
         tokio::select! {
             _ = &mut stop => {
-                let _ = channel.close().await;
+                sampler.close().await;
                 return Ok(());
             }
-            msg = channel.wait() => match msg {
-                Some(ChannelMsg::Data { data }) => {
-                    pending.extend_from_slice(&data);
-                    while let Some(end) = pending.iter().position(|b| *b == b'\n') {
-                        let line: Vec<u8> = pending.drain(..=end).collect();
-                        if let Some(stats) = collector.feed(&String::from_utf8_lossy(&line)) {
-                            samples += 1;
-                            if tx.send(Event::Stats(Box::new(stats))).is_err() {
-                                let _ = channel.close().await;
-                                return Ok(());
-                            }
-                            waker();
-                        }
-                    }
-                    if pending.len() > MAX_PENDING {
-                        let _ = channel.close().await;
-                        bail!("El servidor respondió algo inesperado");
-                    }
+            stats = sampler.next() => {
+                if tx.send(Event::Stats(Box::new(stats?))).is_err() {
+                    sampler.close().await;
+                    return Ok(());
                 }
-                Some(ChannelMsg::Failure) => bail!("El servidor no permite ejecutar órdenes"),
-                Some(ChannelMsg::Close) | None => break,
-                _ => {}
-            },
+                waker();
+            }
         }
     }
-    if samples == 0 {
-        bail!("El servidor no devolvió datos (hace falta una shell POSIX)");
-    }
-    bail!("La consulta se interrumpió")
 }
 
 /// Empieza a consultar el estado del servidor por la conexión indicada.
@@ -857,6 +988,88 @@ ip=10.0.0.5 172.17.0.1
         if std::path::Path::new("/proc/meminfo").exists() {
             assert!(got[0].memory.is_some(), "{text}");
             assert!(got[0].disks.iter().any(|d| d.mount == "/"), "{text}");
+        }
+    }
+
+    #[test]
+    fn light_probe_asks_less_and_tells_filesystem_types() {
+        let cmd = probe_command(9, Probe::Light);
+        let body = &cmd["exec sh -c '".len()..cmd.len() - 1];
+        assert!(!body.contains(['\'', '\\', '\n']), "{body}");
+        // Sin los programas que solo interesan a la barra.
+        for word in ["hostname", "uname", "who", "ls -d", "os-release", "date"] {
+            assert!(!body.contains(word), "{word}: {body}");
+        }
+        assert!(body.contains("df -Pk 2>/dev/null"), "{body}");
+        assert!(body.contains("sleep $s; s=9; done"));
+        // La de la barra no cambia: es la misma de siempre.
+        assert_eq!(
+            probe_command(7, Probe::Full(&["/".into()])),
+            command(7, &["/".into()])
+        );
+        assert!(!command(7, &[]).contains("/proc/mounts"));
+
+        // Los tipos llegan aparte y se casan con los discos por su punto de
+        // montaje, lleve espacios escritos tal cual o al modo de /proc.
+        let text = "@@begin\n\
+                    mount=ext4 rw,relatime /\n\
+                    mount=squashfs ro,nodev,relatime /snap/core/1\n\
+                    mount=xfs rw /mnt/datos\\040copia\n\
+                    mount=tmpfs rw /mnt/otro sitio\n\
+                    mount=ext4 rw,errors=remount-ro /srv\n\
+                    disk=Filesystem 1024-blocks Used Available Capacity Mounted on\n\
+                    disk=/dev/sda1 100 60 40 60% /\n\
+                    disk=/dev/loop0 50 50 0 100% /snap/core/1\n\
+                    disk=/dev/sdb1 100 10 90 10% /mnt/datos copia\n\
+                    disk=tmpfs 100 0 100 0% /mnt/otro sitio\n\
+                    disk=/dev/sdc1 100 10 90 10% /srv\n\
+                    disk=/dev/sdd1 100 10 90 10% /sin/tipo\n\
+                    @@end\n";
+        let mut c = Collector::default();
+        let got = feed(&mut c, text, Instant::now());
+        let kinds: Vec<(&str, &str, bool)> = got[0]
+            .disks
+            .iter()
+            .map(|d| (d.mount.as_str(), d.kind.as_str(), d.read_only))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("/", "ext4", false),
+                ("/snap/core/1", "squashfs", true),
+                ("/mnt/datos copia", "xfs", false),
+                ("/mnt/otro sitio", "tmpfs", false),
+                ("/srv", "ext4", false),
+                ("/sin/tipo", "", false),
+            ]
+        );
+        assert_eq!(unescape_mount("a\\134b\\011c\\04"), "a\\b\tc\\04");
+    }
+
+    #[test]
+    fn the_light_probe_really_runs_in_a_posix_shell() {
+        if !std::path::Path::new("/bin/sh").exists() {
+            return;
+        }
+        let cmd = probe_command(1, Probe::Light).replace("while :;", "for once in 1;");
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mut c = Collector::default();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let got: Vec<Stats> = text.lines().filter_map(|l| c.feed(l)).collect();
+        assert_eq!(got.len(), 1, "{text}");
+        if std::path::Path::new("/proc/mounts").exists() {
+            assert!(got[0].memory.is_some() && got[0].load.is_some(), "{text}");
+            let root = got[0].disks.iter().find(|d| d.mount == "/");
+            assert!(root.is_some_and(|d| !d.kind.is_empty()), "{text}");
         }
     }
 

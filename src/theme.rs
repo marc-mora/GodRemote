@@ -1238,6 +1238,9 @@ pub struct Settings {
     /// conectadas.
     #[serde(rename = "confirmar_cierre")]
     pub confirm_close: bool,
+    /// Panel de estado: refresco, tope de conexiones y umbrales de alerta.
+    #[serde(rename = "panel_estado")]
+    pub dashboard: crate::dashboard::DashboardSettings,
 }
 
 /// Dónde se muestran las aplicaciones gráficas que llegan por X11.
@@ -1288,6 +1291,7 @@ impl Default for Settings {
             app_shortcuts: true,
             confirm_paste: true,
             confirm_close: true,
+            dashboard: Default::default(),
         }
     }
 }
@@ -1299,6 +1303,7 @@ impl Settings {
             .and_then(|data| Self::from_json(&data))
             .unwrap_or_default();
         settings.server_bar.sanitize();
+        settings.dashboard.sanitize();
         settings.highlight.sanitize();
         settings.reconnect_attempts = settings.reconnect_attempts.clamp(1, 50);
         settings.vault_autolock = settings.vault_autolock.min(24 * 60);
@@ -1582,6 +1587,21 @@ mod tests {
             app_shortcuts: false,
             confirm_paste: false,
             confirm_close: false,
+            dashboard: crate::dashboard::DashboardSettings {
+                interval: 30,
+                max_connections: 8,
+                trend: crate::dashboard::TrendMetric::Load,
+                trend_minutes: 60,
+                notify: false,
+                thresholds: crate::dashboard::Thresholds {
+                    cpu: 75.0,
+                    load: 0.0,
+                    sustained: 5,
+                    memory: 80.0,
+                    disk: 95.0,
+                    unreachable: false,
+                },
+            },
             x_server: XServerSettings {
                 embedded: !cfg!(windows),
                 listen_local: true,
