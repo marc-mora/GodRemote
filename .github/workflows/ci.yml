@@ -146,8 +146,8 @@ jobs:
       - name: Compila la edición SSH reforzada
         run: cargo check --locked --all-targets --manifest-path reforzado/Cargo.toml --target-dir target
 
-  # Ejecutables nativos de las dos ediciones. Solo al etiquetar una versión
-  # o al pedirlo a mano.
+  # Ejecutables nativos de las dos ediciones y sus paquetes. Solo al etiquetar
+  # una versión o al pedirlo a mano.
   ejecutables:
     name: Ejecutables (${{ matrix.nombre }})
     # Con una etiqueta de versión, al pedirlo a mano, o en cualquier subida
@@ -163,14 +163,13 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            nombre: windows-x64
-            ext: .exe
-          - os: ubuntu-latest
-            nombre: linux-x64
-            ext: ""
+            nombre: windows
+          # Una versión antigua de Ubuntu a propósito: el ejecutable sirve en
+          # cualquier distribución con una glibc igual o más nueva.
+          - os: ubuntu-22.04
+            nombre: linux
           - os: macos-latest
-            nombre: macos-arm64
-            ext: ""
+            nombre: macos
     steps:
       - uses: actions/checkout@v4
       - name: Rust
@@ -178,43 +177,78 @@ jobs:
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal
           rustup default "$RUST_VERSION"
+          # En macOS se compila para los dos procesadores (binario universal).
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          fi
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            target
-          key: ejecutables-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'reforzado/Cargo.lock') }}
-          restore-keys: ejecutables-${{ runner.os }}-${{ env.RUST_VERSION }}-
-      - name: Edición completa
-        run: cargo build --release --locked
-      - name: Edición SSH reforzada
-        run: cargo build --release --locked --manifest-path reforzado/Cargo.toml --target-dir target
-      - name: Empaqueta
+          key: ejecutables-${{ matrix.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'reforzado/Cargo.lock') }}
+          restore-keys: ejecutables-${{ matrix.os }}-${{ env.RUST_VERSION }}-
+      - name: Librerías para probar el arranque (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb libgl1 libegl1 libgl1-mesa-dri \
+            libxkbcommon-x11-0 libxcursor1 libxi6 libxrandr2
+      - name: Compila las dos ediciones
         shell: bash
         run: |
-          mkdir -p paquetes/completa paquetes/reforzada
-          cp "target/release/godremote${{ matrix.ext }}" "paquetes/completa/GodRemote${{ matrix.ext }}"
-          cp "target/release/godremote-reforzado${{ matrix.ext }}" "paquetes/reforzada/GodRemote-ssh-reforzado${{ matrix.ext }}"
-          cp README.md paquetes/completa/LEEME.md
-          cp README.md paquetes/reforzada/LEEME.md
-          # Carpeta limpia: solo lo que se acaba de compilar.
-          rm -rf dist
-          mkdir -p dist
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            (cd paquetes/completa && 7z a -tzip "../../dist/GodRemote-${{ matrix.nombre }}.zip" .)
-            (cd paquetes/reforzada && 7z a -tzip "../../dist/GodRemote-ssh-reforzado-${{ matrix.nombre }}.zip" .)
+          mkdir -p binarios
+          compila() {  # compila [--target T]: las dos ediciones
+            cargo build --release --locked "$@"
+            cargo build --release --locked --manifest-path reforzado/Cargo.toml --target-dir target "$@"
+          }
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            for destino in aarch64-apple-darwin x86_64-apple-darwin; do
+              compila --target "$destino"
+            done
+            for nombre in godremote godremote-reforzado; do
+              lipo -create -output "binarios/$nombre" \
+                "target/aarch64-apple-darwin/release/$nombre" "target/x86_64-apple-darwin/release/$nombre"
+              lipo -info "binarios/$nombre"
+            done
           else
-            tar -C paquetes/completa -czf "dist/GodRemote-${{ matrix.nombre }}.tar.gz" .
-            tar -C paquetes/reforzada -czf "dist/GodRemote-ssh-reforzado-${{ matrix.nombre }}.tar.gz" .
+            compila
+            ext="${{ runner.os == 'Windows' && '.exe' || '' }}"
+            cp "target/release/godremote$ext" "target/release/godremote-reforzado$ext" binarios/
           fi
-          ls -l dist
+          ls -l binarios
+      # Los ejecutables que se van a publicar, de verdad: se abren, pintan su
+      # ventana, guardan una captura y se cierran (src/ui/probe.rs).
+      - name: Arranque de los ejecutables
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          mkdir -p capturas
+          ext="${{ runner.os == 'Windows' && '.exe' || '' }}"
+          lanzador=""
+          if [ "${{ runner.os }}" = "Linux" ]; then lanzador="xvfb-run -a"; fi
+          for nombre in godremote godremote-reforzado; do
+            mkdir -p "$RUNNER_TEMP/perfil-$nombre"
+            GODREMOTE_HOME="$RUNNER_TEMP/perfil-$nombre" \
+              GODREMOTE_CAPTURA="$PWD/capturas/$nombre-${{ matrix.nombre }}.png" \
+              $lanzador "binarios/$nombre$ext"
+          done
+          ls -l capturas
+      - name: Empaqueta
+        shell: bash
+        run: bash empaquetado/empaquetar.sh "${{ matrix.nombre }}" binarios dist
       - uses: actions/upload-artifact@v4
         with:
           name: GodRemote-${{ matrix.nombre }}
           path: dist/*
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arranque-ejecutables-${{ matrix.nombre }}
+          path: capturas/*
+          if-no-files-found: ignore
 
   # Publica la versión con sus ejecutables. Si la Release ya existe (creada a
   # mano en GitHub junto con la etiqueta) se le añaden; si no, se crea. Las
@@ -232,7 +266,13 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: publicar
+          pattern: GodRemote-*
           merge-multiple: true
+      - name: Sumas SHA-256
+        run: |
+          cd publicar
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
       - name: Publica los ejecutables
         env:
           GH_TOKEN: ${{ github.token }}

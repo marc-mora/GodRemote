@@ -58,12 +58,17 @@ fn run(backend: Backend) -> eframe::Result {
         .build()
         .expect("no se pudo crear el runtime de red");
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("GodRemote")
+        .with_app_id("godremote")
+        .with_inner_size([1280.0, 800.0])
+        .with_min_inner_size([760.0, 480.0]);
+    // Icono de la ventana (en macOS manda el del paquete de la aplicación).
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icono-256.png")) {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("GodRemote")
-            .with_app_id("godremote")
-            .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([760.0, 480.0]),
+        viewport,
         renderer: match backend {
             #[cfg(windows)]
             Backend::DirectX => eframe::Renderer::Wgpu,

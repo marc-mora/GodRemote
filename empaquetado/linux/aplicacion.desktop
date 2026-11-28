@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=@NOMBRE@
+Comment=@RESUMEN@
+Exec=@ID@
+Icon=@ID@
+Terminal=false
+Categories=Network;RemoteAccess;System;TerminalEmulator;
+Keywords=ssh;sftp;rdp;vnc;terminal;remote;
+StartupWMClass=godremote

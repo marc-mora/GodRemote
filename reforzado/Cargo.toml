@@ -68,6 +68,10 @@ wgpu = { version = "30", default-features = false, features = ["dx12", "wgsl", "
 # Para leer del registro de Windows si el sistema está en modo oscuro.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
 
+[build-dependencies]
+# Icono y datos del ejecutable de Windows.
+winresource = "0.1"
+
 [dev-dependencies]
 tempfile = "3"
 
