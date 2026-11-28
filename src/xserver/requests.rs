@@ -14,6 +14,7 @@ use super::server::{
 };
 use super::shape::{SHAPE_FIRST_EVENT, SHAPE_OPCODE};
 use super::wm::{FRAME, TITLE_H};
+use super::xinput::{GE_OPCODE, XI_FIRST_ERROR, XI_FIRST_EVENT, XI_OPCODE};
 use super::xkb::{XKB_FIRST_ERROR, XKB_FIRST_EVENT, XKB_OPCODE};
 
 /// Código de operación de la extensión BIG-REQUESTS (el mismo que usa X.Org).
@@ -21,7 +22,7 @@ pub const BIG_REQUESTS_OPCODE: u8 = 133;
 /// Tamaño máximo de petición con BIG-REQUESTS, en unidades de 4 bytes.
 pub const MAX_BIG_REQUEST: u32 = 1024 * 1024;
 /// Capturas pasivas (de botón y de tecla) por ventana.
-const MAX_GRABS: usize = 1024;
+pub(super) const MAX_GRABS: usize = 1024;
 /// Longitud máxima del nombre de un átomo.
 const MAX_ATOM_NAME: usize = 1024;
 
@@ -34,8 +35,10 @@ pub(super) fn tracing() -> bool {
 }
 
 /// Con `GODREMOTE_X11_DISABLE=RENDER,SHAPE…` el servidor deja de anunciar
-/// esas extensiones: sirve para averiguar si un fallo de dibujo de una
-/// aplicación viene de una de ellas (y para salir del paso si es así).
+/// esas extensiones: sirve para averiguar si un fallo de una aplicación
+/// viene de una de ellas (y para salir del paso si es así). Los nombres son
+/// los del protocolo: `RENDER`, `SHAPE`, `RANDR`, `XKEYBOARD`,
+/// `XInputExtension`…
 fn disabled(name: &[u8]) -> bool {
     static OFF: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
     OFF.get_or_init(|| {
@@ -263,6 +266,7 @@ impl Server {
                 let modifiers = rd.u16()?;
                 self.win_mut(window)?.grabs.retain(|g| {
                     g.key
+                        || g.xi_mask.is_some()
                         || g.client != c
                         || !(data == 0 || g.detail == data)
                         || !(modifiers == S_ANY_MODIFIER || g.modifiers == modifiers)
@@ -270,11 +274,13 @@ impl Server {
                 Ok(())
             }
             30 => {
-                let (_cursor, _time, mask) = (rd.u32()?, rd.u32()?, rd.u16()?);
+                let (cursor, _time, mask) = (rd.u32()?, rd.u32()?, rd.u16()?);
+                let cursor = self.optional_cursor(cursor)?;
                 if let Some(g) = &mut self.grab
                     && g.client == c
                 {
                     g.mask = mask as u32;
+                    g.cursor = cursor;
                 }
                 Ok(())
             }
@@ -290,6 +296,7 @@ impl Server {
                         client: c,
                         window,
                         owner_events: data != 0,
+                        xi_mask: None,
                         by_key: None,
                     });
                     0
@@ -314,7 +321,9 @@ impl Server {
                     modifiers,
                     owner_events: data != 0,
                     mask: 0,
+                    xi_mask: None,
                     sync: false,
+                    cursor: None,
                 };
                 let w = self.win_mut(window)?;
                 w.grabs
@@ -330,6 +339,7 @@ impl Server {
                 let modifiers = rd.u16()?;
                 self.win_mut(window)?.grabs.retain(|g| {
                     !g.key
+                        || g.xi_mask.is_some()
                         || g.client != c
                         || !(data == 0 || g.detail == data)
                         || !(modifiers == S_ANY_MODIFIER || g.modifiers == modifiers)
@@ -545,7 +555,9 @@ impl Server {
                 self.send_reply(c, w);
                 Ok(())
             }
-            XKB_OPCODE if self.xkb_compat => self.dispatch_xkb(c, data, rd),
+            XKB_OPCODE if self.has_extension(XKB_OPCODE) => self.dispatch_xkb(c, data, rd),
+            XI_OPCODE if self.has_extension(XI_OPCODE) => self.dispatch_xinput(c, data, rd),
+            GE_OPCODE if self.has_extension(GE_OPCODE) => self.dispatch_ge(c, data),
             RENDER_OPCODE if self.has_extension(RENDER_OPCODE) => self.dispatch_render(c, data, rd),
             SHAPE_OPCODE if self.has_extension(SHAPE_OPCODE) => self.dispatch_shape(c, data, rd),
             RANDR_OPCODE if self.has_extension(RANDR_OPCODE) => self.dispatch_randr(c, data, rd),
@@ -562,11 +574,15 @@ impl Server {
             (b"RENDER", RENDER_OPCODE, 0, RENDER_FIRST_ERROR),
             (b"SHAPE", SHAPE_OPCODE, SHAPE_FIRST_EVENT, 0),
             (b"RANDR", RANDR_OPCODE, RANDR_FIRST_EVENT, RANDR_FIRST_ERROR),
+            (b"XKEYBOARD", XKB_OPCODE, XKB_FIRST_EVENT, XKB_FIRST_ERROR),
+            (
+                b"XInputExtension",
+                XI_OPCODE,
+                XI_FIRST_EVENT,
+                XI_FIRST_ERROR,
+            ),
+            (b"Generic Event Extension", GE_OPCODE, 0, 0),
         ];
-        // Solo si se pidió, para xdotool: véase `xkb.rs`.
-        if self.xkb_compat {
-            all.push((b"XKEYBOARD", XKB_OPCODE, XKB_FIRST_EVENT, XKB_FIRST_ERROR));
-        }
         all.retain(|e| !disabled(e.0));
         all
     }
@@ -709,7 +725,7 @@ impl Server {
                 11 => self.select_events(c, id, v)?,
                 12 => self.win_mut(id)?.do_not_propagate = v & M_ALL,
                 13 => self.win_mut(id)?.colormap = if v == 0 { DEFAULT_COLORMAP } else { v },
-                _ => self.win_mut(id)?.cursor = v,
+                _ => self.win_mut(id)?.cursor = self.optional_cursor(v)?,
             }
         }
         Ok(())
@@ -1203,7 +1219,10 @@ impl Server {
     fn grab_pointer(&mut self, c: ClientId, owner_events: u8, rd: &mut Reader) -> XResult {
         let window = rd.u32()?;
         let mask = rd.u16()? as u32;
+        let (_pointer_mode, _keyboard_mode) = (rd.u8()?, rd.u8()?);
+        let (_confine, cursor) = (rd.u32()?, rd.u32()?);
         self.win(window)?;
+        let cursor = self.optional_cursor(cursor)?;
         let status = if self.grab.as_ref().is_some_and(|g| g.client != c) {
             1 // AlreadyGrabbed
         } else if !self.viewable(window) {
@@ -1214,8 +1233,10 @@ impl Server {
                 window,
                 owner_events: owner_events != 0,
                 mask,
+                xi_mask: None,
                 by_button: false,
                 replay: None,
+                cursor,
             });
             0
         };
@@ -1228,10 +1249,11 @@ impl Server {
         let window = rd.u32()?;
         let mask = rd.u16()? as u32;
         let (pointer_mode, _keyboard_mode) = (rd.u8()?, rd.u8()?);
-        let (_confine, _cursor) = (rd.u32()?, rd.u32()?);
+        let (_confine, cursor) = (rd.u32()?, rd.u32()?);
         let button = rd.u8()?;
         rd.skip(1)?;
         let modifiers = rd.u16()?;
+        let cursor = self.optional_cursor(cursor)?;
         let w = self.win_mut(window)?;
         let same = |g: &PassiveGrab| !g.key && g.detail == button && g.modifiers == modifiers;
         if w.grabs.iter().any(|g| same(g) && g.client != c) {
@@ -1248,7 +1270,9 @@ impl Server {
             modifiers,
             owner_events: owner_events != 0,
             mask,
+            xi_mask: None,
             sync: pointer_mode == 0,
+            cursor,
         });
         Ok(())
     }

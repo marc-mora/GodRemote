@@ -8,14 +8,18 @@ use std::time::Instant;
 
 use tokio::sync::{Notify, mpsc};
 
+use super::cursor::CursorData;
 use super::draw::{Budget, Gc, Image, MAX_TOTAL_PIXELS, Rect};
 use super::font::Font;
 use super::keymap::Keymap;
 use super::proto::*;
 use super::render::{GlyphSet, Picture};
+use super::rootless::Rootless;
 use super::shape::{Region, region_contains};
-use super::wm::{Ewmh, WmDrag};
-use crate::desktop::DesktopEvent;
+use super::wm::{Ewmh, StripChip, WmDrag};
+use super::xinput::XiSelection;
+use super::xkb::XKB_EVENT_KINDS;
+use crate::desktop::{CursorShape, DesktopCursor, DesktopEvent};
 
 /// Identificador de cliente; el 0 es el propio servidor.
 pub type ClientId = u32;
@@ -228,6 +232,8 @@ pub struct Client {
     pub save_set: Vec<Xid>,
     /// Ya se le envió un aviso de movimiento y aún no ha preguntado.
     pub motion_hint_sent: bool,
+    /// XKB: detalles que seleccionó de cada tipo de evento (0 = ninguno).
+    pub xkb_details: [u32; XKB_EVENT_KINDS],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -259,7 +265,12 @@ pub struct PassiveGrab {
     pub modifiers: u16,
     pub owner_events: bool,
     pub mask: u32,
+    /// Captura de XInput2: eventos de XI2 que quiere (`None`: es del
+    /// protocolo básico y vale `mask`).
+    pub xi_mask: Option<u32>,
     pub sync: bool,
+    /// Cursor mientras dure la captura (`None`: el de la ventana).
+    pub cursor: Option<Arc<CursorData>>,
 }
 
 pub struct Window {
@@ -288,9 +299,12 @@ pub struct Window {
     pub save_under: bool,
     pub do_not_propagate: u32,
     pub colormap: Xid,
-    pub cursor: Xid,
+    /// Cursor propio (`None`: el de su madre).
+    pub cursor: Option<Arc<CursorData>>,
     /// Máscara de eventos de cada cliente.
     pub masks: Vec<(ClientId, u32)>,
+    /// Eventos de XInput2 que seleccionó cada cliente, por dispositivo.
+    pub xi_masks: Vec<XiSelection>,
     pub props: Vec<Property>,
     /// Contenido (las ventanas `InputOnly` no tienen).
     pub image: Option<Image>,
@@ -368,10 +382,15 @@ pub struct PointerGrab {
     pub window: Xid,
     pub owner_events: bool,
     pub mask: u32,
+    /// Captura de XInput2: eventos de XI2 que quiere (`None`: es del
+    /// protocolo básico y vale `mask`).
+    pub xi_mask: Option<u32>,
     /// Nació de pulsar un botón: termina al soltarlos todos.
     pub by_button: bool,
     /// Captura pasiva síncrona: el evento se puede «repetir».
     pub replay: Option<(u8, Xid)>,
+    /// Cursor mientras dure la captura (`None`: el de la ventana).
+    pub cursor: Option<Arc<CursorData>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -379,6 +398,9 @@ pub struct KeyboardGrab {
     pub client: ClientId,
     pub window: Xid,
     pub owner_events: bool,
+    /// Captura de XInput2: eventos de XI2 que quiere (`None`: es del
+    /// protocolo básico).
+    pub xi_mask: Option<u32>,
     /// Código de la tecla que la activó (captura pasiva): termina al soltarla.
     pub by_key: Option<u8>,
 }
@@ -395,7 +417,7 @@ pub struct Server {
     pub property_bytes: usize,
     pub gcs: HashMap<Xid, (ClientId, Arc<Gc>)>,
     pub fonts: HashMap<Xid, (ClientId, Font)>,
-    pub cursors: HashMap<Xid, ClientId>,
+    pub cursors: HashMap<Xid, (ClientId, Arc<CursorData>)>,
     pub colormaps: HashMap<Xid, ClientId>,
     /// RENDER: imágenes componibles y conjuntos de glifos.
     pub pictures: HashMap<Xid, Picture>,
@@ -434,6 +456,10 @@ pub struct Server {
     pub last_title_click: Option<(Xid, u32, (i32, i32))>,
     /// Siguiente hueco de la colocación en cascada.
     pub cascade: u32,
+    /// Ventanas minimizadas, en el orden en que se minimizaron, y sus
+    /// fichas ya dibujadas en la tira del pie de la pantalla.
+    pub minimized: Vec<Xid>,
+    pub strip: Vec<StripChip>,
     /// Zonas de pantalla que hay que recomponer.
     pub damage: Vec<Rect>,
     /// El tamaño de la pantalla cambió: hay que rehacer el búfer compartido.
@@ -444,10 +470,15 @@ pub struct Server {
     pub clipboard_from_client: Option<String>,
     /// Sincronizar también PRIMARY (lo seleccionado con el ratón).
     pub sync_primary: bool,
-    /// Ofrecer el XKEYBOARD mínimo que necesita xdotool (véase `xkb.rs`).
-    pub xkb_compat: bool,
+    /// XKB: modificadores del último `StateNotify` enviado.
+    pub xkb_mods: u8,
+    /// Modo de ventanas sueltas: cada ventana de primer nivel va por
+    /// separado a la interfaz (véase `rootless.rs`).
+    pub rootless: Option<Rootless>,
     /// Avisos pendientes para la interfaz.
     pub desktop_events: Vec<DesktopEvent>,
+    /// Último cursor que se le dijo a la interfaz.
+    pub cursor_sent: DesktopCursor,
     /// Solo para pruebas: la petición con este código entra en pánico.
     #[cfg(test)]
     pub panic_on_opcode: Option<u8>,
@@ -549,13 +580,17 @@ impl Server {
             ewmh,
             last_title_click: None,
             cascade: 0,
+            minimized: vec![],
+            strip: vec![],
             damage: vec![],
             resized: false,
             clipboard: None,
             clipboard_from_client: None,
             sync_primary: true,
-            xkb_compat: false,
+            xkb_mods: 0,
+            rootless: None,
             desktop_events: vec![],
+            cursor_sent: DesktopCursor::Shape(CursorShape::Default),
             #[cfg(test)]
             panic_on_opcode: None,
             start: Instant::now(),
@@ -610,8 +645,9 @@ impl Server {
             save_under: false,
             do_not_propagate: 0,
             colormap: DEFAULT_COLORMAP,
-            cursor: 0,
+            cursor: None,
             masks: vec![],
+            xi_masks: vec![],
             props: vec![],
             image: None,
             grabs: vec![],
@@ -660,6 +696,7 @@ impl Server {
                 big_requests: false,
                 save_set: vec![],
                 motion_hint_sent: false,
+                xkb_details: [0; XKB_EVENT_KINDS],
             },
         );
         Some(id)
@@ -765,6 +802,7 @@ impl Server {
         }
         for w in self.windows.values_mut() {
             w.masks.retain(|(c, _)| *c != id);
+            w.xi_masks.retain(|s| s.client != id);
             w.grabs.retain(|g| g.client != id);
             w.shape_listeners.retain(|c| *c != id);
         }
@@ -773,7 +811,7 @@ impl Server {
         self.randr_remove_client(id);
         self.gcs.retain(|_, (c, _)| *c != id);
         self.fonts.retain(|_, (c, _)| *c != id);
-        self.cursors.retain(|_, c| *c != id);
+        self.cursors.retain(|_, (c, _)| *c != id);
         self.colormaps.retain(|_, c| *c != id);
         self.selections.retain(|_, s| s.client != id);
         self.refresh_pointer_window();
@@ -1026,6 +1064,7 @@ impl Server {
     pub fn compose(&self, rect: Rect, out: &mut [u32]) {
         let mut target = Target { rect, data: out };
         self.paint_tree(ROOT, 0, 0, rect, &mut target);
+        self.paint_strip(&mut target);
     }
 
     /// Compone una ventana con sus descendientes (para `GetImage`): `rect`
@@ -1259,6 +1298,8 @@ impl Server {
             return;
         };
         if !w.mapped || id == ROOT {
+            // (Retirar una ventana minimizada: deja de estarlo.)
+            self.wm_withdraw_minimized(id);
             return;
         }
         self.damage_frame(id);
@@ -1290,6 +1331,7 @@ impl Server {
             self.keyboard_grab = None;
         }
         if let Some(drag) = self.wm_drag
+            && !matches!(drag, WmDrag::Chip { .. })
             && gone(self, drag.window())
         {
             self.wm_drag = None;
@@ -1539,6 +1581,13 @@ impl Server {
                 w.title_cache = None;
             }
             self.damage_frame(window);
+            // (Y el de su ficha, si está minimizada.)
+            if self.minimized.contains(&window) {
+                self.damage_screen(self.screen_rect());
+            }
+        }
+        if name == A_WM_NORMAL_HINTS && !deleted && self.wm_client.is_none() {
+            self.wm_size_hints_changed(window);
         }
     }
 
@@ -1574,6 +1623,19 @@ impl Server {
 
     // --- Foco ---------------------------------------------------------------
 
+    /// `FocusIn` o `FocusOut` a quien lo seleccionó en la ventana, como
+    /// evento básico o como evento de XInput2.
+    fn focus_event(&mut self, code: u8, detail: u8, window: Xid) {
+        let ev = Ev::new(code, detail).u32(window).u8(0).done();
+        self.deliver(window, M_FOCUS_CHANGE, ev);
+        let evtype = if code == FOCUS_IN {
+            super::xinput::XI_FOCUS_IN
+        } else {
+            super::xinput::XI_FOCUS_OUT
+        };
+        self.xi_focus_event(evtype, detail, window);
+    }
+
     /// Cambia el foco del teclado generando `FocusOut`/`FocusIn`.
     pub fn set_focus(&mut self, new: Focus) {
         let old = self.focus;
@@ -1585,8 +1647,6 @@ impl Server {
             return;
         }
         self.focus = new;
-        let event =
-            |code: u8, detail: u8, window: Xid| Ev::new(code, detail).u32(window).u8(0).done();
         // Detalles: 0 antecesora, 1 virtual, 2 inferior, 3 no lineal,
         // 4 no lineal virtual, 6 PointerRoot, 7 ninguna.
         let root_detail = |f: Focus| if f == Focus::None { 7 } else { 6 };
@@ -1595,14 +1655,14 @@ impl Server {
                 let (chain_a, chain_b) = (self.ancestry(a), self.ancestry(b));
                 if chain_a.contains(&b) {
                     // El foco sube a una antecesora.
-                    self.deliver(a, M_FOCUS_CHANGE, event(FOCUS_OUT, 0, a));
+                    self.focus_event(FOCUS_OUT, 0, a);
                     for w in chain_a.iter().skip(1).take_while(|w| **w != b) {
-                        self.deliver(*w, M_FOCUS_CHANGE, event(FOCUS_OUT, 1, *w));
+                        self.focus_event(FOCUS_OUT, 1, *w);
                     }
-                    self.deliver(b, M_FOCUS_CHANGE, event(FOCUS_IN, 2, b));
+                    self.focus_event(FOCUS_IN, 2, b);
                 } else if chain_b.contains(&a) {
                     // El foco baja a una descendiente.
-                    self.deliver(a, M_FOCUS_CHANGE, event(FOCUS_OUT, 2, a));
+                    self.focus_event(FOCUS_OUT, 2, a);
                     let between: Vec<Xid> = chain_b
                         .iter()
                         .skip(1)
@@ -1610,18 +1670,18 @@ impl Server {
                         .copied()
                         .collect();
                     for w in between.iter().rev() {
-                        self.deliver(*w, M_FOCUS_CHANGE, event(FOCUS_IN, 1, *w));
+                        self.focus_event(FOCUS_IN, 1, *w);
                     }
-                    self.deliver(b, M_FOCUS_CHANGE, event(FOCUS_IN, 0, b));
+                    self.focus_event(FOCUS_IN, 0, b);
                 } else {
                     let common = chain_a
                         .iter()
                         .find(|w| chain_b.contains(w))
                         .copied()
                         .unwrap_or(ROOT);
-                    self.deliver(a, M_FOCUS_CHANGE, event(FOCUS_OUT, 3, a));
+                    self.focus_event(FOCUS_OUT, 3, a);
                     for w in chain_a.iter().skip(1).take_while(|w| **w != common) {
-                        self.deliver(*w, M_FOCUS_CHANGE, event(FOCUS_OUT, 4, *w));
+                        self.focus_event(FOCUS_OUT, 4, *w);
                     }
                     let down: Vec<Xid> = chain_b
                         .iter()
@@ -1630,41 +1690,33 @@ impl Server {
                         .copied()
                         .collect();
                     for w in down.iter().rev() {
-                        self.deliver(*w, M_FOCUS_CHANGE, event(FOCUS_IN, 4, *w));
+                        self.focus_event(FOCUS_IN, 4, *w);
                     }
-                    self.deliver(b, M_FOCUS_CHANGE, event(FOCUS_IN, 3, b));
+                    self.focus_event(FOCUS_IN, 3, b);
                 }
             }
             (Focus::Window(a), other) => {
-                self.deliver(a, M_FOCUS_CHANGE, event(FOCUS_OUT, 3, a));
+                self.focus_event(FOCUS_OUT, 3, a);
                 for w in self.ancestry(a).iter().skip(1) {
                     if *w != ROOT {
-                        self.deliver(*w, M_FOCUS_CHANGE, event(FOCUS_OUT, 4, *w));
+                        self.focus_event(FOCUS_OUT, 4, *w);
                     }
                 }
-                self.deliver(
-                    ROOT,
-                    M_FOCUS_CHANGE,
-                    event(FOCUS_IN, root_detail(other), ROOT),
-                );
+                self.focus_event(FOCUS_IN, root_detail(other), ROOT);
             }
             (other, Focus::Window(b)) => {
-                self.deliver(
-                    ROOT,
-                    M_FOCUS_CHANGE,
-                    event(FOCUS_OUT, root_detail(other), ROOT),
-                );
+                self.focus_event(FOCUS_OUT, root_detail(other), ROOT);
                 let chain = self.ancestry(b);
                 for w in chain.iter().skip(1).rev() {
                     if *w != ROOT {
-                        self.deliver(*w, M_FOCUS_CHANGE, event(FOCUS_IN, 4, *w));
+                        self.focus_event(FOCUS_IN, 4, *w);
                     }
                 }
-                self.deliver(b, M_FOCUS_CHANGE, event(FOCUS_IN, 3, b));
+                self.focus_event(FOCUS_IN, 3, b);
             }
             (a, b) => {
-                self.deliver(ROOT, M_FOCUS_CHANGE, event(FOCUS_OUT, root_detail(a), ROOT));
-                self.deliver(ROOT, M_FOCUS_CHANGE, event(FOCUS_IN, root_detail(b), ROOT));
+                self.focus_event(FOCUS_OUT, root_detail(a), ROOT);
+                self.focus_event(FOCUS_IN, root_detail(b), ROOT);
             }
         }
         // La barra de título activa cambia de color.
@@ -1930,6 +1982,7 @@ impl Server {
             self.focus = Focus::PointerRoot;
         }
         self.wm_drag = None;
+        self.minimized.retain(|w| existing.contains(w));
         self.selections.retain(|_, s| existing.contains(&s.window));
         if self
             .wm_client

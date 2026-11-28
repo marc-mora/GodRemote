@@ -19,7 +19,11 @@ const COOKIE: [u8; 16] = *b"0123456789abcdef";
 fn start(width: u32, height: u32) -> (XServer, DesktopBackend) {
     XServer::start(
         &tokio::runtime::Handle::current(),
-        XServerConfig { width, height },
+        XServerConfig {
+            width,
+            height,
+            rootless: false,
+        },
         Arc::new(|| {}),
     )
 }
@@ -130,7 +134,9 @@ impl TestClient {
             Ok(Ok(_)) => {}
         }
         let mut packet = head.to_vec();
-        if head[0] == 1 {
+        // Las respuestas y los eventos genéricos (los de XInput2) dicen
+        // cuánto más ocupan.
+        if head[0] == 1 || head[0] & 0x7f == 35 {
             let extra = u32_of(self.be, &head[4..8]) as usize * 4;
             packet.resize(32 + extra, 0);
             self.stream.read_exact(&mut packet[32..]).await.unwrap();
@@ -357,10 +363,12 @@ async fn handshake_and_queries_in_both_byte_orders() {
             ("RENDER", 1),
             ("SHAPE", 1),
             ("RANDR", 1),
-            ("XKEYBOARD", 0),
+            ("XKEYBOARD", 1),
+            ("XInputExtension", 1),
+            ("Generic Event Extension", 1),
             ("XFIXES", 0),
-            ("XInputExtension", 0),
             ("MIT-SHM", 0),
+            ("XTEST", 0),
             ("GLX", 0),
         ] {
             let mut b = c.body();
@@ -379,7 +387,18 @@ async fn handshake_and_queries_in_both_byte_orders() {
             names.push(std::str::from_utf8(name).unwrap());
             rest = tail;
         }
-        assert_eq!(names, ["BIG-REQUESTS", "RENDER", "SHAPE", "RANDR"]);
+        assert_eq!(
+            names,
+            [
+                "BIG-REQUESTS",
+                "RENDER",
+                "SHAPE",
+                "RANDR",
+                "XKEYBOARD",
+                "XInputExtension",
+                "Generic Event Extension"
+            ]
+        );
         // GetKeyboardMapping: la tecla de la «a» da «a» y, con Mayús, «A».
         let code = lock(&server.inner.state).keymap.keycode(0x61).unwrap();
         let mut b = c.body();
@@ -1472,48 +1491,6 @@ async fn a_client_that_does_not_read_is_throttled() {
     server.stop();
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn xkb_is_only_offered_when_asked_for() {
-    let (server, _backend) = start(320, 200);
-    let query = |c: &TestClient| {
-        let mut b = c.body();
-        b.u16(9).u16(0).bytes(b"XKEYBOARD");
-        b
-    };
-    let mut plain = TestClient::connect(&server, false).await;
-    let b = query(&plain);
-    plain.request(98, 0, b).await;
-    assert_eq!(plain.reply().await[8], 0);
-    let b = plain.body();
-    plain.request(135, 0, b).await;
-    assert_eq!(plain.error().await.0, BAD_REQUEST);
-
-    server.set_xkb_compat(true);
-    for be in [false, true] {
-        let mut c = TestClient::connect(&server, be).await;
-        let b = query(&c);
-        c.request(98, 0, b).await;
-        let r = c.reply().await;
-        assert_eq!((r[8], r[9]), (1, 135));
-        // UseExtension y GetMap con tipos, símbolos y modificadores.
-        let mut b = c.body();
-        b.u16(1).u16(0);
-        c.request(135, 0, b).await;
-        assert_eq!(c.reply().await[1], 1);
-        let mut b = c.body();
-        b.u16(0x100).u16(7).u16(0).zeros(18);
-        c.request(135, 8, b).await;
-        let r = c.reply().await;
-        assert_eq!((r[10], r[11], c.u16(&r[12..14])), (8, 255, 7));
-        assert_eq!((r[15], r[17], r[20]), (4, 8, 248), "tipos y teclas");
-        // Tras los 4 tipos (8 bytes cada uno más sus entradas) van las teclas.
-        let syms = 40 + 4 * 8 + 4 * 8;
-        // La primera tecla (código 8) no tiene símbolos.
-        assert_eq!(&r[syms..syms + 8], &[0; 8]);
-    }
-    server.stop();
-}
-
 /// Generador pseudoaleatorio determinista (xorshift) para la prueba de
 /// peticiones al azar.
 struct Rng(u64);
@@ -1542,9 +1519,20 @@ impl Rng {
 #[path = "tests_ext.rs"]
 mod ext;
 
+#[path = "tests_desk.rs"]
+mod desk;
+
+#[path = "tests_xinput.rs"]
+mod xinput;
+
+#[path = "tests_rootless.rs"]
+mod rootless;
+
 const RENDER: u8 = super::render::RENDER_OPCODE;
 const SHAPE: u8 = super::shape::SHAPE_OPCODE;
 const RANDR: u8 = super::randr::RANDR_OPCODE;
+const XKB: u8 = super::xkb::XKB_OPCODE;
+const XI: u8 = super::xinput::XI_OPCODE;
 
 /// Bytes de una petición con su cabecera.
 fn raw_request(be: bool, opcode: u8, data: u8, mut body: Writer) -> Vec<u8> {
@@ -1812,7 +1800,19 @@ impl FuzzIds {
                 b.u32(self.picture(rng)).u16(name.len() as u16).u16(0);
                 b.bytes(name).pad();
             }
-            27 | 31 | 33..=36 => {
+            27 => {
+                // Cursor con la imagen de un Picture cualquiera.
+                b.u32(fresh).u32(self.picture(rng));
+                b.u16(rng.below(40) as u16).u16(rng.below(40) as u16);
+            }
+            31 => {
+                // Cursor animado con otros (que existan o no) como fotogramas.
+                b.u32(fresh);
+                for _ in 0..rng.below(4) {
+                    b.u32((fresh & !0x3f) | rng.below(64)).u32(value(rng));
+                }
+            }
+            33..=36 => {
                 b.u32(fresh);
                 if minor >= 34 {
                     // Puntos (y radios o ángulo) y unas pocas paradas.
@@ -1901,10 +1901,12 @@ impl FuzzIds {
 async fn random_requests_never_panic() {
     const BUDGET: u64 = 3_000_000;
     const REQUESTS: usize = 15_000;
-    // Dos semillas fijas; con `GODREMOTE_X11_FUZZ=n` se prueban n más.
+    // Tres semillas fijas (la última, en el modo de ventanas sueltas); con
+    // `GODREMOTE_X11_FUZZ=n` se prueban n más.
     let mut seeds = vec![
-        (false, 0x9e37_79b9_7f4a_7c15u64),
-        (true, 0x0123_4567_89ab_cdef),
+        (false, 0x9e37_79b9_7f4a_7c15u64, false),
+        (true, 0x0123_4567_89ab_cdef, false),
+        (false, 0x6a09_e667_f3bc_c909, true),
     ];
     let extra = std::env::var("GODREMOTE_X11_FUZZ")
         .ok()
@@ -1912,10 +1914,18 @@ async fn random_requests_never_panic() {
         .unwrap_or(0);
     for n in 0..extra {
         let seed = (n + 1).wrapping_mul(0x2545_f491_4f6c_dd1d) | 1;
-        seeds.push((n % 2 == 1, seed));
+        seeds.push((n % 2 == 1, seed, n % 3 == 2));
     }
-    for (be, seed) in seeds {
-        let (server, backend) = start(300, 200);
+    for (be, seed, rootless) in seeds {
+        let (server, backend) = XServer::start(
+            &tokio::runtime::Handle::current(),
+            XServerConfig {
+                width: 300,
+                height: 200,
+                rootless,
+            },
+            Arc::new(|| {}),
+        );
         // Con poco presupuesto de imagen las reservas grandes fallan pronto
         // (y de paso la prueba no necesita gigas de memoria).
         lock(&server.inner.state).budget = Budget::new(BUDGET);
@@ -2006,6 +2016,47 @@ async fn random_requests_never_panic() {
                 },
             }
         };
+        // Lo que contaría la interfaz de las ventanas sueltas, con ventanas
+        // que existen y que no, y medidas de todo tipo. (Menos cerrarlas: a
+        // quien no sabe cerrarse se le corta la conexión.)
+        let rootless_input = |rng: &mut Rng| -> crate::xserver::RootlessInput {
+            use crate::xserver::RootlessInput;
+            let fresh = base | (0x200 + rng.below(64));
+            let window = rng.pick(&[ids.top, ids.top, ids.popup, ids.child, ROOT, 0, fresh]);
+            let (x, y) = (rng.below(700) as i32 - 200, rng.below(500) as i32 - 150);
+            match rng.below(12) {
+                0 | 1 => RootlessInput::Pointer { window, x, y },
+                2 | 3 => RootlessInput::Button {
+                    window,
+                    x,
+                    y,
+                    button: [MouseButton::Left, MouseButton::Middle, MouseButton::Right]
+                        [rng.below(3) as usize],
+                    pressed: rng.below(2) == 0,
+                },
+                4 => RootlessInput::Wheel {
+                    window,
+                    x,
+                    y,
+                    delta: rng.below(5) as i16 - 2,
+                    horizontal: rng.below(2) == 0,
+                },
+                5 | 6 => RootlessInput::Geometry {
+                    window,
+                    x: value(rng) as i32,
+                    y: value(rng) as i32,
+                    width: value(rng),
+                    height: value(rng),
+                },
+                7 | 8 => RootlessInput::Focused(window),
+                9 => RootlessInput::Unfocused,
+                10 => RootlessInput::DragStarted,
+                _ => RootlessInput::Screen {
+                    width: rng.below(900),
+                    height: rng.below(700),
+                },
+            }
+        };
         for i in 0..REQUESTS {
             if i % 250 == 0 {
                 // El azar destruye cosas: se reponen cada cierto tiempo.
@@ -2018,6 +2069,8 @@ async fn random_requests_never_panic() {
                 1..=8 => RENDER,
                 9..=11 => SHAPE,
                 12 => RANDR,
+                13 | 14 => XKB,
+                15..=17 => XI,
                 _ => loop {
                     let op = 1 + rng.below(119) as u8;
                     if op != 113 {
@@ -2047,6 +2100,98 @@ async fn random_requests_never_panic() {
                         data = rng.below(33) as u8;
                         body.u32(rng.pick(&[ROOT, ids.top, 0x110, 0x111, 0x112]));
                     }
+                    XKB => {
+                        // Casi siempre para el teclado principal.
+                        data = rng.pick(&[0, 1, 1, 4, 6, 8, 8, 8, 10, 13, 17, 17, 21, 24]) as u8;
+                        if rng.chance(15) {
+                            data = rng.below(30) as u8;
+                        }
+                        body.u16(rng.pick(&[0x100, 0x100, 0x100, 3, 5, 2, 0x200]) as u16);
+                        match data {
+                            // SelectEvents: qué afecta, qué borra, qué pide todo.
+                            1 => {
+                                for _ in 0..5 {
+                                    body.u16(rng.below(1 << 12) as u16);
+                                }
+                            }
+                            // GetMap: componentes y un tramo de teclas.
+                            8 => {
+                                body.u16(rng.below(256) as u16).u16(rng.below(256) as u16);
+                                body.u8(0).u8(rng.below(6) as u8);
+                                body.u8(rng.next() as u8).u8(rng.next() as u8);
+                            }
+                            10 => {
+                                body.u8(rng.below(16) as u8).u8(rng.below(2) as u8);
+                            }
+                            17 => {
+                                body.u16(0).u32(rng.below(1 << 14));
+                            }
+                            _ => {}
+                        }
+                    }
+                    XI => {
+                        data = rng.pick(&[
+                            1, 2, 40, 41, 42, 45, 46, 46, 46, 47, 48, 49, 50, 51, 51, 52, 53, 54,
+                            54, 55, 56, 59, 60, 61, 3,
+                        ]) as u8;
+                        let device = rng.pick(&[0, 1, 2, 2, 3, 3, 4, 5, 6]) as u16;
+                        let mask = rng.pick(&[0, 0x7fc, 0x7fc, 0x70, 0x0c, 0x180]);
+                        let cursor = base | (0x200 + rng.below(64));
+                        let cursor = rng.pick(&[0, 0, cursor]);
+                        match data {
+                            // Las que empiezan por una ventana.
+                            40 | 60 => {
+                                body.u32(ids.window(&mut rng)).u16(device).u16(0);
+                            }
+                            42 => {
+                                body.u32(ids.window(&mut rng)).u32(cursor).u16(device);
+                            }
+                            // XISelectEvents: una o dos máscaras.
+                            46 => {
+                                let n = 1 + rng.below(2);
+                                body.u32(ids.window(&mut rng)).u16(n as u16).u16(0);
+                                for _ in 0..n {
+                                    body.u16(device).u16(1).u32(mask);
+                                }
+                            }
+                            47 => {
+                                body.u16(rng.below(4) as u16).u16(rng.below(6) as u16);
+                            }
+                            48 | 50 | 56 | 59 => {
+                                body.u16(device).u16(0);
+                            }
+                            49 => {
+                                body.u32(ids.window(&mut rng)).u32(0).u16(device);
+                            }
+                            // XIGrabDevice y XIUngrabDevice.
+                            51 => {
+                                body.u32(ids.window(&mut rng)).u32(0).u32(cursor);
+                                body.u16(device).u8(1).u8(1).u8(rng.below(2) as u8).u8(0);
+                                body.u16(1).u32(mask);
+                            }
+                            52 | 53 => {
+                                body.u32(0).u16(device).u8(rng.below(4) as u8);
+                            }
+                            // Capturas pasivas, con uno o dos modificadores.
+                            54 => {
+                                let n = 1 + rng.below(2);
+                                body.u32(0).u32(ids.window(&mut rng)).u32(cursor);
+                                body.u32(rng.pick(&[0, 1, 3, 40, 300]));
+                                body.u16(device).u16(n as u16).u16(1);
+                                body.u8(rng.below(5) as u8).u8(rng.below(2) as u8);
+                                body.u8(1).u8(rng.below(2) as u8).u16(0).u32(mask);
+                                for _ in 0..n {
+                                    body.u32(rng.pick(&[0, 1, 4, 1 << 31]));
+                                }
+                            }
+                            55 => {
+                                body.u32(ids.window(&mut rng)).u32(rng.pick(&[0, 1, 3, 40]));
+                                body.u16(device).u16(1).u8(rng.below(2) as u8).zeros(3);
+                                body.u32(rng.pick(&[0, 1, 4, 1 << 31]));
+                            }
+                            _ => {}
+                        }
+                    }
                     1 => {
                         let parent = ids.window(&mut rng);
                         body.u32(fresh).u32(parent);
@@ -2058,8 +2203,24 @@ async fn random_requests_never_panic() {
                         body.u32(rng.below(1 << 15));
                         data = 0;
                     }
+                    2 if rng.chance(25) => {
+                        // Poner (o quitar) el cursor de una ventana.
+                        let cursor = base | (0x200 + rng.below(64));
+                        let cursor = rng.pick(&[0, cursor]);
+                        body.u32(ids.window(&mut rng)).u32(1 << 14).u32(cursor);
+                    }
                     2 => {
                         body.u32(ids.window(&mut rng)).u32(rng.below(1 << 15));
+                    }
+                    26 if rng.chance(50) => {
+                        // Captura del puntero con su cursor.
+                        body.u32(ids.window(&mut rng)).u16(rng.next() as u16);
+                        body.u8(1).u8(1).u32(0);
+                        let cursor = base | (0x200 + rng.below(64));
+                        body.u32(rng.pick(&[0, cursor]));
+                    }
+                    95 | 96 => {
+                        body.u32(base | (0x200 + rng.below(64)));
                     }
                     12 => {
                         body.u32(ids.window(&mut rng))
@@ -2222,6 +2383,9 @@ async fn random_requests_never_panic() {
                 .unwrap();
             if i % 5 == 0 {
                 let _ = backend.input.send(input(&mut rng));
+            }
+            if rootless && i % 3 == 0 {
+                server.rootless_send(rootless_input(&mut rng));
             }
             if i % 500 == 0 {
                 server.resize(200 + rng.below(300), 150 + rng.below(200));

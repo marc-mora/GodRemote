@@ -1366,17 +1366,33 @@ impl Server {
                 }
                 self.fill_rectangles(op, dst, color, &rects)
             }
-            // CreateCursor (a partir de un Picture) y CreateAnimCursor: los
-            // cursores no se dibujan, solo existen.
-            27 | 31 => {
-                let id = rd.u32()?;
+            // CreateCursor: la imagen de un Picture, con su transparencia.
+            27 => {
+                let (id, source) = (rd.u32()?, rd.u32()?);
+                let hot = (rd.u16()? as u32, rd.u16()? as u32);
                 self.check_new_id(c, id)?;
-                if minor == 27 {
-                    self.picture(rd.u32()?)?;
-                }
-                self.cursors.insert(id, c);
+                let picture = self.picture(source)?;
+                let format = picture.format;
+                let image = match picture.source {
+                    Source::Drawable(drawable) => self.picture_image(drawable),
+                    _ => None,
+                };
+                // (Un color liso o un degradado no tienen tamaño: se deja
+                // la flecha normal antes que contestar con un error.)
+                let Some(image) = image else {
+                    self.add_shape_cursor(c, id, crate::desktop::CursorShape::Default);
+                    return Ok(());
+                };
+                let side = super::cursor::MAX_CURSOR_SIDE as i32;
+                let part = Rect::new(0, 0, image.w.min(side), image.h.min(side));
+                let (size, stride) = ((image.w as u32, image.h as u32), part.width() as usize);
+                let pixels = image.extract(part);
+                self.add_image_cursor(c, id, size, hot, |x, y| {
+                    format.to_argb(pixels[y as usize * stride + x as usize])
+                });
                 Ok(())
             }
+            31 => self.create_anim_cursor(c, rd),
             // SetPictureTransform
             28 => {
                 let id = rd.u32()?;

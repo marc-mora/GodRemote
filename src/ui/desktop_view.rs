@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 
 use egui::{Color32, Event, EventFilter, Key, Pos2, Rect, Sense, TextureHandle, TextureOptions};
 
-use crate::desktop::{DesktopBackend, DesktopEvent, DesktopInput, KeyCode, MouseButton};
+use crate::desktop::{
+    CursorShape, DesktopBackend, DesktopCursor, DesktopEvent, DesktopInput, KeyCode, MouseButton,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DesktopState {
@@ -109,85 +111,140 @@ pub fn wanted_modifiers(m: egui::Modifiers) -> [(KeyCode, bool); 3] {
     ]
 }
 
-pub struct DesktopView {
-    backend: DesktopBackend,
-    pub state: DesktopState,
-    texture: Option<TextureHandle>,
-    texture_epoch: u64,
-    /// Tamaño del escritorio remoto, en píxeles.
-    size: (u32, u32),
-    pub secrets_to_save: Vec<(String, String)>,
+/// Puntero de egui para una de las formas habituales.
+pub fn cursor_icon(shape: CursorShape) -> egui::CursorIcon {
+    use egui::CursorIcon as Icon;
+    match shape {
+        CursorShape::Default => Icon::Default,
+        CursorShape::Text => Icon::Text,
+        CursorShape::Hand => Icon::PointingHand,
+        CursorShape::Wait => Icon::Wait,
+        CursorShape::Progress => Icon::Progress,
+        CursorShape::Crosshair => Icon::Crosshair,
+        CursorShape::Move => Icon::Move,
+        CursorShape::NotAllowed => Icon::NotAllowed,
+        CursorShape::Help => Icon::Help,
+        CursorShape::Hidden => Icon::None,
+        CursorShape::ResizeHorizontal => Icon::ResizeHorizontal,
+        CursorShape::ResizeVertical => Icon::ResizeVertical,
+        CursorShape::ResizeN => Icon::ResizeNorth,
+        CursorShape::ResizeS => Icon::ResizeSouth,
+        CursorShape::ResizeE => Icon::ResizeEast,
+        CursorShape::ResizeW => Icon::ResizeWest,
+        CursorShape::ResizeNe => Icon::ResizeNorthEast,
+        CursorShape::ResizeNw => Icon::ResizeNorthWest,
+        CursorShape::ResizeSe => Icon::ResizeSouthEast,
+        CursorShape::ResizeSw => Icon::ResizeSouthWest,
+    }
+}
+
+/// Puntero del escritorio remoto tal como lo pone la interfaz: las formas
+/// habituales las dibuja el sistema; las imágenes propias, egui, encima de
+/// todo y con el puntero del sistema escondido.
+pub struct CursorPainter {
+    cursor: DesktopCursor,
+    /// Texturas de los fotogramas de la imagen actual (se crean al usarla).
+    textures: Vec<TextureHandle>,
+}
+
+impl Default for CursorPainter {
+    fn default() -> Self {
+        Self {
+            cursor: DesktopCursor::Shape(CursorShape::Default),
+            textures: vec![],
+        }
+    }
+}
+
+impl CursorPainter {
+    pub fn set(&mut self, cursor: DesktopCursor) {
+        if self.cursor != cursor {
+            self.cursor = cursor;
+            self.textures.clear();
+        }
+    }
+
+    /// Pone el puntero para este fotograma. `pos` es dónde está y `scale`,
+    /// los puntos de pantalla por píxel remoto.
+    pub fn show(&mut self, ctx: &egui::Context, pos: Pos2, scale: f32) {
+        let frames = match &self.cursor {
+            DesktopCursor::Shape(shape) => {
+                ctx.set_cursor_icon(cursor_icon(*shape));
+                return;
+            }
+            DesktopCursor::Image(frames) => frames.clone(),
+        };
+        if self.textures.len() != frames.len() {
+            self.textures = frames
+                .iter()
+                .map(|frame| {
+                    let size = [frame.image.width as usize, frame.image.height as usize];
+                    let image = egui::ColorImage::from_rgba_premultiplied(size, &frame.image.rgba);
+                    ctx.load_texture("puntero-remoto", image, TextureOptions::LINEAR)
+                })
+                .collect();
+        }
+        // Fotograma que toca (los animados dan vueltas sin parar).
+        let total: u64 = frames.iter().map(|f| f.delay_ms as u64).sum();
+        let mut index = 0;
+        if frames.len() > 1 && total > 0 {
+            let mut left = (ctx.input(|i| i.time) * 1000.0) as u64 % total;
+            for (i, frame) in frames.iter().enumerate() {
+                if left < frame.delay_ms as u64 {
+                    index = i;
+                    let wait = frame.delay_ms as u64 - left;
+                    ctx.request_repaint_after(std::time::Duration::from_millis(wait.max(1)));
+                    break;
+                }
+                left -= frame.delay_ms as u64;
+            }
+        }
+        let (Some(frame), Some(texture)) = (frames.get(index), self.textures.get(index)) else {
+            return;
+        };
+        ctx.set_cursor_icon(egui::CursorIcon::None);
+        let image = &frame.image;
+        let hot = egui::vec2(image.hot_x as f32, image.hot_y as f32) * scale;
+        let size = egui::vec2(image.width as f32, image.height as f32) * scale;
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Tooltip,
+            egui::Id::unique("puntero-remoto"),
+        ));
+        painter.image(
+            texture.id(),
+            Rect::from_min_size((pos - hot).round(), size),
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
+}
+
+/// Teclado hacia un escritorio remoto: lleva la cuenta de lo que está
+/// pulsado allí y traduce los eventos de teclado de egui. `send` es por
+/// donde se le mandan las órdenes.
+#[derive(Default)]
+pub struct KeyRelay {
     /// Teclas (incluidos modificadores) pulsadas en el equipo remoto.
     pressed: BTreeSet<u32>,
     pressed_keys: Vec<KeyCode>,
-    buttons: [bool; 3],
-    last_pointer: Option<(u16, u16)>,
-    wheel_accum: egui::Vec2,
-    /// Sincronizar el portapapeles de texto.
-    clipboard: bool,
-    /// Texto del portapapeles remoto pendiente de copiar al local.
-    remote_clipboard: Option<String>,
-    want_focus: bool,
-    /// Espacio que tuvo la imagen la última vez que se dibujó (en puntos).
-    pub last_area: egui::Vec2,
-    /// Entregar el portapapeles local al recibir el foco, sin esperar a
-    /// Ctrl+V (las aplicaciones X pegan con el botón central o
-    /// Mayús+Insert, no con Ctrl+V).
-    pub clipboard_on_focus: bool,
     /// Cuándo se pidió el portapapeles al sistema para sincronizarlo: el
     /// «pegar» que llegue enseguida no es una pulsación de Ctrl+V.
-    clipboard_requested: Option<f64>,
-    /// Tenía el foco del teclado la última vez que se dibujó, y en qué
-    /// fotograma fue (una pestaña oculta no se dibuja).
-    was_focused: bool,
-    last_frame: u64,
+    pub clipboard_requested: Option<f64>,
 }
 
-impl DesktopView {
-    pub fn new(backend: DesktopBackend, clipboard: bool) -> Self {
-        Self {
-            backend,
-            state: DesktopState::Connecting("Conectando…".into()),
-            texture: None,
-            texture_epoch: 0,
-            size: (0, 0),
-            secrets_to_save: vec![],
-            pressed: BTreeSet::new(),
-            pressed_keys: vec![],
-            buttons: [false; 3],
-            last_pointer: None,
-            wheel_accum: egui::Vec2::ZERO,
-            clipboard,
-            remote_clipboard: None,
-            want_focus: true,
-            last_area: egui::Vec2::ZERO,
-            clipboard_on_focus: false,
-            clipboard_requested: None,
-            was_focused: false,
-            last_frame: 0,
-        }
+impl KeyRelay {
+    /// Queda alguna tecla pulsada en el equipo remoto.
+    pub fn any_pressed(&self) -> bool {
+        !self.pressed_keys.is_empty()
     }
 
-    pub fn request_focus(&mut self) {
-        self.want_focus = true;
+    /// Olvida lo que estuviera pulsado (la sesión se cerró).
+    pub fn clear(&mut self) {
+        self.pressed.clear();
+        self.pressed_keys.clear();
     }
 
-    pub fn close(&mut self) {
-        let _ = self.backend.input.send(DesktopInput::Close);
-    }
-
-    /// Tamaño del escritorio remoto, si ya se conoce.
-    pub fn remote_size(&self) -> Option<(u32, u32)> {
-        (self.state == DesktopState::Connected && self.size.0 > 0).then_some(self.size)
-    }
-
-    fn send(&self, input: DesktopInput) {
-        if self.state == DesktopState::Connected {
-            let _ = self.backend.input.send(input);
-        }
-    }
-
-    fn key(&mut self, key: KeyCode, pressed: bool) {
+    pub fn key(&mut self, key: KeyCode, pressed: bool, send: &mut dyn FnMut(DesktopInput)) {
         // Identificador estable de la tecla para llevar la cuenta.
         let id = key.keysym();
         let changed = if pressed {
@@ -202,20 +259,20 @@ impl DesktopView {
         }
         // Las repeticiones de tecla se reenvían; soltar algo no pulsado, no.
         if pressed || changed {
-            self.send(DesktopInput::Key { key, pressed });
+            send(DesktopInput::Key { key, pressed });
         }
     }
 
     /// Pulsa y suelta una combinación (p. ej. Ctrl+Alt+Supr).
-    pub fn send_combo(&mut self, keys: &[KeyCode]) {
+    pub fn combo(keys: &[KeyCode], send: &mut dyn FnMut(DesktopInput)) {
         for key in keys {
-            self.send(DesktopInput::Key {
+            send(DesktopInput::Key {
                 key: *key,
                 pressed: true,
             });
         }
         for key in keys.iter().rev() {
-            self.send(DesktopInput::Key {
+            send(DesktopInput::Key {
                 key: *key,
                 pressed: false,
             });
@@ -223,35 +280,214 @@ impl DesktopView {
     }
 
     /// Deja pulsados en el equipo remoto exactamente estos modificadores.
-    fn sync_modifiers(&mut self, modifiers: egui::Modifiers) {
+    pub fn sync_modifiers(
+        &mut self,
+        modifiers: egui::Modifiers,
+        send: &mut dyn FnMut(DesktopInput),
+    ) {
         for (key, wanted) in wanted_modifiers(modifiers) {
             if wanted != self.pressed.contains(&key.keysym()) {
-                self.key(key, wanted);
+                self.key(key, wanted, send);
             }
         }
     }
 
     /// Envía Ctrl+letra, pulsando Ctrl si aún no lo está en el equipo remoto.
-    fn ctrl_shortcut(&mut self, letter: u8) {
+    pub fn ctrl_shortcut(&mut self, letter: u8, send: &mut dyn FnMut(DesktopInput)) {
         let held = self.pressed.contains(&KeyCode::Control.keysym());
         if !held {
-            self.key(KeyCode::Control, true);
+            self.key(KeyCode::Control, true, send);
         }
-        self.send_combo(&[KeyCode::Letter(letter)]);
+        Self::combo(&[KeyCode::Letter(letter)], send);
         if !held {
-            self.key(KeyCode::Control, false);
+            self.key(KeyCode::Control, false, send);
         }
     }
 
-    /// Suelta todo lo que esté pulsado en el equipo remoto.
-    fn release_all(&mut self) {
+    /// Suelta todas las teclas que estén pulsadas en el equipo remoto.
+    pub fn release(&mut self, send: &mut dyn FnMut(DesktopInput)) {
         for key in std::mem::take(&mut self.pressed_keys) {
-            self.send(DesktopInput::Key {
+            send(DesktopInput::Key {
                 key,
                 pressed: false,
             });
         }
         self.pressed.clear();
+    }
+
+    /// Trata un evento de teclado (o de copiar y pegar) de quien tiene el
+    /// foco. `held` son los modificadores pulsados en este fotograma,
+    /// `clipboard` dice si se sincroniza el portapapeles y `now` es la hora
+    /// de egui. Devuelve si el evento era de teclado.
+    pub fn event(
+        &mut self,
+        event: &Event,
+        held: egui::Modifiers,
+        clipboard: bool,
+        now: f64,
+        send: &mut dyn FnMut(DesktopInput),
+    ) -> bool {
+        match event {
+            Event::Text(text) => {
+                // Alt+tecla ya se envía como tecla (atajos de menú).
+                if !(held.alt && !held.ctrl) {
+                    send(DesktopInput::Text(text.clone()));
+                }
+            }
+            Event::Key {
+                key,
+                pressed,
+                modifiers,
+                ..
+            } => {
+                let Some(code) = key_code(*key) else {
+                    return true;
+                };
+                if !pressed {
+                    self.key(code, false, send);
+                    return true;
+                }
+                self.sync_modifiers(*modifiers, send);
+                let altgr = modifiers.ctrl && modifiers.alt;
+                let shortcut = (modifiers.ctrl || modifiers.alt || modifiers.mac_cmd) && !altgr;
+                if !is_text_key(code) || shortcut {
+                    self.key(code, true, send);
+                }
+            }
+            // egui convierte Ctrl+C / Ctrl+X / Ctrl+V en estos eventos: se
+            // reenvían como la tecla correspondiente (Ctrl ya está pulsado).
+            Event::Copy => self.ctrl_shortcut(b'c', send),
+            Event::Cut => self.ctrl_shortcut(b'x', send),
+            Event::Paste(text) => {
+                if clipboard {
+                    send(DesktopInput::ClipboardText(text.clone()));
+                }
+                // Si el portapapeles lo acabamos de pedir nosotros
+                // para sincronizarlo, nadie ha pulsado Ctrl+V.
+                let requested = self
+                    .clipboard_requested
+                    .take()
+                    .is_some_and(|at| now - at < 0.5);
+                if !requested {
+                    self.ctrl_shortcut(b'v', send);
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
+pub struct DesktopView {
+    backend: DesktopBackend,
+    pub state: DesktopState,
+    texture: Option<TextureHandle>,
+    texture_epoch: u64,
+    /// Tamaño del escritorio remoto, en píxeles.
+    size: (u32, u32),
+    pub secrets_to_save: Vec<(String, String)>,
+    /// Teclado: lo que está pulsado en el equipo remoto.
+    keys: KeyRelay,
+    buttons: [bool; 3],
+    last_pointer: Option<(u16, u16)>,
+    wheel_accum: egui::Vec2,
+    /// Sincronizar el portapapeles de texto.
+    clipboard: bool,
+    /// Texto del portapapeles remoto pendiente de copiar al local.
+    remote_clipboard: Option<String>,
+    want_focus: bool,
+    /// Espacio que tuvo la imagen la última vez que se dibujó (en puntos).
+    pub last_area: egui::Vec2,
+    /// Entregar el portapapeles local al recibir el foco, sin esperar a
+    /// Ctrl+V (las aplicaciones X pegan con el botón central o
+    /// Mayús+Insert, no con Ctrl+V).
+    pub clipboard_on_focus: bool,
+    /// Tenía el foco del teclado la última vez que se dibujó, y en qué
+    /// fotograma fue (una pestaña oculta no se dibuja).
+    was_focused: bool,
+    last_frame: u64,
+    /// Puntero que pide el escritorio remoto.
+    cursor: CursorPainter,
+}
+
+impl DesktopView {
+    pub fn new(backend: DesktopBackend, clipboard: bool) -> Self {
+        Self {
+            backend,
+            state: DesktopState::Connecting("Conectando…".into()),
+            texture: None,
+            texture_epoch: 0,
+            size: (0, 0),
+            secrets_to_save: vec![],
+            keys: KeyRelay::default(),
+            buttons: [false; 3],
+            last_pointer: None,
+            wheel_accum: egui::Vec2::ZERO,
+            clipboard,
+            remote_clipboard: None,
+            want_focus: true,
+            last_area: egui::Vec2::ZERO,
+            clipboard_on_focus: false,
+            was_focused: false,
+            last_frame: 0,
+            cursor: CursorPainter::default(),
+        }
+    }
+
+    pub fn request_focus(&mut self) {
+        self.want_focus = true;
+    }
+
+    pub fn close(&mut self) {
+        let _ = self.backend.input.send(DesktopInput::Close);
+    }
+
+    /// Puntero que pide el escritorio remoto (para quien pinte sus
+    /// ventanas por su cuenta).
+    pub fn cursor(&mut self) -> &mut CursorPainter {
+        &mut self.cursor
+    }
+
+    /// Texto que el escritorio remoto dejó en su portapapeles y aún no se
+    /// ha copiado al local.
+    pub fn take_remote_clipboard(&mut self) -> Option<String> {
+        self.remote_clipboard.take()
+    }
+
+    /// Tamaño del escritorio remoto, si ya se conoce.
+    pub fn remote_size(&self) -> Option<(u32, u32)> {
+        (self.state == DesktopState::Connected && self.size.0 > 0).then_some(self.size)
+    }
+
+    fn send(&self, input: DesktopInput) {
+        if self.state == DesktopState::Connected {
+            let _ = self.backend.input.send(input);
+        }
+    }
+
+    /// Por dónde se mandan las órdenes al escritorio remoto (solo con la
+    /// sesión establecida).
+    fn sender(&self) -> impl FnMut(DesktopInput) + use<> {
+        let (input, connected) = (
+            self.backend.input.clone(),
+            self.state == DesktopState::Connected,
+        );
+        move |order| {
+            if connected {
+                let _ = input.send(order);
+            }
+        }
+    }
+
+    /// Pulsa y suelta una combinación (p. ej. Ctrl+Alt+Supr).
+    pub fn send_combo(&mut self, keys: &[KeyCode]) {
+        KeyRelay::combo(keys, &mut self.sender());
+    }
+
+    /// Suelta todo lo que esté pulsado en el equipo remoto.
+    fn release_all(&mut self) {
+        let mut send = self.sender();
+        self.keys.release(&mut send);
         if let Some((x, y)) = self.last_pointer {
             for (i, button) in [MouseButton::Left, MouseButton::Middle, MouseButton::Right]
                 .into_iter()
@@ -284,10 +520,10 @@ impl DesktopView {
                         self.remote_clipboard = Some(text);
                     }
                 }
+                DesktopEvent::Cursor(cursor) => self.cursor.set(cursor),
                 DesktopEvent::SaveSecrets(s) => self.secrets_to_save.extend(s),
                 DesktopEvent::Closed(err) => {
-                    self.pressed.clear();
-                    self.pressed_keys.clear();
+                    self.keys.clear();
                     self.buttons = [false; 3];
                     self.state = DesktopState::Closed(err);
                 }
@@ -405,7 +641,7 @@ impl DesktopView {
                     },
                 )
             });
-        } else if !self.pressed_keys.is_empty() {
+        } else if self.keys.any_pressed() {
             // Al perder el foco no deben quedar teclas «pegadas» en remoto.
             self.release_all();
         }
@@ -481,57 +717,26 @@ impl DesktopView {
                         }
                     }
                 }
-                Event::Text(text) if has_focus => {
-                    // Alt+tecla ya se envía como tecla (atajos de menú).
-                    if modifiers.alt && !modifiers.ctrl {
-                        continue;
-                    }
-                    self.send(DesktopInput::Text(text));
-                }
-                Event::Key {
-                    key,
-                    pressed,
-                    modifiers,
-                    ..
-                } if has_focus => {
-                    let Some(code) = key_code(key) else {
-                        continue;
-                    };
-                    if !pressed {
-                        self.key(code, false);
-                        continue;
-                    }
-                    self.sync_modifiers(modifiers);
-                    let altgr = modifiers.ctrl && modifiers.alt;
-                    let shortcut = (modifiers.ctrl || modifiers.alt || modifiers.mac_cmd) && !altgr;
-                    if !is_text_key(code) || shortcut {
-                        self.key(code, true);
-                    }
-                }
-                // egui convierte Ctrl+C / Ctrl+X / Ctrl+V en estos eventos: se
-                // reenvían como la tecla correspondiente (Ctrl ya está pulsado).
-                Event::Copy if has_focus => self.ctrl_shortcut(b'c'),
-                Event::Cut if has_focus => self.ctrl_shortcut(b'x'),
-                Event::Paste(text) if has_focus => {
-                    if self.clipboard {
-                        self.send(DesktopInput::ClipboardText(text));
-                    }
-                    // Si el portapapeles lo acabamos de pedir nosotros
-                    // para sincronizarlo, nadie ha pulsado Ctrl+V.
+                // Teclado y copiar y pegar, de quien tiene el foco.
+                event if has_focus => {
                     let now = ui.input(|i| i.time);
-                    let requested = self
-                        .clipboard_requested
-                        .take()
-                        .is_some_and(|at| now - at < 0.5);
-                    if !requested {
-                        self.ctrl_shortcut(b'v');
-                    }
+                    let mut send = self.sender();
+                    self.keys
+                        .event(&event, modifiers, self.clipboard, now, &mut send);
                 }
                 _ => {}
             }
         }
         if has_focus {
-            self.sync_modifiers(modifiers);
+            let mut send = self.sender();
+            self.keys.sync_modifiers(modifiers, &mut send);
+        }
+        // El puntero que pide el escritorio remoto, mientras esté encima (o
+        // se esté arrastrando algo que empezó en él).
+        if let Some(pos) = ui.input(|i| i.pointer.latest_pos())
+            && ((over && rect.contains(pos)) || self.buttons.iter().any(|b| *b))
+        {
+            self.cursor.show(ui.ctx(), pos, scale);
         }
         // Al volver a esta pestaña (o a la ventana) el portapapeles local
         // puede haber cambiado: se pide para entregarlo.
@@ -546,7 +751,7 @@ impl DesktopView {
         self.last_frame = frame;
         if has_focus && (!shown_before || window_back) && self.clipboard && self.clipboard_on_focus
         {
-            self.clipboard_requested = Some(ui.input(|i| i.time));
+            self.keys.clipboard_requested = Some(ui.input(|i| i.time));
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
         }

@@ -59,6 +59,8 @@ pub const CLIENT_MESSAGE: u8 = 33;
 pub const MAPPING_NOTIFY: u8 = 34;
 // Eventos de extensiones.
 pub const SHAPE_NOTIFY: u8 = 64;
+/// Todos los eventos de XKB: el segundo byte dice cuál es.
+pub const XKB_EVENT: u8 = 85;
 pub const RR_SCREEN_CHANGE_NOTIFY: u8 = 89;
 pub const RR_NOTIFY: u8 = 90;
 
@@ -361,6 +363,17 @@ fn event_layout(code: u8, format: u8) -> &'static [u8] {
         },
         MAPPING_NOTIFY => &[1, 1, 1],
         SHAPE_NOTIFY => &[4, 2, 2, 2, 2, 4, 1],
+        // (El segundo byte es el subtipo: 0 teclado nuevo, 1 mapa, 2 estado.)
+        XKB_EVENT => match format {
+            0 => &[4, 1, 1, 1, 1, 1, 1, 1, 1, 2],
+            1 => &[
+                4, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2,
+            ],
+            2 => &[
+                4, 1, 1, 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 1, 1, 2, 2, 1, 1, 1, 1,
+            ],
+            _ => &[4],
+        },
         RR_SCREEN_CHANGE_NOTIFY => &[4, 4, 4, 4, 2, 2, 2, 2, 2, 2],
         // (El segundo byte es el subcódigo: 1 = cambio de salida.)
         RR_NOTIFY => match format {

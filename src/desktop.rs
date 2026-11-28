@@ -363,6 +363,78 @@ pub enum DesktopInput {
     Close,
 }
 
+/// Formas de puntero habituales: las dibuja el sistema local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CursorShape {
+    /// La flecha de siempre.
+    Default,
+    /// La «I» de escribir texto.
+    Text,
+    /// La mano de los enlaces.
+    Hand,
+    /// Ocupado: reloj o rueda.
+    Wait,
+    /// Ocupado, pero se puede seguir usando.
+    Progress,
+    Crosshair,
+    /// Mover en cualquier dirección.
+    Move,
+    NotAllowed,
+    Help,
+    /// Sin puntero.
+    Hidden,
+    ResizeHorizontal,
+    ResizeVertical,
+    ResizeN,
+    ResizeS,
+    ResizeE,
+    ResizeW,
+    ResizeNe,
+    ResizeNw,
+    ResizeSe,
+    ResizeSw,
+}
+
+/// Imagen de un puntero propio del escritorio remoto.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CursorImage {
+    pub width: u32,
+    pub height: u32,
+    /// Punto de la imagen que señala (el «punto caliente»).
+    pub hot_x: u32,
+    pub hot_y: u32,
+    /// `width * height * 4` bytes RGBA con el alfa ya multiplicado.
+    pub rgba: Vec<u8>,
+}
+
+/// Fotograma de un puntero (los animados tienen varios).
+#[derive(Debug, Clone)]
+pub struct CursorFrame {
+    pub image: Arc<CursorImage>,
+    /// Milisegundos que se muestra antes de pasar al siguiente.
+    pub delay_ms: u32,
+}
+
+/// Puntero que pide el escritorio remoto.
+#[derive(Debug, Clone)]
+pub enum DesktopCursor {
+    Shape(CursorShape),
+    /// Imagen propia: se dibuja encima de la pantalla remota, sin el
+    /// puntero del sistema. Nunca está vacía.
+    Image(Arc<[CursorFrame]>),
+}
+
+impl PartialEq for DesktopCursor {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (DesktopCursor::Shape(a), DesktopCursor::Shape(b)) => a == b,
+            // La misma imagen, no una igual: basta para saber si ha cambiado.
+            (DesktopCursor::Image(a), DesktopCursor::Image(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
 /// Avisos del escritorio remoto hacia la interfaz.
 pub enum DesktopEvent {
     /// Mensaje de progreso mientras conecta.
@@ -372,6 +444,9 @@ pub enum DesktopEvent {
     Connected,
     /// El portapapeles remoto contiene este texto.
     ClipboardText(String),
+    /// El puntero sobre el escritorio remoto debe tener esta forma (hoy
+    /// solo lo avisa el servidor X integrado).
+    Cursor(DesktopCursor),
     /// Secretos validados que el usuario pidió guardar en el baúl.
     SaveSecrets(Vec<(String, String)>),
     /// Fin de la sesión, con el error si lo hubo.

@@ -12,8 +12,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{Killed, find_program};
-use godremote::desktop::{DesktopBackend, DesktopEvent, DesktopInput, KeyCode, MouseButton};
-use godremote::xserver::{XServer, XServerConfig};
+use godremote::desktop::{
+    CursorShape, DesktopBackend, DesktopCursor, DesktopEvent, DesktopInput, KeyCode, MouseButton,
+};
+use godremote::xserver::{RootlessInput, RootlessWindow, XServer, XServerConfig};
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
@@ -42,12 +44,19 @@ fn missing(programs: &[&str]) -> bool {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with(false)
+    }
+
+    /// `rootless`: en el modo de ventanas sueltas (cada ventana de primer
+    /// nivel se entrega por separado en vez de componer una pantalla).
+    fn with(rootless: bool) -> Self {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (server, backend) = XServer::start(
             rt.handle(),
             XServerConfig {
                 width: WIDTH,
                 height: HEIGHT,
+                rootless,
             },
             Arc::new(|| {}),
         );
@@ -172,6 +181,22 @@ impl Fixture {
             x,
             y,
         });
+    }
+
+    /// Espera a que el servidor pida un cursor que cumpla la condición
+    /// (los demás avisos que lleguen entretanto se descartan).
+    fn wait_cursor(&self, what: &str, accept: impl Fn(&DesktopCursor) -> bool) -> DesktopCursor {
+        let deadline = Instant::now() + TIMEOUT;
+        let mut seen = vec![];
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.backend.events.recv_timeout(left) {
+                Ok(DesktopEvent::Cursor(cursor)) if accept(&cursor) => return cursor,
+                Ok(DesktopEvent::Cursor(cursor)) => seen.push(cursor),
+                Ok(_) => {}
+                Err(_) => panic!("no llegó el cursor esperado ({what}); llegaron: {seen:?}"),
+            }
+        }
     }
 
     fn pixel(&self, x: i32, y: i32) -> [u8; 3] {
@@ -474,7 +499,11 @@ fn query_tools_see_the_server_and_its_windows() {
     // La ventana nueva tiene el foco del teclado.
     let info = fx.stdout("xdpyinfo", &[]);
     assert!(info.contains(&format!("focus:  window {id}")), "{info}");
-    assert_eq!(fx.server.client_count(), 1);
+    // (Las herramientas ya terminaron; al servidor puede faltarle un
+    // instante para darlas de baja.)
+    wait_for("solo queda el cliente de la ventana", || {
+        fx.server.client_count() == 1
+    });
 
     // --- Fuentes --------------------------------------------------------------
     if find_program("xlsfonts").is_some() {
@@ -848,6 +877,79 @@ fn mouse_and_keyboard_events_reach_clients() {
     );
 }
 
+/// El puntero toma la forma que pide la ventana que tiene debajo: la «I» de
+/// la fuente de cursores en un xterm y, en GTK, la imagen del tema de
+/// cursores (o la de la fuente, si no hay tema instalado).
+#[test]
+fn applications_set_the_pointer_shape() {
+    if missing(&["xterm", "xwininfo"]) {
+        return;
+    }
+    let fx = Fixture::new();
+    let is = |shape: CursorShape| move |c: &DesktopCursor| *c == DesktopCursor::Shape(shape);
+    let mut xterm = fx.spawn("xterm", &["-geometry", "40x10+60+80"]);
+    let (id, g) = fx.wait_window(&mut xterm, "XTerm");
+    let inside = ((g.x + g.w / 2) as u16, (g.y + g.h / 2) as u16);
+    fx.send(DesktopInput::PointerMove {
+        x: inside.0,
+        y: inside.1,
+    });
+    fx.wait_cursor("la I del xterm", is(CursorShape::Text));
+    // (Para entonces el xterm ya tiene su tamaño definitivo; lleva además
+    // un borde de un píxel.)
+    let g = fx.geometry(&id).unwrap();
+    eprintln!("xterm: {g:?}");
+    // En la barra de título, la flecha; en el borde derecho, la de estirar.
+    fx.send(DesktopInput::PointerMove {
+        x: inside.0,
+        y: (g.y - 10) as u16,
+    });
+    fx.wait_cursor("flecha en la barra", is(CursorShape::Default));
+    fx.send(DesktopInput::PointerMove {
+        x: (g.x + g.w + 2) as u16,
+        y: inside.1,
+    });
+    fx.wait_cursor("estirar por la derecha", is(CursorShape::ResizeE));
+    fx.send(DesktopInput::PointerMove { x: 5, y: 5 });
+    fx.wait_cursor("flecha en el escritorio", is(CursorShape::Default));
+    drop(xterm);
+
+    if missing(&["yad"]) {
+        return;
+    }
+    let mut entry = fx.spawn_env(
+        "entrada",
+        "yad",
+        &["--entry", "--title=Entrada", "--text=Nombre:"],
+        &UTF8,
+    );
+    let (_, g) = fx.wait_window(&mut entry, "Entrada");
+    wait_for("yad pinta su diálogo", || fx.colors_in(g) > 40);
+    // Sobre la caja de texto GTK pide su cursor de escribir.
+    fx.send(DesktopInput::PointerMove {
+        x: (g.x + 60) as u16,
+        y: (g.y + 40) as u16,
+    });
+    let cursor = fx.wait_cursor("el de texto de GTK", |c| match c {
+        DesktopCursor::Shape(shape) => *shape == CursorShape::Text,
+        DesktopCursor::Image(_) => true,
+    });
+    if let DesktopCursor::Image(frames) = cursor {
+        let image = &frames[0].image;
+        eprintln!(
+            "GTK 3: cursor de imagen de {}×{}, punto ({}, {})",
+            image.width, image.height, image.hot_x, image.hot_y
+        );
+        assert!(image.width >= 8 && image.height >= 8);
+        assert_eq!(image.rgba.len(), (image.width * image.height * 4) as usize);
+        // Una «I» fina: hay píxeles opacos y muchos transparentes.
+        let opaque = image.rgba.chunks_exact(4).filter(|p| p[3] > 128).count();
+        let total = (image.width * image.height) as usize;
+        assert!(opaque > 8 && opaque < total / 2, "{opaque} de {total}");
+    }
+    assert_no_x_errors(&entry);
+}
+
 #[test]
 fn built_in_window_manager_moves_and_closes_windows() {
     if missing(&["xclock", "xwininfo"]) {
@@ -948,6 +1050,282 @@ fn built_in_window_manager_moves_and_closes_windows() {
     assert!(status.success(), "{status}: {}", clock.errors());
     wait_for("baja del cliente", || fx.server.client_count() == 0);
     wait_for("pantalla limpia", || fx.colors_in(resized) == 1);
+}
+
+/// Minimizar: con el botón de la barra de título y como lo piden las
+/// aplicaciones y las herramientas (`XIconifyWindow`, `_NET_WM_STATE_HIDDEN`),
+/// y volver con la ficha de la tira del pie de la pantalla o con
+/// `_NET_ACTIVE_WINDOW`.
+#[test]
+fn windows_minimize_to_a_strip_and_come_back() {
+    if missing(&["xterm", "xwininfo", "xprop", "wmctrl", "xdotool"]) {
+        return;
+    }
+    let fx = Fixture::new();
+    let typed = fx.dir.path().join("tecleado.txt");
+    let script = format!("cat > {}", typed.display());
+    let mut xterm = fx.spawn(
+        "xterm",
+        &[
+            "-title",
+            "Terminal de prueba",
+            "-geometry",
+            "40x10+60+80",
+            "-e",
+            "sh",
+            "-c",
+            &script,
+        ],
+    );
+    let (id, _) = fx.wait_window(&mut xterm, "XTerm");
+    // Otra ventana, para que el foco tenga adónde ir.
+    let mut logo = fx.spawn("xlogo", &["-geometry", "100x100+500+80"]);
+    let (logo_id, _) = fx.wait_window(&mut logo, "XLogo");
+    fx.run("wmctrl", &["-i", "-a", &id]);
+    wait_for("tamaño definitivo del xterm", || {
+        fx.geometry(&id).is_some_and(|g| g.w > 200)
+    });
+    let g = fx.geometry(&id).unwrap();
+    let state = |window: &str| fx.stdout("xprop", &["-id", window, "WM_STATE", "_NET_WM_STATE"]);
+    let minimized = |window: &str| {
+        let state = state(window);
+        state.contains("Iconic")
+            && state.contains("_NET_WM_STATE_HIDDEN")
+            && fx.geometry(window).is_some_and(|g| !g.viewable)
+    };
+    let shown = |window: &str| {
+        let state = state(window);
+        state.contains("Normal")
+            && !state.contains("_NET_WM_STATE_HIDDEN")
+            && fx.geometry(window).is_some_and(|g| g.viewable)
+    };
+    // La ficha sale abajo a la izquierda; hasta entonces ahí solo hay fondo.
+    let chip = Geometry {
+        x: 6,
+        y: HEIGHT as i32 - 20,
+        w: 150,
+        h: 14,
+        viewable: true,
+    };
+    assert_eq!(fx.colors_in(chip), 1);
+
+    // El botón de minimizar es el tercero desde la derecha de la barra (el
+    // marco mide 3 píxeles, los botones van cada 20 y la ventana del xterm
+    // lleva un borde de 1).
+    let button = (g.x + g.w + 2 + 3 - 3 * 20 + 8, g.y - 11);
+    fx.click(button.0, button.1);
+    wait_for("xterm minimizado con su botón", || minimized(&id));
+    wait_for("ficha en la tira", || fx.colors_in(chip) > 2);
+    fx.snapshot("minimizada");
+    // Sigue constando para el gestor, y el foco ha pasado a la otra.
+    let decimal = |id: &str| {
+        u32::from_str_radix(id.trim_start_matches("0x"), 16)
+            .unwrap()
+            .to_string()
+    };
+    assert!(fx.stdout("wmctrl", &["-l"]).contains("Terminal de prueba"));
+    wait_for("foco en la otra ventana", || {
+        fx.stdout("xdotool", &["getwindowfocus"]).trim() == decimal(&logo_id)
+    });
+
+    // Un clic en la ficha la devuelve donde estaba, con el foco.
+    fx.click(chip.x + 40, chip.y + 6);
+    wait_for("xterm de vuelta con su ficha", || shown(&id));
+    wait_for("tira vacía", || fx.colors_in(chip) == 1);
+    let back = fx.geometry(&id).unwrap();
+    assert_eq!((back.x, back.y, back.w, back.h), (g.x, g.y, g.w, g.h));
+    wait_for("foco de vuelta", || {
+        fx.stdout("xdotool", &["getwindowfocus"]).trim() == decimal(&id)
+    });
+
+    // `XIconifyWindow` (xdotool) y `_NET_ACTIVE_WINDOW` (wmctrl -a).
+    fx.run("xdotool", &["windowminimize", &decimal(&id)]);
+    wait_for("xterm minimizado por xdotool", || minimized(&id));
+    fx.run("wmctrl", &["-i", "-a", &id]);
+    wait_for("xterm de vuelta con wmctrl", || shown(&id));
+    // `_NET_WM_STATE_HIDDEN` (wmctrl -b) y `XMapWindow` (xdotool windowmap).
+    fx.run("wmctrl", &["-i", "-r", &id, "-b", "add,hidden"]);
+    wait_for("xterm minimizado por wmctrl", || minimized(&id));
+    fx.run("xdotool", &["windowmap", &decimal(&id)]);
+    wait_for("xterm de vuelta al mostrarse", || shown(&id));
+
+    // De vuelta, el teclado le llega como antes.
+    fx.send(DesktopInput::Text("sigo aqui".into()));
+    for (key, pressed) in [
+        (KeyCode::Enter, true),
+        (KeyCode::Enter, false),
+        (KeyCode::Control, true),
+        (KeyCode::Letter(b'd'), true),
+        (KeyCode::Letter(b'd'), false),
+        (KeyCode::Control, false),
+    ] {
+        fx.send(DesktopInput::Key { key, pressed });
+    }
+    wait_for("texto tecleado", || {
+        std::fs::read_to_string(&typed).unwrap_or_default() == "sigo aqui\n"
+    });
+    assert!(xterm.wait_exit().success(), "{}", xterm.errors());
+}
+
+/// Ventana publicada (en el modo de ventanas sueltas) con ese título.
+fn published_window(fx: &Fixture, title: &str) -> Option<RootlessWindow> {
+    let shared = fx.server.rootless().expect("modo de ventanas sueltas");
+    let view = shared.lock().unwrap();
+    view.windows.iter().find(|w| w.title == title).cloned()
+}
+
+/// Modo de ventanas sueltas con un cliente real: el xterm se entrega como
+/// una ventana con su título y su imagen; la interfaz dice dónde está y
+/// cuánto mide (lo hace el sistema), su menú sale como un emergente aparte,
+/// se teclea en la que tiene el foco y se cierra con el aspa.
+#[test]
+fn rootless_mode_hands_out_each_application_window() {
+    if missing(&["xterm", "xwininfo"]) {
+        return;
+    }
+    let fx = Fixture::with(true);
+    let send = |input| fx.server.rootless_send(input);
+    // La pantalla X es el escritorio entero.
+    send(RootlessInput::Screen {
+        width: 1600,
+        height: 1000,
+    });
+    let typed = fx.dir.path().join("tecleado.txt");
+    let script = format!("cat > {}", typed.display());
+    let mut xterm = fx.spawn(
+        "xterm",
+        &[
+            "-T",
+            "Suelta",
+            "-geometry",
+            "80x24",
+            "-bg",
+            "#204080",
+            "-fg",
+            "white",
+            "-e",
+            "sh",
+            "-c",
+            &script,
+        ],
+    );
+    wait_for("ventana publicada", || {
+        xterm.assert_running();
+        published_window(&fx, "Suelta").is_some()
+    });
+    let first = published_window(&fx, "Suelta").unwrap();
+    assert!(!first.popup && first.decorated, "con el marco del sistema");
+    assert!(first.width > 80 * 5 && first.height > 24 * 10);
+    // Su imagen es solo la suya, sin marco ni escritorio alrededor.
+    let pixel = |w: &RootlessWindow, x: u32, y: u32| -> [u8; 4] {
+        let fb = w.frame.lock().unwrap();
+        assert_eq!((fb.width(), fb.height()), (w.width, w.height));
+        let i = ((y * fb.width() + x) * 4) as usize;
+        [
+            fb.pixels[i],
+            fb.pixels[i + 1],
+            fb.pixels[i + 2],
+            fb.pixels[i + 3],
+        ]
+    };
+    const BLUE: [u8; 4] = [0x20, 0x40, 0x80, 0xff];
+    wait_for("fondo del xterm en su imagen", || {
+        let w = published_window(&fx, "Suelta").unwrap();
+        pixel(&w, w.width - 30, 8) == BLUE && pixel(&w, 3, w.height - 3) == BLUE
+    });
+
+    // El sistema la deja en un sitio (más allá de los 800×600 con los que
+    // arrancó la pantalla) y con otro tamaño: la de X la sigue.
+    let (width, height) = (first.width + 70, first.height + 26);
+    send(RootlessInput::Geometry {
+        window: first.id,
+        x: 900,
+        y: 300,
+        width,
+        height,
+    });
+    wait_for("la ventana X sigue a la del sistema", || {
+        let w = published_window(&fx, "Suelta").unwrap();
+        (w.x, w.y, w.width, w.height) == (900, 300, width, height)
+            && pixel(&w, width - 5, height - 5) == BLUE
+    });
+    let id = format!("{:#x}", first.id);
+    let g = fx.geometry(&id).expect("xwininfo");
+    // (xwininfo da la esquina exterior, con el borde de un píxel del xterm.)
+    assert_eq!(
+        (g.x, g.y, g.w, g.h),
+        (899, 299, width as i32, height as i32)
+    );
+    assert!(g.viewable);
+
+    // Con Ctrl y el botón izquierdo el xterm abre su menú: un emergente
+    // aparte, donde está el ratón (en coordenadas de escritorio).
+    send(RootlessInput::Focused(first.id));
+    let ctrl = |pressed| {
+        RootlessInput::Desktop(DesktopInput::Key {
+            key: KeyCode::Control,
+            pressed,
+        })
+    };
+    let button = |pressed| RootlessInput::Button {
+        window: first.id,
+        x: 60,
+        y: 50,
+        button: MouseButton::Left,
+        pressed,
+    };
+    send(RootlessInput::Pointer {
+        window: first.id,
+        x: 60,
+        y: 50,
+    });
+    send(ctrl(true));
+    send(button(true));
+    let popup = || -> Option<RootlessWindow> {
+        let shared = fx.server.rootless().unwrap();
+        let view = shared.lock().unwrap();
+        view.windows.iter().find(|w| w.popup).cloned()
+    };
+    wait_for("menú del xterm como emergente", || popup().is_some());
+    let menu = popup().unwrap();
+    assert!(menu.width > 60 && menu.height > 100);
+    // (El ratón está en 900+60, 300+50; el menú sale centrado bajo él.)
+    let near = |at: i32, start: i32, size: u32| at > start - 40 && at < start + size as i32 + 40;
+    assert!(
+        near(960, menu.x, menu.width) && near(350, menu.y, menu.height),
+        "menú en {},{} ({}×{})",
+        menu.x,
+        menu.y,
+        menu.width,
+        menu.height
+    );
+    send(RootlessInput::Pointer {
+        window: first.id,
+        x: -40,
+        y: -40,
+    });
+    send(button(false));
+    send(ctrl(false));
+    wait_for("menú cerrado", || popup().is_none());
+
+    // El teclado va a la ventana que tiene el foco.
+    send(RootlessInput::Desktop(DesktopInput::Text(
+        "hola desde fuera\n".into(),
+    )));
+    wait_for("texto tecleado", || {
+        std::fs::read_to_string(&typed).unwrap_or_default() == "hola desde fuera\n"
+    });
+
+    // El aspa del marco: se le pide a la aplicación que cierre, y lo hace.
+    send(RootlessInput::Close(first.id));
+    xterm.wait_exit();
+    assert!(!xterm.errors().contains("X Error"), "{}", xterm.errors());
+    wait_for("baja del cliente", || fx.server.client_count() == 0);
+    wait_for("sin ventanas publicadas", || {
+        let shared = fx.server.rootless().unwrap();
+        let view = shared.lock().unwrap();
+        view.windows.is_empty()
+    });
 }
 
 #[test]
@@ -1093,12 +1471,11 @@ fn screen_can_be_resized_and_stopped() {
 /// el XKEYBOARD mínimo activado; con él, el teclado de las aplicaciones Xlib
 /// sigue funcionando igual.
 #[test]
-fn xdotool_works_with_the_xkb_compatibility_switch() {
+fn xdotool_finds_and_inspects_windows() {
     if missing(&["xdotool", "xterm", "xwininfo"]) {
         return;
     }
     let fx = Fixture::new();
-    fx.server.set_xkb_compat(true);
     let typed = fx.dir.path().join("tecleado.txt");
     let script = format!("cat > {}", typed.display());
     let mut xterm = fx.spawn("xterm", &["-title", "Prueba", "-e", "sh", "-c", &script]);
@@ -1145,7 +1522,7 @@ fn xdotool_works_with_the_xkb_compatibility_switch() {
             .contains(&format!("WINDOW={decimal}"))
     });
 
-    // El xterm, que también ve el XKB mínimo, sigue recibiendo bien el teclado.
+    // Y el xterm sigue recibiendo bien el teclado.
     fx.send(DesktopInput::Text("Con XKB: aB1!".into()));
     for (key, pressed) in [
         (KeyCode::Enter, true),
@@ -1393,6 +1770,200 @@ fn gtk3_widget_factory_paints_with_render() {
     assert_no_x_errors(&app);
 }
 
+// --- GTK 4 -------------------------------------------------------------------
+
+/// `zenity` es GTK 4 (con libadwaita) desde su versión 4.
+fn zenity_is_gtk4() -> bool {
+    Command::new("zenity")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .split('.')
+                .next()?
+                .parse::<u32>()
+                .ok()
+        })
+        .is_some_and(|major| major >= 4)
+}
+
+/// Ventanas de primer nivel visibles ahora mismo (identificadores).
+fn viewable_toplevels(fx: &Fixture) -> Vec<String> {
+    let out = fx.run("xwininfo", &["-root", "-children"]);
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| l.starts_with("0x"))
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|id| fx.geometry(id).is_some_and(|g| g.viewable && g.w > 1))
+        .map(str::to_string)
+        .collect()
+}
+
+/// GTK 4 exige XInput2 y XKB: con ellas sus diálogos arrancan, se pintan y
+/// responden al teclado (con caracteres de fuera de ASCII y atajos) y al
+/// ratón.
+#[test]
+fn gtk4_dialogs_draw_and_take_keyboard_and_mouse() {
+    if missing(&["zenity", "xwininfo"]) {
+        return;
+    }
+    if !zenity_is_gtk4() {
+        eprintln!("OMITIDA: este zenity no es de GTK 4");
+        return;
+    }
+    let fx = Fixture::new();
+    // Teclado: lo escrito en la entrada sale por la salida estándar.
+    let mut entry = fx.spawn_env(
+        "entrada4",
+        "zenity",
+        &["--entry", "--title=Entrada", "--text=Nombre:"],
+        &UTF8,
+    );
+    let (_, g) = fx.wait_window(&mut entry, "Entrada");
+    wait_for("zenity pinta su diálogo", || fx.colors_in(g) > 40);
+    fx.snapshot("gtk4-entrada");
+    // La caja de texto va centrada bajo la etiqueta; el texto empieza a
+    // unos 56 píxeles del borde (más allá queda el cursor de escribir).
+    let start = Geometry {
+        x: g.x + 62,
+        y: g.y + 122,
+        w: 60,
+        h: 14,
+        viewable: true,
+    };
+    type_with_shortcuts(&fx, start);
+    let status = entry.wait_exit();
+    assert!(status.success(), "{status}: {}", entry.errors());
+    assert_eq!(entry.output().trim_end(), PASTED_AND_TYPED);
+    assert_no_x_errors(&entry);
+
+    // Ratón: «No» y «Sí» terminan el programa con códigos distintos.
+    for (side, code) in [(1, 1), (3, 0)] {
+        let mut question = fx.spawn_env(
+            "pregunta4",
+            "zenity",
+            &["--question", "--title=Pregunta", "--text=Seguimos"],
+            &UTF8,
+        );
+        let (_, g) = fx.wait_window(&mut question, "Pregunta");
+        wait_for("zenity pinta sus botones", || fx.colors_in(g) > 40);
+        fx.snapshot("gtk4-pregunta");
+        // Los dos botones van abajo, a medias.
+        let button = (g.x + g.w * side / 4, g.y + g.h - 26);
+        // Al pasar por encima el botón se resalta: GTK ve moverse el ratón.
+        let zone = Geometry {
+            x: button.0 - 30,
+            y: button.1 - 8,
+            w: 12,
+            h: 12,
+            viewable: true,
+        };
+        let before = fx.checksum(zone);
+        fx.send(DesktopInput::PointerMove {
+            x: button.0 as u16,
+            y: button.1 as u16,
+        });
+        wait_for("el botón se resalta", || fx.checksum(zone) != before);
+        fx.click(button.0, button.1);
+        let status = question.wait_exit();
+        assert_eq!(status.code(), Some(code), "{}", question.errors());
+        assert_no_x_errors(&question);
+    }
+    wait_for("baja de los clientes", || fx.server.client_count() == 0);
+}
+
+/// Una aplicación GTK 4 completa: se pinta entera, cambia de página con un
+/// clic, abre y cierra un menú emergente (una ventana aparte, sin marco),
+/// desplaza con la rueda y se cierra con el botón de su propia barra.
+#[test]
+fn gtk4_widget_factory_paints_and_reacts() {
+    if missing(&["gtk4-widget-factory", "xwininfo"]) {
+        return;
+    }
+    let fx = Fixture::new();
+    fx.server.resize(1400, 850);
+    let mut app = fx.spawn_env("gtk4-widget-factory", "gtk4-widget-factory", &[], &UTF8);
+    let (id, _) = fx.wait_window(&mut app, "GTK Widget Factory");
+    wait_for("tamaño de la ventana", || {
+        fx.geometry(&id).is_some_and(|g| g.w > 600 && g.h > 400)
+    });
+    let g = fx.geometry(&id).unwrap();
+    // Texto, iconos, una foto, controles con degradados…
+    wait_for("la aplicación se pinta entera", || fx.colors_in(g) > 400);
+    fx.snapshot("gtk4-widget-factory");
+    // La rueda desplaza el texto de la derecha (la zona de abajo a la
+    // derecha de la primera página).
+    let text = Geometry {
+        x: g.x + g.w - 200,
+        y: g.y + 360,
+        w: 180,
+        h: 220,
+        viewable: true,
+    };
+    let before = fx.checksum(text);
+    fx.send(DesktopInput::Wheel {
+        x: (text.x + 90) as u16,
+        y: (text.y + 100) as u16,
+        delta: -3,
+        horizontal: false,
+    });
+    wait_for("el texto se desplaza con la rueda", || {
+        fx.checksum(text) != before
+    });
+    // Las pestañas van centradas en la barra: la del medio es «Page 2».
+    let content = Geometry {
+        x: g.x + 20,
+        y: g.y + 70,
+        w: 500,
+        h: 400,
+        viewable: true,
+    };
+    let before = fx.checksum(content);
+    fx.click(g.x + g.w / 2, g.y + 26);
+    wait_for("cambio a la segunda página", || {
+        fx.checksum(content) != before
+    });
+    fx.snapshot("gtk4-pagina2");
+    // El botón del menú (a la izquierda de los de la ventana) abre un
+    // emergente: otra ventana de primer nivel, sin marco, justo debajo.
+    let windows = viewable_toplevels(&fx);
+    let menu = (g.x + g.w - 155, g.y + 26);
+    fx.click(menu.0, menu.1);
+    let mut popup = None;
+    wait_for("el menú emergente", || {
+        popup = viewable_toplevels(&fx)
+            .into_iter()
+            .find(|w| !windows.contains(w));
+        popup.is_some()
+    });
+    let popup = fx.geometry(&popup.unwrap()).unwrap();
+    assert!(
+        popup.y >= menu.1
+            && popup.y < menu.1 + 60
+            && popup.x < menu.0
+            && popup.x + popup.w > menu.0,
+        "el menú no sale bajo su botón: {popup:?} (botón en {menu:?})"
+    );
+    wait_for("el menú se pinta", || fx.colors_in(popup) > 20);
+    fx.snapshot("gtk4-menu");
+    // Escape lo cierra (el teclado va a la ventana aunque el puntero esté
+    // sobre el menú).
+    fx.key(KeyCode::Escape);
+    wait_for("el menú se cierra", || {
+        viewable_toplevels(&fx).len() == windows.len()
+    });
+    assert_no_x_errors(&app);
+    // El aspa de su propia barra de título cierra la aplicación.
+    fx.click(g.x + g.w - 28, g.y + 26);
+    let status = app.wait_exit();
+    assert!(status.success(), "{status}: {}", app.errors());
+}
+
 const QT_SCRIPT: &str = r#"
 import sys
 from PyQt5.QtCore import QTimer
@@ -1483,6 +2054,109 @@ fn qt5_application_draws_and_takes_keyboard_and_mouse() {
         "{}",
         app.output()
     );
+    assert_no_x_errors(&app);
+}
+
+/// Ventana de Qt que se minimiza sola, avisa de cada cambio de estado que
+/// le llega y vuelve cuando se le escribe una línea por la entrada estándar.
+const QT_MINIMIZE_SCRIPT: &str = r#"
+import sys
+from PyQt5.QtCore import QEvent, QSocketNotifier, Qt, QTimer
+from PyQt5.QtWidgets import QApplication, QLabel
+
+
+class Window(QLabel):
+    def changeEvent(self, event):
+        if event.type() == QEvent.WindowStateChange:
+            minimized = bool(self.windowState() & Qt.WindowMinimized)
+            print("estado", "minimizada" if minimized else "normal", flush=True)
+        super().changeEvent(event)
+
+
+app = QApplication(sys.argv)
+w = Window("Me minimizo sola")
+w.setWindowTitle("Qt minimizable")
+w.resize(260, 90)
+w.show()
+QTimer.singleShot(400, w.showMinimized)
+
+
+def back():
+    sys.stdin.readline()
+    w.showNormal()
+    w.activateWindow()
+    QTimer.singleShot(600, lambda: app.exit(6))
+
+
+notifier = QSocketNotifier(sys.stdin.fileno(), QSocketNotifier.Read)
+notifier.activated.connect(back)
+sys.exit(app.exec_())
+"#;
+
+/// Una aplicación Qt se minimiza a sí misma (`WM_CHANGE_STATE`), se entera
+/// de que lo está y vuelve por su cuenta.
+#[test]
+fn qt5_window_minimizes_itself_and_comes_back() {
+    let Some(python) = python_with_pyqt5() else {
+        eprintln!("OMITIDA: falta PyQt5");
+        return;
+    };
+    if missing(&["xwininfo", "xprop"]) {
+        return;
+    }
+    let fx = Fixture::new();
+    let script = fx.dir.path().join("minimizar_qt.py");
+    std::fs::write(&script, QT_MINIMIZE_SCRIPT).unwrap();
+    // (Con una tubería en la entrada estándar para decirle cuándo volver.)
+    let log = fx.dir.path().join("qt-min.log");
+    let out = fx.dir.path().join("qt-min.out");
+    let mut child = fx
+        .command(python)
+        .arg(&script)
+        .envs(UTF8)
+        .stdin(Stdio::piped())
+        .stdout(std::fs::File::create(&out).unwrap())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut app = Client {
+        process: Killed(child),
+        log,
+        out,
+    };
+    let (id, g) = fx.wait_window(&mut app, "Qt minimizable");
+    wait_output(&mut app, "estado minimizada\n");
+    wait_for("ventana de Qt oculta", || {
+        fx.geometry(&id).is_some_and(|g| !g.viewable)
+    });
+    let state = fx.stdout("xprop", &["-id", &id, "WM_STATE", "_NET_WM_STATE"]);
+    assert!(
+        state.contains("Iconic") && state.contains("_NET_WM_STATE_HIDDEN"),
+        "{state}"
+    );
+    // Su ficha está en la tira.
+    let chip = Geometry {
+        x: 6,
+        y: HEIGHT as i32 - 20,
+        w: 150,
+        h: 14,
+        viewable: true,
+    };
+    wait_for("ficha de la ventana de Qt", || fx.colors_in(chip) > 2);
+    fx.snapshot("qt5-minimizada");
+    // Vuelve cuando quiere, al mismo sitio.
+    use std::io::Write;
+    stdin.write_all(b"vuelve\n").unwrap();
+    stdin.flush().unwrap();
+    wait_output(&mut app, "estado normal\n");
+    wait_for("ventana de Qt visible", || {
+        fx.geometry(&id)
+            .is_some_and(|now| now.viewable && (now.x, now.y) == (g.x, g.y))
+    });
+    wait_for("tira vacía", || fx.colors_in(chip) == 1);
+    let status = app.wait_exit();
+    assert_eq!(status.code(), Some(6), "{}", app.errors());
     assert_no_x_errors(&app);
 }
 

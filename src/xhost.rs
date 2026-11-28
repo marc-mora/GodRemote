@@ -19,6 +19,9 @@ struct State {
     enabled: bool,
     /// Aceptar también programas de este equipo (`DISPLAY=127.0.0.1:N`).
     listen_local: bool,
+    /// Cada aplicación en su propia ventana del sistema, y no todas en la
+    /// pantalla de una pestaña. Vale para el siguiente arranque.
+    windows: bool,
     size: (u32, u32),
     server: Option<XServer>,
     /// Pantalla recién arrancada que la interfaz aún no ha recogido.
@@ -45,6 +48,7 @@ impl XHost {
             state: Mutex::new(State {
                 enabled: false,
                 listen_local: false,
+                windows: false,
                 size: DEFAULT_SIZE,
                 server: None,
                 backend: None,
@@ -53,6 +57,12 @@ impl XHost {
                 local_error: None,
             }),
         })
+    }
+
+    /// Elige si la próxima vez que arranque el servidor cada aplicación irá
+    /// en su propia ventana del sistema (no cambia uno ya en marcha).
+    pub fn set_windows(&self, windows: bool) {
+        self.state.lock().unwrap().windows = windows;
     }
 
     /// Aplica los ajustes. Al desactivarlo se para el servidor (y con él
@@ -109,6 +119,7 @@ impl XHost {
                         XServerConfig {
                             width: st.size.0,
                             height: st.size.1,
+                            rootless: st.windows,
                         },
                         self.waker.clone(),
                     );

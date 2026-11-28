@@ -10,7 +10,7 @@ const OP_SRC: u8 = 1;
 const OP_OVER: u8 = 3;
 
 impl TestClient {
-    async fn extension(&mut self, name: &str) -> (u8, u8, u8, u8) {
+    pub(super) async fn extension(&mut self, name: &str) -> (u8, u8, u8, u8) {
         let mut b = self.body();
         b.u16(name.len() as u16).u16(0).bytes(name.as_bytes());
         self.request(98, 0, b).await;
@@ -18,7 +18,7 @@ impl TestClient {
         (r[8], r[9], r[10], r[11])
     }
 
-    async fn picture(&mut self, drawable: u32, format: u32) -> u32 {
+    pub(super) async fn picture(&mut self, drawable: u32, format: u32) -> u32 {
         let id = self.id();
         let mut b = self.body();
         b.u32(id).u32(drawable).u32(format).u32(0);
@@ -53,7 +53,7 @@ impl TestClient {
         self.request(RENDER, 8, b).await;
     }
 
-    async fn fill_rectangle(
+    pub(super) async fn fill_rectangle(
         &mut self,
         op: u8,
         dst: u32,

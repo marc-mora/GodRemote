@@ -251,7 +251,7 @@ fn wait_outcome(backend: &DesktopBackend) -> Seen {
                 seen.closed = Some(error);
                 return seen;
             }
-            DesktopEvent::ClipboardText(_) => {}
+            DesktopEvent::ClipboardText(_) | DesktopEvent::Cursor(_) => {}
         }
     }
 }

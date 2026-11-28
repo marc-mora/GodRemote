@@ -1,14 +1,72 @@
 //! Teclado y ratón: a qué ventana y a qué cliente va cada evento, cruces de
 //! ventana (`Enter`/`Leave`) y capturas activas y pasivas.
+//!
+//! Cada evento puede llegar de dos maneras: como evento básico del
+//! protocolo o como evento de XInput2 (véase `xinput.rs`). En cada ventana
+//! manda XInput2: si algún cliente seleccionó ahí el evento de XI2, se
+//! entrega así y ya no se mira la máscara básica (es lo que hace X.Org).
 
 use super::proto::*;
 use super::server::{ClientId, Focus, KeyboardGrab, PointerGrab, ROOT, Server};
+use super::xinput::{
+    KEYBOARD, POINTER, XI_BUTTON_PRESS, XI_BUTTON_RELEASE, XI_ENTER, XI_KEY_PRESS, XI_KEY_RELEASE,
+    XI_KEY_REPEAT, XI_LEAVE, XI_MOTION,
+};
 use crate::desktop::char_keysym;
 
 // Modos de los eventos de cruce.
 const MODE_NORMAL: u8 = 0;
 const MODE_GRAB: u8 = 1;
 const MODE_UNGRAB: u8 = 2;
+
+/// Evento de teclado o de ratón, sea cual sea la forma en que se entregue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Input {
+    KeyPress,
+    KeyRelease,
+    ButtonPress,
+    ButtonRelease,
+    Motion,
+}
+
+impl Input {
+    /// Código del evento básico.
+    fn core(self) -> u8 {
+        match self {
+            Input::KeyPress => KEY_PRESS,
+            Input::KeyRelease => KEY_RELEASE,
+            Input::ButtonPress => BUTTON_PRESS,
+            Input::ButtonRelease => BUTTON_RELEASE,
+            Input::Motion => MOTION_NOTIFY,
+        }
+    }
+
+    /// Tipo del evento de XInput2.
+    fn xi(self) -> u16 {
+        match self {
+            Input::KeyPress => XI_KEY_PRESS,
+            Input::KeyRelease => XI_KEY_RELEASE,
+            Input::ButtonPress => XI_BUTTON_PRESS,
+            Input::ButtonRelease => XI_BUTTON_RELEASE,
+            Input::Motion => XI_MOTION,
+        }
+    }
+
+    /// Dispositivo de XInput2 del que sale.
+    fn device(self) -> u16 {
+        match self {
+            Input::KeyPress | Input::KeyRelease => KEYBOARD,
+            _ => POINTER,
+        }
+    }
+}
+
+/// Cómo le llega un evento a un cliente.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Via {
+    Core,
+    Xi2,
+}
 
 impl Server {
     /// Estado de modificadores y botones que llevan los eventos.
@@ -41,29 +99,63 @@ impl Server {
             .done()
     }
 
+    /// Entrega un evento de tecla o de botón a un cliente, en la forma que
+    /// le corresponde. `flags` solo vale para XInput2.
+    #[allow(clippy::too_many_arguments)]
+    fn send_input(
+        &mut self,
+        client: ClientId,
+        via: Via,
+        input: Input,
+        detail: u8,
+        window: Xid,
+        state: u16,
+        flags: u32,
+    ) {
+        match via {
+            Via::Core => {
+                let ev = self.device_event(input.core(), detail, window, state);
+                self.send(client, ev);
+            }
+            Via::Xi2 => {
+                self.xi_device_event(client, input.xi(), detail as u32, window, state, flags)
+            }
+        }
+    }
+
     /// Busca, subiendo desde `start`, la primera ventana donde algún cliente
-    /// seleccionó `mask`. `stop_bit` es el bit que corta la propagación
+    /// seleccionó el evento: el de XInput2 o, si nadie lo pidió ahí, `mask`
+    /// del protocolo básico. `stop_bit` es el bit que corta la propagación
     /// (`do-not-propagate`), `only` limita a un cliente y `last` es la última
     /// ventana que se mira.
     fn find_recipient(
         &self,
         start: Xid,
+        input: Input,
         mask: u32,
         stop_bit: u32,
         only: Option<ClientId>,
         last: Option<Xid>,
-    ) -> Option<(Xid, Vec<ClientId>)> {
+    ) -> Option<(Xid, Vec<ClientId>, Via)> {
+        let wanted = |c: &ClientId| only.is_none_or(|o| o == *c);
         let mut cur = start;
         loop {
             let w = self.windows.get(&cur)?;
+            if !w.xi_masks.is_empty() {
+                let mut clients = self.xi_clients(cur, input.device(), input.xi());
+                clients.retain(wanted);
+                if !clients.is_empty() {
+                    return Some((cur, clients, Via::Xi2));
+                }
+            }
             let clients: Vec<ClientId> = w
                 .masks
                 .iter()
-                .filter(|(c, m)| m & mask != 0 && only.is_none_or(|o| o == *c))
+                .filter(|(c, m)| m & mask != 0 && wanted(c))
                 .map(|(c, _)| *c)
                 .collect();
             if !clients.is_empty() {
-                return Some((cur, clients));
+                return Some((cur, clients, Via::Core));
             }
             if cur == ROOT || Some(cur) == last || w.do_not_propagate & stop_bit != 0 {
                 return None;
@@ -78,10 +170,10 @@ impl Server {
         let Some(w) = self.windows.get(&window) else {
             return;
         };
-        let mask = if code == ENTER_NOTIFY {
-            M_ENTER_WINDOW
+        let (mask, evtype) = if code == ENTER_NOTIFY {
+            (M_ENTER_WINDOW, XI_ENTER)
         } else {
-            M_LEAVE_WINDOW
+            (M_LEAVE_WINDOW, XI_LEAVE)
         };
         let mut clients: Vec<ClientId> = w
             .masks
@@ -89,19 +181,33 @@ impl Server {
             .filter(|(_, m)| m & mask != 0)
             .map(|(c, _)| *c)
             .collect();
+        let mut xi_clients = if w.xi_masks.is_empty() {
+            vec![]
+        } else {
+            self.xi_clients(window, POINTER, evtype)
+        };
         // Con el puntero capturado solo se entera el cliente que lo tiene.
         if mode == MODE_NORMAL
             && let Some(g) = &self.grab
         {
             if g.owner_events {
                 clients.retain(|c| *c == g.client);
-            } else if g.window == window && g.mask & mask != 0 {
+            } else if g.window == window && g.xi_mask.is_none() && g.mask & mask != 0 {
                 clients = vec![g.client];
             } else {
                 clients.clear();
             }
+            // Una captura de XInput2 recibe los cruces de todas las
+            // ventanas, si los pidió.
+            if let Some(xi) = g.xi_mask {
+                xi_clients = if xi & (1 << evtype) != 0 {
+                    vec![g.client]
+                } else {
+                    vec![]
+                };
+            }
         }
-        if clients.is_empty() {
+        if clients.is_empty() && xi_clients.is_empty() {
             return;
         }
         let (ox, oy) = self.abs_origin(window);
@@ -110,11 +216,12 @@ impl Server {
             Focus::PointerRoot => true,
             Focus::None => false,
         };
+        let child = self.child_towards(window, target);
         let ev = Ev::new(code, detail)
             .u32(self.now())
             .u32(ROOT)
             .u32(window)
-            .u32(self.child_towards(window, target))
+            .u32(child)
             .i16(self.pointer.0 as i16)
             .i16(self.pointer.1 as i16)
             .i16((self.pointer.0 - ox) as i16)
@@ -128,6 +235,9 @@ impl Server {
                 c.motion_hint_sent = false;
             }
             self.send(client, ev);
+        }
+        for client in xi_clients {
+            self.xi_crossing_event(client, evtype, mode, detail, window, child, focused);
         }
     }
 
@@ -238,8 +348,10 @@ impl Server {
                     window: *win,
                     owner_events: g.owner_events,
                     mask: g.mask,
+                    xi_mask: g.xi_mask,
                     by_button: true,
                     replay: g.sync.then_some((button, *win)),
+                    cursor: g.cursor,
                 });
                 return true;
             }
@@ -247,22 +359,28 @@ impl Server {
         false
     }
 
-    /// Entrega un evento de ratón con el puntero capturado.
-    fn deliver_grabbed(&mut self, code: u8, detail: u8, mask: u32, state: u16) {
+    /// Entrega un evento de ratón con el puntero capturado: con
+    /// `owner_events`, como si no lo estuviera (pero solo al cliente que lo
+    /// tiene); si no, o si así no le toca, a la ventana de la captura.
+    fn deliver_grabbed(&mut self, input: Input, detail: u8, mask: u32, state: u16) {
         let Some(g) = self.grab.clone() else {
             return;
         };
         if g.owner_events
-            && let Some((win, _)) =
-                self.find_recipient(self.pointer_window, mask, mask, Some(g.client), None)
+            && let Some((win, _, via)) =
+                self.find_recipient(self.pointer_window, input, mask, mask, Some(g.client), None)
         {
-            let ev = self.device_event(code, detail, win, state);
-            self.send(g.client, ev);
+            self.send_input(g.client, via, input, detail, win, state, 0);
             return;
         }
-        if g.mask & mask != 0 {
-            let ev = self.device_event(code, detail, g.window, state);
-            self.send(g.client, ev);
+        match g.xi_mask {
+            Some(xi) if xi & (1 << input.xi()) != 0 => {
+                self.send_input(g.client, Via::Xi2, input, detail, g.window, state, 0);
+            }
+            None if g.mask & mask != 0 => {
+                self.send_input(g.client, Via::Core, input, detail, g.window, state, 0);
+            }
+            _ => {}
         }
     }
 
@@ -298,7 +416,14 @@ impl Server {
         mask
     }
 
-    fn send_motion(&mut self, client: ClientId, window: Xid, selected: u32) {
+    /// Entrega un movimiento. `selected` es la máscara básica con la que lo
+    /// recibe (para los «avisos de movimiento»).
+    fn send_motion(&mut self, client: ClientId, via: Via, window: Xid, selected: u32) {
+        if via == Via::Xi2 {
+            let state = self.input_state();
+            self.xi_device_event(client, XI_MOTION, 0, window, state, 0);
+            return;
+        }
         // Con «aviso de movimiento» se manda uno solo hasta que el cliente
         // pregunte dónde está el puntero.
         let hint = selected & M_POINTER_MOTION_HINT != 0;
@@ -329,8 +454,9 @@ impl Server {
         let mask = self.motion_mask();
         if let Some(g) = self.grab.clone() {
             if g.owner_events
-                && let Some((win, _)) = self.find_recipient(
+                && let Some((win, _, via)) = self.find_recipient(
                     self.pointer_window,
+                    Input::Motion,
                     mask,
                     M_POINTER_MOTION,
                     Some(g.client),
@@ -338,18 +464,31 @@ impl Server {
                 )
             {
                 let selected = self.windows[&win].mask_of(g.client);
-                self.send_motion(g.client, win, selected);
-            } else if g.mask & mask != 0 {
-                self.send_motion(g.client, g.window, g.mask);
+                self.send_motion(g.client, via, win, selected);
+                return;
+            }
+            match g.xi_mask {
+                Some(xi) if xi & (1 << XI_MOTION) != 0 => {
+                    self.send_motion(g.client, Via::Xi2, g.window, 0);
+                }
+                None if g.mask & mask != 0 => {
+                    self.send_motion(g.client, Via::Core, g.window, g.mask);
+                }
+                _ => {}
             }
             return;
         }
-        if let Some((win, clients)) =
-            self.find_recipient(self.pointer_window, mask, M_POINTER_MOTION, None, None)
-        {
+        if let Some((win, clients, via)) = self.find_recipient(
+            self.pointer_window,
+            Input::Motion,
+            mask,
+            M_POINTER_MOTION,
+            None,
+            None,
+        ) {
             for client in clients {
                 let selected = self.windows[&win].mask_of(client);
-                self.send_motion(client, win, selected);
+                self.send_motion(client, via, win, selected);
             }
         }
     }
@@ -359,11 +498,12 @@ impl Server {
     /// con una captura implícita hasta que se suelten los botones).
     fn dispatch_button_press(&mut self, button: u8, state: u16, below: Option<Xid>) {
         if self.passive_button_grab(button, state, below) {
-            self.deliver_grabbed(BUTTON_PRESS, button, M_BUTTON_PRESS, state);
+            self.deliver_grabbed(Input::ButtonPress, button, M_BUTTON_PRESS, state);
             return;
         }
-        let Some((win, clients)) = self.find_recipient(
+        let Some((win, clients, via)) = self.find_recipient(
             self.pointer_window,
+            Input::ButtonPress,
             M_BUTTON_PRESS,
             M_BUTTON_PRESS,
             None,
@@ -372,17 +512,23 @@ impl Server {
             return;
         };
         let client = clients[0];
-        let mask = self.windows[&win].mask_of(client);
+        // La captura implícita recibe lo que el cliente seleccionó en esa
+        // ventana: su máscara básica o la de XInput2.
+        let (mask, xi_mask) = match via {
+            Via::Core => (self.windows[&win].mask_of(client), None),
+            Via::Xi2 => (0, Some(self.xi_mask_of(win, client, POINTER))),
+        };
         self.start_grab(PointerGrab {
             client,
             window: win,
             owner_events: mask & M_OWNER_GRAB_BUTTON != 0,
             mask,
+            xi_mask,
             by_button: true,
             replay: None,
+            cursor: None,
         });
-        let ev = self.device_event(BUTTON_PRESS, button, win, state);
-        self.send(client, ev);
+        self.send_input(client, via, Input::ButtonPress, button, win, state, 0);
     }
 
     pub fn pointer_button(&mut self, button: u8, pressed: bool) {
@@ -398,7 +544,7 @@ impl Server {
             }
             self.buttons |= bit;
             if self.grab.is_some() {
-                self.deliver_grabbed(BUTTON_PRESS, button, M_BUTTON_PRESS, state);
+                self.deliver_grabbed(Input::ButtonPress, button, M_BUTTON_PRESS, state);
             } else {
                 self.dispatch_button_press(button, state, None);
             }
@@ -412,20 +558,20 @@ impl Server {
             return;
         }
         if self.grab.is_some() {
-            self.deliver_grabbed(BUTTON_RELEASE, button, M_BUTTON_RELEASE, state);
+            self.deliver_grabbed(Input::ButtonRelease, button, M_BUTTON_RELEASE, state);
             if self.buttons == 0 && self.grab.as_ref().is_some_and(|g| g.by_button) {
                 self.end_grab();
             }
-        } else if let Some((win, clients)) = self.find_recipient(
+        } else if let Some((win, clients, via)) = self.find_recipient(
             self.pointer_window,
+            Input::ButtonRelease,
             M_BUTTON_RELEASE,
             M_BUTTON_RELEASE,
             None,
             None,
         ) {
-            let ev = self.device_event(BUTTON_RELEASE, button, win, state);
             for client in clients {
-                self.send(client, ev);
+                self.send_input(client, via, Input::ButtonRelease, button, win, state, 0);
             }
         }
     }
@@ -433,14 +579,21 @@ impl Server {
     // --- Teclado ------------------------------------------------------------
 
     /// Ventana y clientes que reciben un evento de teclado según el foco.
-    fn key_target(&self, mask: u32, only: Option<ClientId>) -> Option<(Xid, Vec<ClientId>)> {
+    fn key_target(
+        &self,
+        input: Input,
+        mask: u32,
+        only: Option<ClientId>,
+    ) -> Option<(Xid, Vec<ClientId>, Via)> {
         match self.focus {
             Focus::None => None,
-            Focus::PointerRoot => self.find_recipient(self.pointer_window, mask, mask, only, None),
+            Focus::PointerRoot => {
+                self.find_recipient(self.pointer_window, input, mask, mask, only, None)
+            }
             Focus::Window(f) => {
                 let inside = self.pointer_window == f || self.is_ancestor(f, self.pointer_window);
                 let start = if inside { self.pointer_window } else { f };
-                self.find_recipient(start, mask, mask, only, Some(f))
+                self.find_recipient(start, input, mask, mask, only, Some(f))
             }
         }
     }
@@ -468,6 +621,7 @@ impl Server {
                     client: g.client,
                     window: *win,
                     owner_events: g.owner_events,
+                    xi_mask: g.xi_mask,
                     by_key: Some(code),
                 });
                 return true;
@@ -478,12 +632,18 @@ impl Server {
 
     /// Pulsación o suelta de una tecla por su código.
     pub fn key_event(&mut self, code: u8, pressed: bool) {
+        // (Una pulsación de una tecla que ya lo estaba es una repetición.)
+        let repeat = pressed && self.keymap.is_down(code);
         let state = self.keymap.press(code, pressed) | self.buttons;
-        let (kind, mask) = if pressed {
-            (KEY_PRESS, M_KEY_PRESS)
+        let (input, mask) = if pressed {
+            (Input::KeyPress, M_KEY_PRESS)
         } else {
-            (KEY_RELEASE, M_KEY_RELEASE)
+            (Input::KeyRelease, M_KEY_RELEASE)
         };
+        let flags = if repeat { XI_KEY_REPEAT } else { 0 };
+        // Quien sigue el estado del teclado por XKB tiene que tener, antes
+        // de ver la tecla, el mismo estado que lleva el evento.
+        self.xkb_announce(state, code, input.core());
         for c in self.clients.values_mut() {
             c.motion_hint_sent = false;
         }
@@ -491,23 +651,30 @@ impl Server {
             self.passive_key_grab(code, state);
         }
         if let Some(g) = self.keyboard_grab.clone() {
-            let window = match self.key_target(mask, Some(g.client)) {
-                Some((win, _)) if g.owner_events => win,
-                _ => g.window,
-            };
-            let ev = self.device_event(kind, code, window, state);
-            self.send(g.client, ev);
+            match self.key_target(input, mask, Some(g.client)) {
+                Some((win, _, via)) if g.owner_events => {
+                    self.send_input(g.client, via, input, code, win, state, flags);
+                }
+                _ => match g.xi_mask {
+                    Some(xi) if xi & (1 << input.xi()) != 0 => {
+                        self.send_input(g.client, Via::Xi2, input, code, g.window, state, flags);
+                    }
+                    None => {
+                        self.send_input(g.client, Via::Core, input, code, g.window, state, 0);
+                    }
+                    _ => {}
+                },
+            }
             if !pressed && g.by_key == Some(code) {
                 self.keyboard_grab = None;
             }
-            return;
-        }
-        if let Some((win, clients)) = self.key_target(mask, None) {
-            let ev = self.device_event(kind, code, win, state);
+        } else if let Some((win, clients, via)) = self.key_target(input, mask, None) {
             for client in clients {
-                self.send(client, ev);
+                self.send_input(client, via, input, code, win, state, flags);
             }
         }
+        // Y después, el estado nuevo si la tecla era un modificador.
+        self.xkb_announce(self.keymap.mods, code, input.core());
     }
 
     /// Tecla especial o de atajo, por su *keysym*.
@@ -543,9 +710,13 @@ impl Server {
         }
     }
 
-    /// `MappingNotify` a todos los clientes. `request`: 0 modificadores,
-    /// 1 teclado, 2 puntero.
+    /// El mapa de teclado cambió: `MappingNotify` a todos los clientes
+    /// (`request`: 0 modificadores, 1 teclado, 2 puntero) y, si son teclas,
+    /// el aviso de XKB a quien lo pidió.
     pub fn mapping_changed(&mut self, request: u8, first: u8, count: u8) {
+        if request == 1 {
+            self.xkb_map_changed(first, count);
+        }
         let ev = Ev::new(MAPPING_NOTIFY, 0)
             .u8(request)
             .u8(first)

@@ -2,14 +2,16 @@
 //!
 //! Normalmente no hay un gestor de ventanas remoto, así que el propio
 //! servidor hace de gestor: decora cada ventana de primer nivel (barra de
-//! título con su nombre, botones de maximizar y cerrar, y un marco fino del
-//! que se puede tirar para cambiar el tamaño), decide dónde aparece, a cuál
-//! va el teclado y cuál queda encima. La decoración no es una ventana X: se
+//! título con su nombre, botones de minimizar, maximizar y cerrar, y un marco
+//! fino del que se puede tirar para cambiar el tamaño), decide dónde aparece,
+//! a cuál va el teclado y cuál queda encima. Las ventanas minimizadas dejan
+//! una ficha con su título en una tira al pie de la pantalla: un clic en
+//! ella las devuelve. La decoración no es una ventana X: se
 //! pinta al componer la pantalla, alrededor de la ventana del cliente, que
 //! sigue siendo hija directa de la raíz.
 //!
 //! Habla lo imprescindible de EWMH (`_NET_WM_STATE`, `_NET_WM_MOVERESIZE`,
-//! `_NET_ACTIVE_WINDOW`…) para que las aplicaciones GTK y Qt, incluidas las
+//! `_NET_ACTIVE_WINDOW`…) y de ICCCM (`WM_CHANGE_STATE`) para que las aplicaciones GTK y Qt, incluidas las
 //! que pintan su propia barra de título, puedan maximizarse, moverse y
 //! cambiar de tamaño.
 //!
@@ -18,12 +20,15 @@
 
 use std::sync::Arc;
 
+use super::cursor::edge_shape;
 use super::draw::{Clip, Gc, Image, Painter, Rect, blend_pixel};
 use super::proto::*;
+use super::rootless::RootlessRequest;
 use super::server::{
     A_ATOM, A_WM_HINTS, A_WM_NAME, A_WM_NORMAL_HINTS, Atoms, Focus, Property, ROOT, SERVER_WINDOW,
     Server, Target, Window,
 };
+use crate::desktop::CursorShape;
 
 /// Alto de la barra de título.
 pub const TITLE_H: i32 = 22;
@@ -31,6 +36,12 @@ pub const TITLE_H: i32 = 22;
 pub const FRAME: i32 = 3;
 /// Lado de los botones de la barra.
 const BUTTON_SIZE: i32 = 16;
+/// Alto de la tira de ventanas minimizadas, al pie de la pantalla.
+pub const STRIP_H: i32 = 24;
+/// Ancho máximo de cada ficha de la tira y separación entre ellas.
+const CHIP_W: i32 = 170;
+const CHIP_GAP: i32 = 4;
+const CHIP_COLOR: u32 = 0x4a5a6e;
 /// Zona de las esquinas que estira en las dos direcciones.
 const CORNER: i32 = 18;
 /// Bytes del título que se llegan a mirar.
@@ -54,6 +65,7 @@ const CLOSE_COLOR: u32 = 0xc94f4f;
 pub enum WmButton {
     Close,
     Maximize,
+    Minimize,
 }
 
 /// Arrastre en curso de una ventana por su decoración (o pedido por la
@@ -80,6 +92,11 @@ pub enum WmDrag {
         window: Xid,
         button: WmButton,
     },
+    /// Ficha de una ventana minimizada pulsada: la devuelve a la pantalla
+    /// si se suelta encima.
+    Chip {
+        window: Xid,
+    },
 }
 
 impl WmDrag {
@@ -87,7 +104,8 @@ impl WmDrag {
         match self {
             WmDrag::Move { window, .. }
             | WmDrag::Resize { window, .. }
-            | WmDrag::Button { window, .. } => *window,
+            | WmDrag::Button { window, .. }
+            | WmDrag::Chip { window } => *window,
         }
     }
 }
@@ -100,6 +118,9 @@ pub struct Ewmh {
     maximized_vert: Xid,
     maximized_horz: Xid,
     fullscreen: Xid,
+    hidden: Xid,
+    /// `WM_CHANGE_STATE` (ICCCM): así pide una aplicación que se la minimice.
+    change_state: Xid,
     active_window: Xid,
     close_window: Xid,
     wm_moveresize: Xid,
@@ -126,6 +147,8 @@ impl Ewmh {
             maximized_vert: a("_NET_WM_STATE_MAXIMIZED_VERT"),
             maximized_horz: a("_NET_WM_STATE_MAXIMIZED_HORZ"),
             fullscreen: a("_NET_WM_STATE_FULLSCREEN"),
+            hidden: a("_NET_WM_STATE_HIDDEN"),
+            change_state: a("WM_CHANGE_STATE"),
             active_window: a("_NET_ACTIVE_WINDOW"),
             close_window: a("_NET_CLOSE_WINDOW"),
             wm_moveresize: a("_NET_WM_MOVERESIZE"),
@@ -157,17 +180,49 @@ impl Ewmh {
     }
 }
 
+/// Ficha de una ventana minimizada, ya dibujada.
+pub struct StripChip {
+    window: Xid,
+    rect: Rect,
+    title: String,
+    image: Arc<Image>,
+}
+
 /// Átomos de los mensajes que las aplicaciones mandan al gestor.
 struct WmRequests {
     wm_state: Xid,
     maximized_horz: Xid,
     maximized_vert: Xid,
     fullscreen: Xid,
+    hidden: Xid,
+    change_state: Xid,
     active_window: Xid,
     close_window: Xid,
     request_frame_extents: Xid,
     wm_moveresize: Xid,
     moveresize_window: Xid,
+}
+
+/// Bordes `(izquierdo, derecho, superior, inferior)` de los que se tira al
+/// pulsar en ese punto de una decoración: los bordes (y la franja de arriba
+/// de la barra) estiran, y las esquinas, en las dos direcciones. `None` si
+/// el punto no cae en un borde.
+fn resize_edges(frame: Rect, outer: Rect, x: i32, y: i32) -> Option<(bool, bool, bool, bool)> {
+    let top = y < frame.y0 + FRAME;
+    let (left, right, bottom) = (x < outer.x0, x >= outer.x1, y >= outer.y1);
+    if !(top || left || right || bottom) {
+        return None;
+    }
+    let near_top = y < frame.y0 + CORNER;
+    let near_bottom = y >= frame.y1 - CORNER;
+    let near_left = x < frame.x0 + CORNER;
+    let near_right = x >= frame.x1 - CORNER;
+    Some((
+        left || ((top || bottom) && near_left),
+        right || ((top || bottom) && near_right),
+        top || ((left || right) && near_top),
+        bottom || ((left || right) && near_bottom),
+    ))
 }
 
 fn cardinals(name: Xid, kind: Xid, values: &[u32]) -> Property {
@@ -191,6 +246,7 @@ impl Server {
             e.maximized_vert,
             e.maximized_horz,
             e.fullscreen,
+            e.hidden,
             e.active_window,
             e.close_window,
             e.wm_moveresize,
@@ -240,11 +296,14 @@ impl Server {
             && w.id != SERVER_WINDOW
     }
 
-    /// La ventana lleva la decoración del gestor integrado.
+    /// La ventana lleva la decoración del gestor integrado. (Con las
+    /// ventanas sueltas el marco lo pone el sistema.)
     pub fn decorated(&self, w: &Window) -> bool {
-        if !self.managed(w) || w.fullscreen {
-            return false;
-        }
+        self.rootless.is_none() && self.managed(w) && !w.fullscreen && self.wants_decoration(w)
+    }
+
+    /// La aplicación quiere que su ventana lleve marco.
+    pub fn wants_decoration(&self, w: &Window) -> bool {
         // Las aplicaciones pueden pedir que no se las decore (Motif; lo usan
         // GTK y Qt cuando pintan su propia barra de título)…
         let hints = self.property_u32s(w.id, self.known.motif_wm_hints);
@@ -276,6 +335,7 @@ impl Server {
         let slot = match button {
             WmButton::Close => 1,
             WmButton::Maximize => 2,
+            WmButton::Minimize => 3,
         };
         Rect::new(
             frame.x1 - slot * (BUTTON_SIZE + 4),
@@ -300,7 +360,7 @@ impl Server {
     }
 
     /// Ventana para la que esta es un diálogo (`WM_TRANSIENT_FOR`).
-    fn transient_for(&self, id: Xid) -> Option<Xid> {
+    pub fn transient_for(&self, id: Xid) -> Option<Xid> {
         self.property_u32s(id, A_WM_TRANSIENT_FOR)
             .first()
             .copied()
@@ -316,9 +376,10 @@ impl Server {
         let whole = Rect::new(0, 0, width, TITLE_H);
         let close = Self::title_button(whole, WmButton::Close);
         let maximize = Self::title_button(whole, WmButton::Maximize);
+        let minimize = Self::title_button(whole, WmButton::Minimize);
         let mut gc = Gc::new(24);
         gc.foreground = TITLE_TEXT;
-        gc.clip = Clip::Rects(vec![Rect::new(6, 0, maximize.x0 - 12, TITLE_H)]);
+        gc.clip = Clip::Rects(vec![Rect::new(6, 0, minimize.x0 - 12, TITLE_H)]);
         let font = &self.title_font.core;
         let codes: Vec<u32> = self
             .window_title(w.id)
@@ -374,12 +435,193 @@ impl Server {
             p.rect_outline(&gc, maximize.x0 + 4, maximize.y0 + 4, 8, 8);
             p.rect(Rect::new(maximize.x0 + 4, maximize.y0 + 4, 9, 2));
         }
+        // Botón de minimizar: una raya abajo.
+        img.fill(minimize, blend_pixel(color, 0xffffff, 40));
+        img.fill(
+            Rect::new(minimize.x0 + 4, minimize.y0 + 10, 9, 2),
+            TITLE_TEXT,
+        );
         img
+    }
+
+    // --- Ventanas minimizadas -------------------------------------------------
+
+    /// Hay tira de ventanas minimizadas: se le reserva el pie de la pantalla.
+    fn strip_reserved(&self) -> bool {
+        self.wm_client.is_none() && !self.minimized.is_empty()
+    }
+
+    /// Alto de la pantalla que queda para las ventanas (sin la tira).
+    fn work_height(&self) -> i32 {
+        let strip = if self.strip_reserved() { STRIP_H } else { 0 };
+        (self.height as i32 - strip).max(TITLE_H + 8)
+    }
+
+    /// La tira se ve: hay ventanas minimizadas y la que tiene el foco no
+    /// está a pantalla completa.
+    fn strip_shown(&self) -> bool {
+        let fullscreen = match self.focus {
+            Focus::Window(f) => self
+                .toplevel_of(f)
+                .and_then(|top| self.windows.get(&top))
+                .is_some_and(|w| w.fullscreen && w.mapped),
+            _ => false,
+        };
+        self.strip_reserved() && !fullscreen
+    }
+
+    /// Fichas de la tira: ventana y zona de pantalla de cada una.
+    fn strip_chips(&self) -> Vec<(Xid, Rect)> {
+        if !self.strip_shown() {
+            return vec![];
+        }
+        let n = self.minimized.len() as i32;
+        let width = ((self.width as i32 - CHIP_GAP) / n - CHIP_GAP).clamp(28, CHIP_W);
+        let y = self.height as i32 - STRIP_H + 2;
+        self.minimized
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let x = CHIP_GAP + i as i32 * (width + CHIP_GAP);
+                (*id, Rect::new(x, y, width, STRIP_H - 4))
+            })
+            .collect()
+    }
+
+    /// Ventana minimizada cuya ficha está en ese punto de la pantalla.
+    fn strip_hit(&self, x: i32, y: i32) -> Option<Xid> {
+        if self.minimized.is_empty() || y < self.height as i32 - STRIP_H {
+            return None;
+        }
+        self.strip_chips()
+            .into_iter()
+            .find(|(_, r)| r.contains(x, y))
+            .map(|(id, _)| id)
+    }
+
+    /// Anota el pie de la pantalla para recomponerlo.
+    fn damage_strip(&mut self) {
+        let (w, h) = (self.width as i32, self.height as i32);
+        self.damage_screen(Rect::new(0, h - STRIP_H, w, STRIP_H));
+    }
+
+    fn render_chip(&self, id: Xid, width: i32) -> Image {
+        let height = STRIP_H - 4;
+        let mut img = Image::new(width.max(1) as u32, height as u32, 24);
+        img.fill(img.bounds(), CHIP_COLOR);
+        img.fill(
+            Rect::new(0, 0, width, 1),
+            blend_pixel(CHIP_COLOR, 0xffffff, 70),
+        );
+        // Un recuadro pequeño, como el icono de una ventana, y el título.
+        let mut gc = Gc::new(24);
+        gc.foreground = TITLE_TEXT;
+        let mut p = Painter::new(&mut img, &gc);
+        p.rect_outline(&gc, 6, 6, 9, 8);
+        p.rect(Rect::new(6, 6, 10, 2));
+        let mut gc = Gc::new(24);
+        gc.foreground = TITLE_TEXT;
+        gc.clip = Clip::Rects(vec![Rect::new(21, 0, width - 26, height)]);
+        let font = &self.title_font.core;
+        let codes: Vec<u32> = self
+            .window_title(id)
+            .chars()
+            .map(|c| {
+                if font.info(c as u32).exists() {
+                    c as u32
+                } else {
+                    '?' as u32
+                }
+            })
+            .collect();
+        let baseline = (height + font.ascent as i32 - font.descent as i32) / 2;
+        Painter::new(&mut img, &gc).text(font, 21, baseline, &codes);
+        img
+    }
+
+    /// Dibuja las fichas de la tira que falten o hayan cambiado. Se llama
+    /// antes de componer.
+    fn prepare_strip(&mut self) {
+        let chips = self.strip_chips();
+        let fresh = chips.len() == self.strip.len()
+            && chips.iter().zip(&self.strip).all(|((id, rect), chip)| {
+                (chip.window, chip.rect) == (*id, *rect) && chip.title == self.window_title(*id)
+            });
+        if fresh {
+            return;
+        }
+        self.strip = chips
+            .into_iter()
+            .map(|(id, rect)| StripChip {
+                window: id,
+                rect,
+                title: self.window_title(id),
+                image: Arc::new(self.render_chip(id, rect.width())),
+            })
+            .collect();
+    }
+
+    /// Pinta la tira de ventanas minimizadas, por encima de todo.
+    pub fn paint_strip(&self, target: &mut Target) {
+        if self.strip.is_empty() || !self.strip_shown() {
+            return;
+        }
+        for chip in &self.strip {
+            target.blit(&chip.image, chip.rect.x0, chip.rect.y0, chip.rect);
+        }
+    }
+
+    /// Minimiza una ventana: deja de verse (para la aplicación, «icónica»)
+    /// y queda su ficha en la tira.
+    pub fn wm_minimize(&mut self, id: Xid) {
+        let Some(w) = self.windows.get(&id) else {
+            return;
+        };
+        if !w.mapped || !self.managed(w) || self.minimized.contains(&id) {
+            return;
+        }
+        // Con las ventanas sueltas la minimiza el sistema.
+        if self.rootless.is_some() {
+            self.rootless_request(RootlessRequest::Minimize(id));
+            return;
+        }
+        let first = self.minimized.is_empty();
+        self.minimized.push(id);
+        self.unmap_window(id, false);
+        if first {
+            // La tira ocupa sitio: las maximizadas se encogen.
+            self.wm_keep_on_screen();
+        }
+        self.damage_strip();
+    }
+
+    /// Devuelve a la pantalla una ventana minimizada, encima y con el foco.
+    pub fn wm_unminimize(&mut self, id: Xid) {
+        if !self.minimized.contains(&id) {
+            return;
+        }
+        // (Al mostrarse deja de constar como minimizada.)
+        self.map_window(0, id);
+    }
+
+    /// Una ventana deja de estar minimizada (se va a mostrar, la retiran o
+    /// se destruye). Devuelve si lo estaba.
+    pub fn wm_forget_minimized(&mut self, id: Xid) -> bool {
+        let Some(pos) = self.minimized.iter().position(|m| *m == id) else {
+            return false;
+        };
+        self.damage_strip();
+        self.minimized.remove(pos);
+        if self.minimized.is_empty() {
+            self.wm_keep_on_screen();
+        }
+        true
     }
 
     /// Dibuja las barras de título que falten o hayan cambiado. Se llama
     /// antes de componer.
     pub fn prepare_decorations(&mut self) {
+        self.prepare_strip();
         let Some(root) = self.windows.get(&ROOT) else {
             return;
         };
@@ -436,6 +678,9 @@ impl Server {
     /// puntero está, a efectos de los clientes, en la raíz.
     pub fn pointer_target(&self) -> Xid {
         let (x, y) = self.pointer;
+        if self.strip_hit(x, y).is_some() {
+            return ROOT;
+        }
         if self.wm_client.is_none()
             && let Some(root) = self.windows.get(&ROOT)
         {
@@ -475,6 +720,9 @@ impl Server {
         if w.fullscreen {
             atoms.push(e.fullscreen);
         }
+        if self.minimized.contains(&id) {
+            atoms.push(e.hidden);
+        }
         let prop = cardinals(e.wm_state, A_ATOM, &atoms);
         if self.windows.get(&id).and_then(|w| w.prop(prop.name)) != Some(&prop) {
             self.set_property(id, prop);
@@ -503,9 +751,9 @@ impl Server {
                     .iter()
                     .copied()
                     .filter(|c| {
-                        self.windows
-                            .get(c)
-                            .is_some_and(|w| w.mapped && self.managed(w))
+                        self.windows.get(c).is_some_and(|w| {
+                            (w.mapped || self.minimized.contains(c)) && self.managed(w)
+                        })
                     })
                     .collect()
             })
@@ -521,10 +769,26 @@ impl Server {
     /// Prepara una ventana de primer nivel que se va a mostrar: posición
     /// inicial, tamaño que quepa en pantalla y estado inicial.
     pub fn wm_before_map(&mut self, id: Xid) {
+        self.wm_forget_minimized(id);
         let Some(w) = self.windows.get(&id) else {
             return;
         };
         if w.placed || !self.managed(w) {
+            return;
+        }
+        // Con las ventanas sueltas la coloca el sistema: solo se apunta el
+        // estado inicial que pida (maximizada, a pantalla completa).
+        if self.rootless.is_some() {
+            if let Some(w) = self.windows.get_mut(&id) {
+                w.placed = true;
+            }
+            let state = self.property_u32s(id, self.ewmh.wm_state);
+            let wants = |atom: Xid| state.contains(&atom);
+            let maximized = wants(self.ewmh.maximized_vert) && wants(self.ewmh.maximized_horz);
+            let full = wants(self.ewmh.fullscreen);
+            if maximized || full {
+                self.wm_set_state(id, maximized, maximized, full);
+            }
             return;
         }
         let decorated = self.decorated(w);
@@ -533,7 +797,7 @@ impl Server {
         let original = (ww, wh);
         let hints = self.property_u32s(id, A_WM_NORMAL_HINTS);
         let flags = hints.first().copied().unwrap_or(0);
-        let (sw, sh) = (self.width as i32, self.height as i32);
+        let (sw, sh) = (self.width as i32, self.work_height());
         let (side, top) = if decorated { (FRAME, TITLE_H) } else { (0, 0) };
         // Una ventana más grande que la pantalla (que aquí es una pestaña)
         // se encoge hasta caber, sin bajar de su tamaño mínimo.
@@ -605,6 +869,14 @@ impl Server {
         self.net_publish_extents(id);
         self.net_publish_state(id);
         self.net_publish_clients();
+        // (Mientras estuvo minimizada pudo cambiar el sitio disponible.)
+        if self
+            .windows
+            .get(&id)
+            .is_some_and(|w| w.max_h || w.max_v || w.fullscreen)
+        {
+            self.wm_apply_state(id);
+        }
         self.wm_activate(id);
     }
 
@@ -615,7 +887,24 @@ impl Server {
             .get(&id)
             .is_some_and(|w| w.parent == ROOT && !w.override_redirect);
         if managed && self.wm_client.is_none() {
+            if self.minimized.contains(&id) {
+                // Minimizada: «icónica» para ICCCM y «oculta» para EWMH.
+                let wm_state = self.known.wm_state;
+                self.set_property(id, cardinals(wm_state, wm_state, &[3, 0]));
+                self.net_publish_state(id);
+            } else {
+                self.delete_property(id, self.known.wm_state);
+            }
+            self.net_publish_clients();
+        }
+    }
+
+    /// Retiran (`UnmapWindow`) o destruyen una ventana que estaba
+    /// minimizada: deja de estar gestionada.
+    pub fn wm_withdraw_minimized(&mut self, id: Xid) {
+        if self.wm_forget_minimized(id) {
             self.delete_property(id, self.known.wm_state);
+            self.net_publish_state(id);
             self.net_publish_clients();
         }
     }
@@ -723,14 +1012,23 @@ impl Server {
     /// y las que hayan quedado fuera vuelven a la vista.
     pub fn wm_keep_on_screen(&mut self) {
         let (sw, sh) = (self.width, self.height);
+        let work = self.work_height();
         let geometry = cardinals(self.ewmh.desktop_geometry, A_CARDINAL, &[sw, sh]);
-        let workarea = cardinals(self.ewmh.workarea, A_CARDINAL, &[0, 0, sw, sh]);
-        self.set_property(ROOT, geometry);
-        self.set_property(ROOT, workarea);
+        let workarea = cardinals(self.ewmh.workarea, A_CARDINAL, &[0, 0, sw, work as u32]);
+        for prop in [geometry, workarea] {
+            if self.windows.get(&ROOT).and_then(|w| w.prop(prop.name)) != Some(&prop) {
+                self.set_property(ROOT, prop);
+            }
+        }
+        // (Con las ventanas sueltas, dónde quedan es cosa del sistema.)
+        if self.rootless.is_some() {
+            return;
+        }
+        self.damage_strip();
         let Some(root) = self.windows.get(&ROOT) else {
             return;
         };
-        let (sw, sh) = (sw as i32, sh as i32);
+        let (sw, sh) = (sw as i32, work);
         for id in root.children.clone() {
             let Some(w) = self.windows.get(&id) else {
                 continue;
@@ -786,6 +1084,11 @@ impl Server {
 
     /// Coloca una ventana según su estado (o la devuelve a donde estaba).
     fn wm_apply_state(&mut self, id: Xid) {
+        // (Con las ventanas sueltas lo hace el sistema: la interfaz ve el
+        // estado pedido y se lo pide.)
+        if self.rootless.is_some() {
+            return;
+        }
         let Some(w) = self.windows.get(&id) else {
             return;
         };
@@ -795,6 +1098,8 @@ impl Server {
         if w.fullscreen {
             (x, y, ww, wh) = (-bw, -bw, sw as u32, sh as u32);
         } else {
+            // (Maximizada no tapa la tira de ventanas minimizadas.)
+            let sh = self.work_height();
             let (side, top) = if self.decorated(w) {
                 (FRAME, TITLE_H)
             } else {
@@ -849,11 +1154,14 @@ impl Server {
             );
         }
         let (max_h, max_v, fullscreen, mapped) = (w.max_h, w.max_v, w.fullscreen, w.mapped);
+        let minimized = self.minimized.contains(&window);
         let e = WmRequests {
             wm_state: self.ewmh.wm_state,
             maximized_horz: self.ewmh.maximized_horz,
             maximized_vert: self.ewmh.maximized_vert,
             fullscreen: self.ewmh.fullscreen,
+            hidden: self.ewmh.hidden,
+            change_state: self.ewmh.change_state,
             active_window: self.ewmh.active_window,
             close_window: self.ewmh.close_window,
             request_frame_extents: self.ewmh.request_frame_extents,
@@ -875,12 +1183,25 @@ impl Server {
             let h = apply(max_h, e.maximized_horz);
             let v = apply(max_v, e.maximized_vert);
             let full = apply(fullscreen, e.fullscreen);
-            if mapped {
+            let hide = apply(minimized, e.hidden);
+            if hide && !minimized {
+                self.wm_minimize(window);
+            } else if !hide && minimized {
+                self.wm_unminimize(window);
+            } else if mapped {
                 self.wm_set_state(window, h, v, full);
             }
+        } else if kind == e.change_state {
+            // ICCCM: 3 es «icónica» (lo que manda `XIconifyWindow`).
+            if l(0) == 3 {
+                self.wm_minimize(window);
+            }
         } else if kind == e.active_window {
-            if mapped {
+            if minimized {
+                self.wm_unminimize(window);
+            } else if mapped {
                 self.wm_activate(window);
+                self.rootless_request(RootlessRequest::Activate(window));
             }
         } else if kind == e.close_window {
             self.wm_close(window);
@@ -921,6 +1242,25 @@ impl Server {
         if self.buttons == 0 || w.max_h || w.max_v || w.fullscreen {
             return;
         }
+        // Con las ventanas sueltas quien la mueve o la estira es el sistema.
+        if self.rootless.is_some() {
+            let request = match direction {
+                0..=7 => RootlessRequest::Resize(
+                    id,
+                    [
+                        matches!(direction, 0 | 6 | 7),
+                        matches!(direction, 2..=4),
+                        matches!(direction, 0..=2),
+                        matches!(direction, 4..=6),
+                    ],
+                ),
+                8 => RootlessRequest::Move(id),
+                _ => return,
+            };
+            self.end_grab();
+            self.rootless_request(request);
+            return;
+        }
         let (x, y) = self.pointer;
         let geometry = (w.x, w.y, w.w as i32, w.h as i32);
         let drag = match direction {
@@ -956,6 +1296,13 @@ impl Server {
             return false;
         }
         let (x, y) = self.pointer;
+        // La tira de minimizadas va por encima de todo.
+        if let Some(window) = self.strip_hit(x, y) {
+            if button == 1 {
+                self.wm_drag = Some(WmDrag::Chip { window });
+            }
+            return true;
+        }
         let Some(root) = self.windows.get(&ROOT) else {
             return false;
         };
@@ -987,27 +1334,20 @@ impl Server {
             if button != 1 {
                 return true;
             }
-            // Los bordes (y la franja de arriba de la barra) estiran; las
-            // esquinas, en las dos direcciones.
-            let top = y < frame.y0 + FRAME;
-            let (left, right, bottom) = (x < outer.x0, x >= outer.x1, y >= outer.y1);
-            if (top || left || right || bottom) && !maximized {
-                let near_top = y < frame.y0 + CORNER;
-                let near_bottom = y >= frame.y1 - CORNER;
-                let near_left = x < frame.x0 + CORNER;
-                let near_right = x >= frame.x1 - CORNER;
+            if !maximized && let Some((left, right, top, bottom)) = resize_edges(frame, outer, x, y)
+            {
                 self.wm_drag = Some(WmDrag::Resize {
                     window: id,
-                    left: left || ((top || bottom) && near_left),
-                    right: right || ((top || bottom) && near_right),
-                    top: top || ((left || right) && near_top),
-                    bottom: bottom || ((left || right) && near_bottom),
+                    left,
+                    right,
+                    top,
+                    bottom,
                     start: (x, y),
                     geometry,
                 });
                 return true;
             }
-            for which in [WmButton::Close, WmButton::Maximize] {
+            for which in [WmButton::Close, WmButton::Maximize, WmButton::Minimize] {
                 if Self::title_button(frame, which).contains(x, y) {
                     self.wm_drag = Some(WmDrag::Button {
                         window: id,
@@ -1045,6 +1385,42 @@ impl Server {
         false
     }
 
+    /// Forma del puntero sobre una decoración: flechas de estirar en los
+    /// bordes y la flecha normal en la barra. `None` si no está sobre
+    /// ninguna (manda entonces el cursor de la ventana de debajo).
+    pub fn wm_hover_shape(&self) -> Option<CursorShape> {
+        if self.wm_client.is_some() {
+            return None;
+        }
+        let (x, y) = self.pointer;
+        if self.strip_hit(x, y).is_some() {
+            return Some(CursorShape::Hand);
+        }
+        let root = self.windows.get(&ROOT)?;
+        for id in root.children.iter().rev() {
+            let Some(c) = self.windows.get(id) else {
+                continue;
+            };
+            if !c.mapped {
+                continue;
+            }
+            let outer = c.outer();
+            if outer.contains(x, y) {
+                return None;
+            }
+            let frame = self.frame_rect(c);
+            if !frame.contains(x, y) {
+                continue;
+            }
+            let edges = resize_edges(frame, outer, x, y).filter(|_| !(c.max_h || c.max_v));
+            return Some(match edges {
+                Some((left, right, top, bottom)) => edge_shape(left, right, top, bottom),
+                None => CursorShape::Default,
+            });
+        }
+        None
+    }
+
     /// Movimiento del puntero durante un arrastre del gestor.
     pub fn wm_drag_motion(&mut self) -> bool {
         let Some(drag) = self.wm_drag else {
@@ -1059,7 +1435,7 @@ impl Server {
         let (ww, wh, bw) = (w.w, w.h, w.bw);
         let top = if self.decorated(w) { TITLE_H } else { 0 };
         match drag {
-            WmDrag::Button { .. } => {}
+            WmDrag::Button { .. } | WmDrag::Chip { .. } => {}
             WmDrag::Move { window, dx, dy } => {
                 // La barra de título no puede salirse de la pantalla.
                 let nx = (x - dx).clamp(48 - ww as i32, sw - 48);
@@ -1102,6 +1478,30 @@ impl Server {
             }
         }
         true
+    }
+
+    /// La aplicación cambió sus límites de tamaño (`WM_NORMAL_HINTS`) con la
+    /// ventana ya en pantalla: si ahora no los cumple, se ajusta. GTK 4
+    /// declara su tamaño mínimo después de mostrarse y, mientras la ventana
+    /// sea más pequeña, no deja de pedirlo.
+    pub fn wm_size_hints_changed(&mut self, id: Xid) {
+        let Some(w) = self.windows.get(&id) else {
+            return;
+        };
+        if !w.mapped || !self.managed(w) || w.max_h || w.max_v || w.fullscreen {
+            return;
+        }
+        if self.rootless.is_some() {
+            return;
+        }
+        let (x, y, bw) = (w.x, w.y, w.bw);
+        let (old_w, old_h) = (w.w as i32, w.h as i32);
+        let (new_w, new_h) = self.constrain_size(id, old_w, old_h);
+        if (new_w, new_h) != (old_w, old_h) {
+            self.move_resize(id, x, y, new_w as u32, new_h as u32, bw);
+            self.notify_configure(id);
+            self.refresh_pointer_window();
+        }
     }
 
     /// Ajusta un tamaño a lo que la aplicación declara en `WM_NORMAL_HINTS`
@@ -1152,8 +1552,14 @@ impl Server {
             match button {
                 WmButton::Close if over => self.wm_close(window),
                 WmButton::Maximize if over => self.wm_toggle_maximize(window),
+                WmButton::Minimize if over => self.wm_minimize(window),
                 _ => {}
             }
+        }
+        if let WmDrag::Chip { window } = drag
+            && self.strip_hit(self.pointer.0, self.pointer.1) == Some(window)
+        {
+            self.wm_unminimize(window);
         }
         self.refresh_pointer_window();
         true

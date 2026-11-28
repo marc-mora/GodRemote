@@ -1264,6 +1264,10 @@ pub struct XServerSettings {
     /// Aceptar también programas de este equipo (`DISPLAY=127.0.0.1:N`).
     #[serde(rename = "local")]
     pub listen_local: bool,
+    /// Mostrar cada aplicación en su propia ventana del sistema, y no todas
+    /// dentro de la pestaña «Servidor X».
+    #[serde(rename = "ventanas")]
+    pub windows: bool,
 }
 
 // (Fuera de Windows todo queda en `false`, pero no es derivable.)
@@ -1275,6 +1279,7 @@ impl Default for XServerSettings {
             // del sistema entiende más extensiones.
             embedded: cfg!(windows),
             listen_local: false,
+            windows: false,
         }
     }
 }
@@ -1623,6 +1628,7 @@ mod tests {
             x_server: XServerSettings {
                 embedded: !cfg!(windows),
                 listen_local: true,
+                windows: true,
             },
             activity_notice: false,
             highlight: crate::highlight::Highlight {

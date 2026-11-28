@@ -170,6 +170,11 @@ impl Keymap {
         }
     }
 
+    /// La tecla con ese código está pulsada.
+    pub fn is_down(&self, code: u8) -> bool {
+        self.down[code as usize / 8] & (1 << (code % 8)) != 0
+    }
+
     /// Anota una pulsación o suelta. Devuelve el estado de modificadores
     /// **anterior** al cambio, que es el que lleva el evento.
     pub fn press(&mut self, code: u8, pressed: bool) -> u16 {

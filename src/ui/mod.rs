@@ -23,6 +23,7 @@ pub mod triggers_view;
 pub mod tunnels_view;
 pub mod util;
 pub mod vault_view;
+pub mod xwindows_view;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -326,6 +327,8 @@ pub struct App {
     quit_confirmed: bool,
     /// Servidor X integrado (arranca con la primera aplicación gráfica).
     xhost: Arc<crate::xhost::XHost>,
+    /// Ventanas nativas de sus aplicaciones, si van sueltas.
+    x_windows: xwindows_view::XWindowsView,
     /// Tamaño que pide la pestaña del servidor X y desde cuándo: se aplica
     /// cuando deja de cambiar.
     x_resize: Option<((u32, u32), Instant)>,
@@ -538,6 +541,7 @@ impl App {
             pending_quit: None,
             quit_confirmed: false,
             xhost,
+            x_windows: Default::default(),
             x_resize: None,
         }
     }
@@ -674,6 +678,10 @@ impl App {
     /// Atiende al servidor X integrado: abre su pestaña cuando arranca, la
     /// quita si se para y ajusta su pantalla al espacio de la pestaña.
     fn sync_x_server(&mut self, ctx: &egui::Context) {
+        // (Cada aplicación en su ventana, si se quiere y aquí se puede.)
+        self.xhost.set_windows(
+            self.settings.x_server.windows && xwindows_view::XWindowsView::available(ctx),
+        );
         self.xhost.set_initial_size(
             self.content_size.x.round().max(0.0) as u32,
             (self.content_size.y - 30.0).round().max(0.0) as u32,
@@ -696,6 +704,19 @@ impl App {
             }
             return;
         };
+        // Con las ventanas sueltas, cada una va en su ventana del sistema
+        // (esté o no a la vista la pestaña) y la pantalla X es el escritorio.
+        if server.rootless().is_some() {
+            if let Some(Tab {
+                kind: TabKind::Desktop(view),
+                ..
+            }) = self.tabs.iter_mut().find(|t| t.x_server)
+            {
+                self.x_windows.show(ctx, &server, view);
+            }
+            self.x_resize = None;
+            return;
+        }
         // La pantalla sigue al tamaño de la pestaña cuando deja de cambiar.
         let Some(Tab {
             kind: TabKind::Desktop(view),
@@ -3541,7 +3562,11 @@ impl App {
                         );
                     }
                 });
-                egui::Frame::NONE.show(ui, |ui| view.ui(ui));
+                if self.xhost.running().is_some_and(|s| s.rootless().is_some()) {
+                    xwindows_view::placeholder(ui, self.x_windows.count());
+                } else {
+                    egui::Frame::NONE.show(ui, |ui| view.ui(ui));
+                }
             }
             TabKind::Desktop(view) => {
                 ui.horizontal(|ui| {

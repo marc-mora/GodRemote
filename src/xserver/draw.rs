@@ -148,6 +148,33 @@ impl Budget {
             })
             .is_ok()
     }
+
+    /// Aparta `pixels` para algo que no es un [`Image`] (la imagen de un
+    /// cursor, por ejemplo). `None` si no caben.
+    pub fn reserve(self: &Arc<Self>, pixels: u64) -> Option<Reservation> {
+        self.try_reserve(pixels).then(|| Reservation {
+            budget: self.clone(),
+            pixels,
+        })
+    }
+}
+
+/// Píxeles apartados en un [`Budget`]: se devuelven solos al soltarlos.
+#[derive(Debug)]
+pub struct Reservation {
+    budget: Arc<Budget>,
+    pixels: u64,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        let _ = self
+            .budget
+            .used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                Some(used.saturating_sub(self.pixels))
+            });
+    }
 }
 
 /// Búfer de píxeles de un *drawable*. Cada píxel ocupa un `u32`: 0xRRGGBB

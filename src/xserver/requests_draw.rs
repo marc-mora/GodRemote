@@ -391,43 +391,18 @@ impl Server {
                 self.send_reply(c, w);
                 Ok(())
             }
-            93 => {
-                let (id, source, mask) = (rd.u32()?, rd.u32()?, rd.u32()?);
-                self.check_new_id(c, id)?;
-                for pixmap in [source, mask] {
-                    if pixmap != 0 && !self.pixmaps.contains_key(&pixmap) {
-                        return Err(XError::new(BAD_PIXMAP, pixmap));
-                    }
-                }
-                self.cursors.insert(id, c);
-                Ok(())
-            }
-            94 => {
-                let (id, source, mask) = (rd.u32()?, rd.u32()?, rd.u32()?);
-                self.check_new_id(c, id)?;
-                for font in [source, mask] {
-                    if font != 0 && !self.fonts.contains_key(&font) {
-                        return Err(XError::new(BAD_FONT, font));
-                    }
-                }
-                self.cursors.insert(id, c);
-                Ok(())
-            }
+            93 => self.create_cursor(c, rd),
+            94 => self.create_glyph_cursor(c, rd),
             95 => {
+                // (Las ventanas que lo estén usando lo conservan.)
                 let id = rd.u32()?;
                 self.cursors
                     .remove(&id)
                     .map(|_| ())
                     .ok_or(XError::new(BAD_CURSOR, id))
             }
-            96 => {
-                let id = rd.u32()?;
-                if self.cursors.contains_key(&id) {
-                    Ok(())
-                } else {
-                    Err(XError::new(BAD_CURSOR, id))
-                }
-            }
+            // RecolorCursor: los colores se quedan como estaban.
+            96 => self.cursor(rd.u32()?).map(|_| ()),
             97 => {
                 self.drawable_bounds(rd.u32()?)?;
                 let (w, h) = (rd.u16()?, rd.u16()?);

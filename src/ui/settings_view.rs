@@ -327,18 +327,25 @@ fn local_shell_section(ui: &mut egui::Ui, settings: &mut Settings) {
 fn x_server_section(ui: &mut egui::Ui, settings: &mut Settings, request: &mut SettingsRequest) {
     ui.strong("Aplicaciones gráficas (X11)");
     let x = &mut settings.x_server;
-    ui.radio_value(
-        &mut x.embedded,
-        true,
-        "Servidor X integrado de GodRemote, en una pestaña",
-    )
-    .on_hover_text("No hace falta instalar nada: VcXsrv, Xming ni XQuartz");
+    ui.radio_value(&mut x.embedded, true, "Servidor X integrado de GodRemote")
+        .on_hover_text("No hace falta instalar nada: VcXsrv, Xming ni XQuartz");
     ui.radio_value(
         &mut x.embedded,
         false,
         "Servidor X del sistema (el escritorio de Linux, VcXsrv, Xming, XQuartz…)",
     );
     ui.add_enabled_ui(x.embedded, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Aplicaciones:");
+            ui.radio_value(&mut x.windows, false, "en una pestaña");
+            let loose = "cada una en su ventana (experimental)";
+            ui.radio_value(&mut x.windows, true, loose).on_hover_text(
+                "Cada ventana de las aplicaciones remotas sale como una ventana más del \
+                 sistema, con su marco. Solo se ha probado en Linux con X11 y no está \
+                 disponible en Wayland (allí siguen en la pestaña); el cambio vale para la \
+                 próxima vez que arranque el servidor X (al cerrar su pestaña se para)",
+            );
+        });
         ui.horizontal(|ui| {
             ui.checkbox(
                 &mut x.listen_local,
@@ -360,11 +367,10 @@ fn x_server_section(ui: &mut egui::Ui, settings: &mut Settings, request: &mut Se
     });
     ui.weak(
         "El servidor integrado se usa con las sesiones SSH que tengan marcado «Reenviar \
-         aplicaciones gráficas (X11)» y arranca con la primera aplicación. Entiende el \
-         protocolo X11 básico (xterm, xclock, editores y herramientas clásicas); las \
-         aplicaciones que exigen extensiones modernas (RENDER, XKB, GLX: GTK 3, Qt 5, \
-         navegadores) necesitan el servidor X del sistema. El cambio afecta a las \
-         conexiones nuevas.",
+         aplicaciones gráficas (X11)» y arranca con la primera aplicación. Sirve para las \
+         aplicaciones clásicas y para las de GTK, Qt, Tk, Motif y Java; lo que necesite \
+         OpenGL (GLX) u otras extensiones que no tiene necesita el servidor X del sistema. \
+         El cambio afecta a las conexiones nuevas.",
     );
 }
 

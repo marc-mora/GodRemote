@@ -7,16 +7,15 @@
 //!
 //! Implementa el protocolo básico (*core*) de X11 y las extensiones
 //! BIG-REQUESTS, RENDER (lo que usan GTK, Qt, Xft y Java para pintar con
-//! alfa), SHAPE (ventanas no rectangulares) y un RANDR mínimo (para avisar
-//! de los cambios de tamaño de la pantalla). No hay XKB, XFIXES, XInput,
-//! MIT-SHM ni GLX: GTK 3, Qt 5, Tk, Motif y Java se apañan sin ellas; GTK 4,
-//! no. (Hay un XKEYBOARD mínimo, desactivado por defecto, solo para poder
-//! usar `xdotool`: véase [`XServer::set_xkb_compat`].)
+//! alfa), SHAPE (ventanas no rectangulares), un RANDR mínimo (para avisar
+//! de los cambios de tamaño de la pantalla), XKEYBOARD (el mapa y el estado
+//! del teclado) y XInput 2.0 (teclado y ratón como dispositivos): las dos
+//! últimas son las que exige GTK 4. No hay XFIXES, MIT-SHM, XTEST ni GLX.
 //!
 //! Para depurar, con la variable de entorno `GODREMOTE_X11_TRACE` se anotan
 //! en la salida de errores las peticiones, los eventos y los errores, y con
-//! `GODREMOTE_X11_DISABLE=RENDER,SHAPE,RANDR` se dejan de anunciar esas
-//! extensiones.
+//! `GODREMOTE_X11_DISABLE=RENDER,SHAPE,RANDR,XKEYBOARD,XInputExtension` se
+//! dejan de anunciar esas extensiones.
 //!
 //! Organización:
 //!
@@ -46,6 +45,7 @@
 //! mientras tenga cogido el candado de la imagen.
 
 mod colors;
+mod cursor;
 mod draw;
 mod font;
 mod input;
@@ -55,11 +55,13 @@ mod randr;
 mod render;
 mod requests;
 mod requests_draw;
+mod rootless;
 mod server;
 mod shape;
 #[cfg(test)]
 mod tests;
 mod wm;
+mod xinput;
 mod xkb;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -77,6 +79,7 @@ use crate::desktop::{
 use crate::ssh::Waker;
 use keymap::{MAX_KEYCODE, MIN_KEYCODE};
 use proto::Writer;
+pub use rootless::{RootlessInput, RootlessRequest, RootlessShared, RootlessView, RootlessWindow};
 use server::{
     ClientId, ClientLink, DEFAULT_COLORMAP, OUTPUT_SOFT_LIMIT, RESOURCE_MASK, ROOT, ROOT_VISUAL,
     Server,
@@ -98,10 +101,14 @@ pub(crate) fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Tamaño inicial de la pantalla raíz.
+/// Tamaño inicial de la pantalla raíz y modo de trabajo.
 pub struct XServerConfig {
     pub width: u32,
     pub height: u32,
+    /// Ventanas sueltas: cada ventana de primer nivel se entrega por
+    /// separado ([`XServer::rootless`]) en lugar de componerlas todas en
+    /// la pantalla.
+    pub rootless: bool,
 }
 
 struct Inner {
@@ -114,6 +121,10 @@ struct Inner {
     stop: watch::Sender<bool>,
     /// Búfer de trabajo de la composición.
     scratch: Mutex<Vec<u32>>,
+    /// Modo de ventanas sueltas: lo que se publica para la interfaz y por
+    /// dónde llega lo que ella cuenta.
+    rootless: Option<RootlessShared>,
+    rootless_tx: mpsc::UnboundedSender<RootlessInput>,
     /// Pánicos contenidos hasta ahora (para las pruebas).
     #[cfg(test)]
     panics: std::sync::atomic::AtomicUsize,
@@ -149,18 +160,27 @@ impl XServer {
             config.height.clamp(64, 16_384),
         );
         let (input_tx, mut input_rx) = mpsc::unbounded_channel::<DesktopInput>();
+        let (rootless_tx, mut rootless_rx) = mpsc::unbounded_channel::<RootlessInput>();
         let (ev_tx, ev_rx) = std::sync::mpsc::channel();
         let frame = Framebuffer::shared(width, height);
         let (stop, _) = watch::channel(false);
+        let mut state = Server::new(width, height);
+        let rootless = config.rootless.then(|| {
+            let shared = RootlessShared::default();
+            state.rootless = Some(rootless::Rootless::new(shared.clone()));
+            shared
+        });
         let server = XServer {
             inner: Arc::new(Inner {
-                state: Mutex::new(Server::new(width, height)),
+                state: Mutex::new(state),
                 frame: frame.clone(),
                 waker,
                 rt: rt.clone(),
                 events: Mutex::new(ev_tx),
                 stop,
                 scratch: Mutex::new(vec![]),
+                rootless,
+                rootless_tx,
                 #[cfg(test)]
                 panics: Default::default(),
             }),
@@ -173,9 +193,11 @@ impl XServer {
         let mut stopped = server.inner.stop.subscribe();
         rt.spawn(async move {
             loop {
+                // (Con las ventanas sueltas todo llega por su propio canal.)
                 let first = tokio::select! {
                     _ = stopped.changed() => break,
-                    input = input_rx.recv() => input,
+                    input = input_rx.recv() => input.map(Incoming::Desktop),
+                    Some(input) = rootless_rx.recv() => Some(Incoming::Rootless(input)),
                 };
                 let Some(first) = first else {
                     break;
@@ -186,12 +208,18 @@ impl XServer {
                 task.guarded(|st| {
                     let mut next = Some(first);
                     while let Some(input) = next {
-                        if input == DesktopInput::Close {
-                            close = true;
-                            break;
+                        match input {
+                            Incoming::Desktop(DesktopInput::Close) => {
+                                close = true;
+                                break;
+                            }
+                            Incoming::Desktop(input) => apply_input(st, input),
+                            Incoming::Rootless(input) => st.rootless_input(input),
                         }
-                        apply_input(st, input);
-                        next = input_rx.try_recv().ok();
+                        next = match input_rx.try_recv() {
+                            Ok(input) => Some(Incoming::Desktop(input)),
+                            Err(_) => rootless_rx.try_recv().ok().map(Incoming::Rootless),
+                        };
                     }
                     task.finish(st);
                 });
@@ -223,6 +251,13 @@ impl XServer {
                 self.inner.panics.fetch_add(1, Ordering::Relaxed);
                 // La reparación tampoco puede tumbar a quien llama.
                 let _ = catch_unwind(AssertUnwindSafe(|| {
+                    // (Si el pánico fue al publicar las ventanas sueltas, su
+                    // estado estaba apartado y se ha perdido: se rehace.)
+                    if st.rootless.is_none()
+                        && let Some(shared) = &self.inner.rootless
+                    {
+                        st.rootless = Some(rootless::Rootless::new(shared.clone()));
+                    }
                     st.repair();
                     self.finish(&mut st);
                 }));
@@ -244,6 +279,16 @@ impl XServer {
     /// recompone las zonas de pantalla que cambiaron y avisa a la interfaz.
     fn finish(&self, st: &mut Server) {
         st.flush();
+        // Con las ventanas sueltas no se compone la pantalla: cada ventana
+        // de primer nivel va a su propia imagen.
+        if st.rootless.is_some() {
+            if st.resized || !st.damage.is_empty() || st.rootless_pending() {
+                st.rootless_publish(&mut lock(&self.inner.scratch));
+                (self.inner.waker)();
+            }
+            self.finish_events(st);
+            return;
+        }
         let resized = std::mem::take(&mut st.resized);
         if resized || !st.damage.is_empty() {
             st.prepare_decorations();
@@ -278,6 +323,17 @@ impl XServer {
             }
             drop(frame);
             (self.inner.waker)();
+        }
+        self.finish_events(st);
+    }
+
+    /// Avisos para la interfaz al cerrar un lote de trabajo.
+    fn finish_events(&self, st: &mut Server) {
+        // El puntero pasó a otra ventana, o la de debajo cambió de cursor.
+        let cursor = st.current_cursor();
+        if cursor != st.cursor_sent {
+            st.cursor_sent = cursor.clone();
+            st.desktop_events.push(DesktopEvent::Cursor(cursor));
         }
         for event in st.desktop_events.drain(..) {
             self.emit(event);
@@ -578,6 +634,19 @@ impl XServer {
         }
     }
 
+    /// En modo de ventanas sueltas, lo que el servidor publica: las
+    /// ventanas de primer nivel con su imagen y lo que piden. `None` en el
+    /// modo normal (todas en una pantalla).
+    pub fn rootless(&self) -> Option<RootlessShared> {
+        self.inner.rootless.clone()
+    }
+
+    /// Lo que la interfaz cuenta al servidor en modo de ventanas sueltas
+    /// (teclado, ratón, dónde queda cada ventana…). No bloquea.
+    pub fn rootless_send(&self, input: RootlessInput) {
+        let _ = self.inner.rootless_tx.send(input);
+    }
+
     /// Clientes X conectados ahora mismo.
     pub fn client_count(&self) -> usize {
         lock(&self.inner.state).clients.len()
@@ -599,17 +668,6 @@ impl XServer {
         lock(&self.inner.state).sync_primary = enabled;
     }
 
-    /// Ofrece a los clientes que se conecten a partir de ahora un XKEYBOARD
-    /// mínimo (`UseExtension`, `GetMap`, `GetState`). Solo hace falta para
-    /// `xdotool`, cuya librería se cae si el servidor no tiene XKB; las
-    /// aplicaciones Xlib funcionan igual con él. Está desactivado por
-    /// defecto porque **no es un XKB completo**: GTK, Qt y demás toolkits que
-    /// usan XKB a fondo darían por buena la extensión y se quedarían a medias,
-    /// mientras que sin ella pasan sin problemas al teclado básico.
-    pub fn set_xkb_compat(&self, enabled: bool) {
-        lock(&self.inner.state).xkb_compat = enabled;
-    }
-
     /// Para el servidor: desconecta a todos los clientes, deja de escuchar
     /// y emite [`DesktopEvent::Closed`].
     pub fn stop(&self) {
@@ -627,6 +685,12 @@ impl XServer {
         self.guarded(|st| st.clients.clear());
         self.emit(DesktopEvent::Closed(None));
     }
+}
+
+/// Lo que llega de la interfaz, por uno u otro canal.
+enum Incoming {
+    Desktop(DesktopInput),
+    Rootless(RootlessInput),
 }
 
 /// Aplica una orden de la interfaz al estado del servidor.
