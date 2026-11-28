@@ -1245,6 +1245,13 @@ pub struct Settings {
     /// primero de los dos que tenga claves.
     #[serde(rename = "agente")]
     pub agent: crate::agent::AgentChoice,
+    /// Disparadores: reglas que reaccionan a lo que aparece en los
+    /// terminales, y el aviso de fin de orden larga.
+    #[serde(rename = "disparadores")]
+    pub triggers: crate::triggers::TriggerSettings,
+    /// Historial de las órdenes que se ejecutan en cada equipo.
+    #[serde(rename = "historial")]
+    pub history: crate::cmd_history::HistorySettings,
 }
 
 /// Dónde se muestran las aplicaciones gráficas que llegan por X11.
@@ -1297,6 +1304,8 @@ impl Default for Settings {
             confirm_close: true,
             dashboard: Default::default(),
             agent: Default::default(),
+            triggers: Default::default(),
+            history: Default::default(),
         }
     }
 }
@@ -1310,6 +1319,8 @@ impl Settings {
         settings.server_bar.sanitize();
         settings.dashboard.sanitize();
         settings.highlight.sanitize();
+        settings.triggers.sanitize();
+        settings.history.sanitize();
         settings.reconnect_attempts = settings.reconnect_attempts.clamp(1, 50);
         settings.vault_autolock = settings.vault_autolock.min(24 * 60);
         settings
@@ -1575,6 +1586,7 @@ mod tests {
                 always: true,
                 folder: "~/registros".into(),
                 timestamps: true,
+                record_always: true,
             },
             reconnect: false,
             reconnect_attempts: 3,
@@ -1620,6 +1632,25 @@ mod tests {
                     "grave",
                     crate::highlight::HlColor::Magenta,
                 )],
+            },
+            triggers: crate::triggers::TriggerSettings {
+                rules: vec![crate::triggers::Trigger {
+                    name: "Confirmar".into(),
+                    pattern: "[y/N]".into(),
+                    send: Some("y\n".into()),
+                    scope: crate::triggers::Scope::Session(uuid::Uuid::new_v4()),
+                    ..Default::default()
+                }],
+                long_command: crate::triggers::LongCommand {
+                    enabled: false,
+                    seconds: 90,
+                    bell: true,
+                },
+            },
+            history: crate::cmd_history::HistorySettings {
+                enabled: false,
+                max_per_host: 200,
+                excluded: vec!["local".into()],
             },
         };
         s.save(&path).unwrap();

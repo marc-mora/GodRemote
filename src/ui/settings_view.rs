@@ -461,6 +461,14 @@ fn log_section(ui: &mut egui::Ui, settings: &mut Settings, request: &mut Setting
         &mut settings.log.timestamps,
         "Anteponer la hora a cada línea",
     );
+    ui.checkbox(
+        &mut settings.log.record_always,
+        "Grabar siempre las sesiones con sus tiempos, para reproducirlas (.cast)",
+    )
+    .on_hover_text(
+        "Formato asciicast, el de asciinema, en la misma carpeta. Sin marcar, cada terminal \
+         se graba solo si pulsas su botón «Grabar»",
+    );
     ui.horizontal(|ui| {
         ui.label("Carpeta");
         ui.add(
@@ -484,8 +492,10 @@ fn log_section(ui: &mut egui::Ui, settings: &mut Settings, request: &mut Setting
         }
     });
     ui.weak(
-        "Los registros son texto sin colores ni secuencias de escape. Contienen todo lo que \
-         aparece en pantalla: cuidado con las contraseñas que se muestren.",
+        "Los registros son texto sin colores ni secuencias de escape; las grabaciones lo \
+         guardan todo, con sus tiempos, y se reproducen desde «Herramientas». Unos y otras \
+         contienen todo lo que aparece en pantalla (no lo que se teclea sin eco): cuidado \
+         con las contraseñas que se muestren.",
     );
 }
 

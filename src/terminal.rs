@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use crate::backdrop::Backdrop;
 use crate::highlight::{Compiled, HlColor};
+use crate::shell_marks::{Activity, Finished, Mark};
 use crate::ssh::{SshHandle, Waker};
 use crate::theme::TermPalette;
 
@@ -161,6 +162,8 @@ pub enum ConnState {
 }
 
 const SCROLLBACK: usize = 10_000;
+/// Historial de un terminal que reproduce una grabación.
+const VIEWER_SCROLLBACK: usize = 2_000;
 
 fn indexed_color(i: u8, palette: &TermPalette) -> Color32 {
     match i {
@@ -342,6 +345,10 @@ struct TermCallbacks {
     /// Respuestas que el terminal debe enviar a quien le pregunta por su
     /// estado o por la posición del cursor.
     replies: Vec<Vec<u8>>,
+    /// Marcadores de integración de shell (OSC 133) aún sin atender, con el
+    /// momento en que llegaron y, para el que cierra el indicador, lo que
+    /// había delante del cursor: el indicador, exacto.
+    marks: Vec<(Mark, std::time::Instant, Option<String>)>,
 }
 
 impl vt100::Callbacks for TermCallbacks {
@@ -384,12 +391,81 @@ impl vt100::Callbacks for TermCallbacks {
         self.title = String::from_utf8_lossy(title).chars().take(300).collect();
     }
 
-    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+    fn unhandled_osc(&mut self, screen: &mut vt100::Screen, params: &[&[u8]]) {
         // OSC 7: «file://equipo/ruta».
         if let [b"7", url] = params {
             self.cwd = dir_from_url(&String::from_utf8_lossy(url));
         }
+        // OSC 133: la shell marca su indicador y sus órdenes.
+        if let Some(mark) = crate::shell_marks::parse_osc133(params) {
+            // De una avalancha solo interesan los últimos (y no se lee la
+            // pantalla por cada uno).
+            let full = self.marks.len() >= MAX_PENDING_MARKS;
+            if full {
+                self.marks.remove(0);
+            }
+            let prompt = (mark == Mark::PromptEnd && !full).then(|| cursor_line(screen).0);
+            self.marks.push((mark, std::time::Instant::now(), prompt));
+        }
     }
+}
+
+/// Filas que como mucho se juntan al leer una línea que no cabe en una.
+const MAX_WRAPPED_ROWS: u16 = 20;
+
+/// Texto de la línea en la que está el cursor, partido en lo que hay antes
+/// y después de él. Una línea que no cabe y sigue en la fila de debajo se
+/// toma entera.
+fn cursor_line(screen: &mut vt100::Screen) -> (String, String) {
+    // Las celdas se leen de lo que se ve: sin desplazar el historial.
+    let saved = screen.scrollback();
+    if saved != 0 {
+        screen.set_scrollback(0);
+    }
+    let (rows, cols) = screen.size();
+    let (rows, cols) = (rows.get(), cols.get());
+    let (row, col) = screen.cursor_position();
+    let mut first = row;
+    while first > 0 && row - first < MAX_WRAPPED_ROWS && screen.row_wrapped(first - 1) {
+        first -= 1;
+    }
+    let mut last = row;
+    while last + 1 < rows && last - row < MAX_WRAPPED_ROWS && screen.row_wrapped(last) {
+        last += 1;
+    }
+    let (mut before, mut after) = (String::new(), String::new());
+    for r in first..=last {
+        for c in 0..cols {
+            let Some(cell) = screen.cell(r, c) else {
+                continue;
+            };
+            if cell.is_wide_continuation() {
+                continue;
+            }
+            let part = if (r, c) < (row, col) {
+                &mut before
+            } else {
+                &mut after
+            };
+            match cell.contents() {
+                "" => part.push(' '),
+                text => part.push_str(text),
+            }
+        }
+    }
+    if saved != 0 {
+        screen.set_scrollback(saved);
+    }
+    (before, after.trim_end().to_string())
+}
+
+/// Algo que ha pasado en un terminal y que interesa a la aplicación.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Signal {
+    /// Ha terminado una orden que ha durado lo bastante como para avisar.
+    CommandDone(Finished),
+    /// Se ha ejecutado esta orden (para el historial del equipo).
+    Command(String),
 }
 
 /// Carpeta de una URL `file://equipo/ruta` (con `%XX` descodificado).
@@ -456,6 +532,10 @@ fn find_all(line: &[char], needle: &[char]) -> Vec<usize> {
 /// Respuestas a informes de estado que se guardan como mucho entre dos
 /// lecturas: una salida que pregunte sin parar no llena la memoria.
 const MAX_PENDING_REPLIES: usize = 8;
+/// Lo mismo para los marcadores de la shell y para las señales que el
+/// terminal deja a la aplicación.
+const MAX_PENDING_MARKS: usize = 64;
+const MAX_PENDING_SIGNALS: usize = 64;
 
 /// Silencio tras el saludo de la shell antes de enviar las órdenes de
 /// conexión, y espera máxima si la shell no dice nada.
@@ -652,6 +732,25 @@ pub struct TerminalView {
     pub backdrop: Option<(Arc<Backdrop>, u64)>,
     /// Consulta del estado del servidor para la barra inferior.
     pub monitor: Option<crate::monitor::Monitor>,
+    /// Vigilancia de la salida para los disparadores (si hay reglas).
+    watch: Option<crate::triggers::Watcher>,
+    /// Órdenes en marcha en la shell, por sus marcadores o por lo que se ve.
+    shell: Activity,
+    /// Duración a partir de la cual se avisa de que una orden ha terminado
+    /// (`None`: no se avisa).
+    long_command: Option<std::time::Duration>,
+    /// Cosas que han pasado y que la aplicación recoge.
+    pub signals: Vec<Signal>,
+    /// Grabación de la sesión en un fichero `.cast`, si está activa.
+    pub cast: Option<crate::cast::Recorder>,
+    /// La aplicación ya ha mirado si este terminal debe grabarse solo.
+    pub cast_offered: bool,
+    /// Solo muestra una grabación: no hay shell al otro lado y su tamaño
+    /// es el de la grabación, no el del hueco en el que se dibuja.
+    viewer: bool,
+    /// Seguimiento de lo que se teclea para reconocer las órdenes
+    /// ejecutadas, si se recuerdan las de este terminal.
+    tracker: Option<crate::cmd_history::Tracker>,
 }
 
 pub const INITIAL_COLS: u16 = 100;
@@ -698,6 +797,116 @@ impl TerminalView {
             has_focus: false,
             backdrop: None,
             monitor: None,
+            watch: None,
+            shell: Activity::default(),
+            long_command: None,
+            signals: vec![],
+            cast: None,
+            cast_offered: false,
+            viewer: false,
+            tracker: None,
+        }
+    }
+
+    /// Activa o desactiva el reconocimiento de las órdenes que se ejecutan
+    /// en este terminal (las recoge la aplicación en [`Self::signals`]).
+    /// Desactivado no se sigue lo que se teclea.
+    pub fn set_command_capture(&mut self, enabled: bool) {
+        match (enabled && !self.viewer, self.tracker.is_some()) {
+            (true, false) => self.tracker = Some(Default::default()),
+            (false, true) => self.tracker = None,
+            _ => {}
+        }
+    }
+
+    /// Un terminal que solo muestra lo que se le da: lo usa el reproductor
+    /// de grabaciones. No hay nada al otro lado, así que lo que se teclee
+    /// en él no va a ninguna parte.
+    pub fn viewer(cols: u16, rows: u16) -> Self {
+        let (cmd, _) = mpsc::unbounded_channel();
+        let (_, events) = std::sync::mpsc::channel();
+        let mut view = Self::new(TermBackend { cmd, events });
+        view.viewer = true;
+        view.state = ConnState::Closed(None);
+        view.viewer_reset(cols, rows);
+        view
+    }
+
+    /// Vacía el terminal de reproducción y lo deja con este tamaño.
+    pub fn viewer_reset(&mut self, cols: u16, rows: u16) {
+        let (cols, rows) = (cols.clamp(2, 500), rows.clamp(1, 300));
+        self.parser = vt100::Parser::new_with_callbacks(
+            NonZeroU16::new(rows).unwrap_or(NonZeroU16::MIN),
+            NonZeroU16::new(cols).unwrap_or(NonZeroU16::MIN),
+            VIEWER_SCROLLBACK,
+            TermCallbacks::default(),
+        );
+        self.cols = cols;
+        self.rows = rows;
+        self.selection = None;
+        self.generation += 1;
+    }
+
+    /// Cambia el tamaño del terminal de reproducción.
+    pub fn viewer_resize(&mut self, cols: u16, rows: u16) {
+        let (cols, rows) = (cols.clamp(2, 500), rows.clamp(1, 300));
+        if let (Some(r), Some(c)) = (NonZeroU16::new(rows), NonZeroU16::new(cols)) {
+            self.parser.set_size(r, c);
+            self.cols = cols;
+            self.rows = rows;
+            self.selection = None;
+            self.generation += 1;
+        }
+    }
+
+    /// Muestra salida grabada. Lo que esa salida pregunte al terminal no
+    /// se contesta: no hay a quién.
+    pub fn viewer_feed(&mut self, bytes: &[u8]) {
+        self.parser.process(bytes);
+        self.generation += 1;
+        let told = self.parser.callbacks_mut();
+        told.replies.clear();
+        told.marks.clear();
+        told.bell = false;
+    }
+
+    /// Columnas y filas del terminal.
+    pub fn size(&self) -> (u16, u16) {
+        (self.cols, self.rows)
+    }
+
+    /// Empieza a grabar la sesión en un fichero `.cast` nuevo de esa
+    /// carpeta. La grabación arranca con lo que hay ahora en pantalla, para
+    /// que lo que venga después tenga sentido al reproducirla.
+    pub fn start_cast(&mut self, dir: &std::path::Path, name: &str) -> Result<std::path::PathBuf> {
+        let mut recorder = crate::cast::Recorder::start(dir, name, self.cols, self.rows)?;
+        let screen = self.parser.screen_mut();
+        let saved = screen.scrollback();
+        screen.set_scrollback(0);
+        if !screen.contents().trim().is_empty() || screen.alternate_screen() {
+            // Una aplicación a pantalla completa se dibuja en la suya.
+            if screen.alternate_screen() {
+                recorder.output(b"\x1b[?1049h");
+            }
+            recorder.output(screen.state_formatted().as_bytes());
+        }
+        screen.set_scrollback(saved);
+        let path = recorder.path().to_path_buf();
+        self.cast = Some(recorder);
+        Ok(path)
+    }
+
+    /// Deja de grabar y devuelve el fichero de la grabación.
+    pub fn stop_cast(&mut self) -> Option<std::path::PathBuf> {
+        self.cast.take().map(|cast| cast.path().to_path_buf())
+    }
+
+    /// Texto que escribe el propio terminal (avisos, ajustes al reconectar):
+    /// se muestra y, si se está grabando, se graba con lo demás.
+    fn local_output(&mut self, bytes: &[u8]) {
+        self.parser.process(bytes);
+        if let Some(cast) = &mut self.cast {
+            cast.output(bytes);
         }
     }
 
@@ -717,13 +926,17 @@ impl TerminalView {
         self.monitor = None;
         self.tunnels.clear();
         self.mouse_down = None;
+        self.shell.reset();
+        self.watch = None;
+        if let Some(tracker) = &mut self.tracker {
+            tracker.reset();
+        }
         // La aplicación que hubiera a pantalla completa ya no existe: se
         // sale de la pantalla alternativa y se restablecen los modos.
         if self.parser.screen().alternate_screen() {
-            self.parser.process(b"\x1b[?1049l");
+            self.local_output(b"\x1b[?1049l");
         }
-        self.parser
-            .process(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1l\x1b[?2004l\x1b[0m");
+        self.local_output(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1l\x1b[?2004l\x1b[0m");
         self.note(33, message);
         if let Some(log) = &mut self.log {
             log.note(message);
@@ -761,7 +974,7 @@ impl TerminalView {
 
     fn note(&mut self, color: u8, text: &str) {
         let line = format!("\r\x1b[{color}m{text}\x1b[0m\r\n");
-        self.parser.process(line.as_bytes());
+        self.local_output(line.as_bytes());
         self.generation += 1;
     }
 
@@ -811,8 +1024,30 @@ impl TerminalView {
                     if let Some(log) = &mut self.log {
                         log.feed(&data);
                     }
+                    if let Some(cast) = &mut self.cast {
+                        cast.output(&data);
+                    }
                     self.activity |= !data.is_empty();
-                    self.parser.process(&data);
+                    let mut rest: &[u8] = &data;
+                    if let Some(at) = self.tracker.as_ref().and_then(|t| t.echo_end(&data)) {
+                        // Aquí termina el eco de un Intro: antes de que la
+                        // salida de la orden mueva el cursor, se lee de la
+                        // pantalla la orden que se acaba de ejecutar.
+                        self.parser.process(&data[..at]);
+                        rest = &data[at..];
+                        let readable = !self.parser.screen().alternate_screen();
+                        let (before, after) = cursor_line(self.parser.screen_mut());
+                        let command = self
+                            .tracker
+                            .as_mut()
+                            .and_then(|t| t.resolve(&format!("{before}{after}"), readable));
+                        if let Some(command) = command
+                            && self.signals.len() < MAX_PENDING_SIGNALS
+                        {
+                            self.signals.push(Signal::Command(command));
+                        }
+                    }
+                    self.parser.process(rest);
                     self.generation += 1;
                     // Lo que la aplicación haya preguntado al terminal se
                     // contesta sin pasar por el teclado (ni por la difusión).
@@ -821,6 +1056,20 @@ impl TerminalView {
                     }
                     if let Some((_, last_output)) = &mut self.login_wait {
                         *last_output = Some(std::time::Instant::now());
+                    }
+                    let now = std::time::Instant::now();
+                    if let Some(watch) = &mut self.watch {
+                        watch.feed(&data, now);
+                    }
+                    self.shell.output(now);
+                    for (mark, at, prompt) in std::mem::take(&mut self.parser.callbacks_mut().marks)
+                    {
+                        if let Some(tracker) = &mut self.tracker {
+                            tracker.mark(&mark, prompt);
+                        }
+                        if let Some(done) = self.shell.mark(&mark, at) {
+                            self.command_done(done);
+                        }
                     }
                 }
                 TermEvent::SaveSecrets(s) => self.secrets_to_save.extend(s),
@@ -848,8 +1097,33 @@ impl TerminalView {
                     self.monitor = None;
                     self.tunnels.clear();
                     self.login_wait = None;
+                    self.shell.reset();
+                    if let Some(tracker) = &mut self.tracker {
+                        tracker.reset();
+                    }
                     self.state = ConnState::Closed(err);
                 }
+            }
+        }
+        // Un Intro cuyo eco no ha llegado en un buen rato ya no se espera.
+        if let Some(tracker) = &mut self.tracker {
+            tracker.expire(std::time::Instant::now());
+        }
+        // Sin marcadores de la shell: tras un silencio se mira si el cursor
+        // ha vuelto a un indicador, es decir, si la orden ha terminado.
+        if self.long_command.is_some() {
+            let parser = &mut self.parser;
+            // El último indicador que se vio, si se siguen las órdenes.
+            let known = self.tracker.as_ref().and_then(|t| t.last_prompt());
+            let done = self.shell.quiet_check(std::time::Instant::now(), || {
+                if parser.screen().alternate_screen() {
+                    return false;
+                }
+                let (before, after) = cursor_line(parser.screen_mut());
+                crate::shell_marks::looks_like_prompt(&before, &after, known)
+            });
+            if let Some(done) = done {
+                self.command_done(done);
             }
         }
         // Órdenes de conexión: cuando la shell ha terminado de saludar (o
@@ -874,12 +1148,104 @@ impl TerminalView {
         self.login_wait.is_some()
     }
 
+    /// Una orden ha terminado: se avisa a la aplicación si ha durado lo
+    /// bastante.
+    fn command_done(&mut self, done: Finished) {
+        if self.long_command.is_some_and(|min| done.duration >= min)
+            && self.signals.len() < MAX_PENDING_SIGNALS
+        {
+            self.signals.push(Signal::CommandDone(done));
+        }
+    }
+
+    /// Evalúa los disparadores sobre la salida recibida desde la última
+    /// llamada, envía lo que las reglas manden enviar y devuelve las que se
+    /// han disparado. `in_scope` dice si una regla con ese ámbito vale para
+    /// este terminal. La aplicación lo llama en cada fotograma.
+    pub fn run_triggers(
+        &mut self,
+        rules: &crate::triggers::Compiled,
+        in_scope: &dyn Fn(&crate::triggers::Scope) -> bool,
+    ) -> Vec<crate::triggers::Fired> {
+        self.long_command = rules.long_command.threshold();
+        if rules.is_idle() {
+            self.watch = None;
+            return vec![];
+        }
+        let Some(watch) = &mut self.watch else {
+            // Desde ahora, la salida que llegue pasa por el vigilante.
+            self.watch = Some(Default::default());
+            return vec![];
+        };
+        let full_screen = self.parser.screen().alternate_screen();
+        let (before, after) = cursor_line(self.parser.screen_mut());
+        let mut fired = watch.evaluate(
+            rules,
+            in_scope,
+            &format!("{before}{after}"),
+            full_screen,
+            std::time::Instant::now(),
+        );
+        for rule in &mut fired {
+            match rule.send.clone() {
+                Some(bytes) if self.state == ConnState::Connected => self.send_raw(bytes),
+                // Sin conexión no hay a quién contestar.
+                _ => rule.send = None,
+            }
+        }
+        fired
+    }
+
+    /// Cuánto falta para que este terminal necesite atención aunque no le
+    /// llegue nada: hay comprobaciones que dependen del tiempo.
+    pub fn next_wake(&self) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        let watch = self.watch.as_ref().and_then(|w| w.next_check(now));
+        let shell = self.long_command.and_then(|_| self.shell.next_check(now));
+        match (watch, shell) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
     /// Envía bytes a la shell sin registrarlos en la macro en curso.
     fn send_raw(&mut self, data: Vec<u8>) {
         if self.state == ConnState::Connected && !data.is_empty() {
             self.parser.screen_mut().set_scrollback(0);
+            let now = std::time::Instant::now();
+            // Lo que se envía vuelve como eco: los disparadores no lo miran.
+            if let Some(watch) = &mut self.watch {
+                watch.note_sent(&data, now);
+            }
+            // Un Intro en la shell es una orden que empieza.
+            if data.contains(&b'\r') && !self.parser.screen().alternate_screen() {
+                self.shell.enter(now);
+            }
             let _ = self.backend.cmd.send(TermCmd::Input(data));
         }
+    }
+
+    /// Lo que el usuario envía pasa antes por el seguimiento de órdenes,
+    /// que así sabe qué había en la línea al empezar a teclear y cuándo se
+    /// pulsa Intro.
+    fn track_input(&mut self, data: &[u8]) {
+        if self.state != ConnState::Connected {
+            return;
+        }
+        let Some(tracker) = &mut self.tracker else {
+            return;
+        };
+        // Con una aplicación a pantalla completa, o con una orden en marcha
+        // según los marcadores de la shell, lo tecleado no es para la shell.
+        let at_prompt = !self.parser.screen().alternate_screen()
+            && !(self.shell.is_integrated() && self.shell.is_running());
+        let parser = &mut self.parser;
+        tracker.input(
+            data,
+            at_prompt,
+            || cursor_line(parser.screen_mut()).0,
+            std::time::Instant::now(),
+        );
     }
 
     /// Envía entrada de teclado (se graba si hay una macro en curso).
@@ -889,11 +1255,13 @@ impl TerminalView {
         {
             rec.extend_from_slice(&data);
         }
+        self.track_input(&data);
         self.send_raw(data);
     }
 
     /// Envía una secuencia de teclas ya preparada (macros).
     pub fn send_macro(&mut self, bytes: Vec<u8>) {
+        self.track_input(&bytes);
         self.send_raw(bytes);
     }
 
@@ -1070,6 +1438,10 @@ impl TerminalView {
     /// Pegado hecho por el usuario: si son varias líneas se pregunta antes,
     /// porque en una shell cada una se ejecutaría según llega.
     fn user_paste(&mut self, text: String) {
+        if self.viewer {
+            // En una reproducción no hay dónde pegar.
+            return;
+        }
         if PASTE_GUARD.load(std::sync::atomic::Ordering::Relaxed) && is_multiline(&text) {
             self.pending_paste = Some(text);
         } else {
@@ -1213,14 +1585,52 @@ impl TerminalView {
         self.rows = rows;
         self.parser.set_size(r, c);
         self.selection = None;
+        if let Some(cast) = &mut self.cast {
+            cast.resize(cols, rows);
+        }
         let _ = self.backend.cmd.send(TermCmd::Resize { cols, rows });
+    }
+
+    /// Tamaño de letra con el que la grabación que se reproduce cabe entera
+    /// en el hueco disponible (nunca mayor que el del tema).
+    fn fitting_font_size(&self, ui: &egui::Ui, palette: &TermPalette, size: f32) -> f32 {
+        let avail = ui.available_size();
+        let needed = |size: f32| -> Vec2 {
+            let font = FontId::monospace(size);
+            let (glyph_w, row_h) =
+                ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+            Vec2::new(
+                self.cols as f32 * (glyph_w + palette.letter_spacing).max(1.0),
+                self.rows as f32 * (row_h * palette.line_height).round().max(1.0),
+            ) + Vec2::splat(2.0 * palette.padding)
+        };
+        const SMALLEST: f32 = 4.0;
+        let full = needed(size);
+        let scale = (avail.x / full.x).min(avail.y / full.y);
+        if !scale.is_finite() || scale >= 1.0 {
+            return size;
+        }
+        // Una primera estimación proporcional y, si aún no cabe, a la baja.
+        let mut size = ((size * scale * 2.0).floor() / 2.0).clamp(SMALLEST, size);
+        while size > SMALLEST {
+            let wanted = needed(size);
+            if wanted.x <= avail.x && wanted.y <= avail.y {
+                break;
+            }
+            size = (size - 0.5).max(SMALLEST);
+        }
+        size
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.poll();
 
         let palette = crate::theme::terminal_palette();
-        let font = FontId::monospace((palette.font_size + self.font_delta).clamp(6.0, 60.0));
+        let mut font_size = (palette.font_size + self.font_delta).clamp(6.0, 60.0);
+        if self.viewer {
+            font_size = self.fitting_font_size(ui, &palette, font_size);
+        }
+        let font = FontId::monospace(font_size);
         let (glyph_w, narrow_w, row_h) = ui.fonts_mut(|f| {
             (
                 f.glyph_width(&font, 'M'),
@@ -1239,11 +1649,23 @@ impl TerminalView {
         let text_dy = ((cell_h - row_h) / 2.0).round();
 
         let avail = ui.available_size();
-        let (rect, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
         let pad = palette.padding;
-        let cols = (((rect.width() - 2.0 * pad) / cell_w).floor() as i32).clamp(2, 500) as u16;
-        let rows = (((rect.height() - 2.0 * pad) / cell_h).floor() as i32).clamp(1, 300) as u16;
-        self.resize(cols, rows);
+        let (rect, response, cols, rows) = if self.viewer {
+            // Una grabación tiene su tamaño: se ocupa solo lo que pide.
+            let wanted = Vec2::new(
+                self.cols as f32 * cell_w + 2.0 * pad,
+                self.rows as f32 * cell_h + 2.0 * pad,
+            );
+            let (rect, response) =
+                ui.allocate_exact_size(wanted.min(avail), Sense::click_and_drag());
+            (rect, response, self.cols, self.rows)
+        } else {
+            let (rect, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
+            let cols = (((rect.width() - 2.0 * pad) / cell_w).floor() as i32).clamp(2, 500) as u16;
+            let rows = (((rect.height() - 2.0 * pad) / cell_h).floor() as i32).clamp(1, 300) as u16;
+            self.resize(cols, rows);
+            (rect, response, cols, rows)
+        };
 
         let origin = rect.min + Vec2::splat(pad);
         let to_cell = |pos: Pos2| -> (u16, u16) {
@@ -1713,7 +2135,10 @@ impl TerminalView {
         }
 
         // Cursor
-        if !screen.hide_cursor() && screen.scrollback() == 0 && self.state == ConnState::Connected {
+        if !screen.hide_cursor()
+            && screen.scrollback() == 0
+            && (self.state == ConnState::Connected || self.viewer)
+        {
             let (crow, ccol) = screen.cursor_position();
             let cursor = Rect::from_min_size(
                 Pos2::new(
@@ -2260,6 +2685,624 @@ mod tests {
         assert_eq!((s.current, s.position), (None, (0, 0)));
         view.close_search();
         assert!(!view.is_searching());
+    }
+
+    /// Espera a que se cumpla algo que depende del tiempo, atendiendo
+    /// mientras tanto al terminal.
+    fn wait_until(
+        view: &mut TerminalView,
+        what: &str,
+        mut done: impl FnMut(&mut TerminalView) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            view.poll();
+            if done(view) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no ha ocurrido: {what}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn cursor_line_joins_wrapped_rows() {
+        let (mut view, _sent, events) = fake_terminal();
+        view.resize(20, 6);
+        let feed = |view: &mut TerminalView, data: &[u8]| {
+            events.send(TermEvent::Data(data.to_vec())).unwrap();
+            view.poll();
+        };
+        let line = |view: &mut TerminalView| cursor_line(view.parser.screen_mut());
+        assert_eq!(line(&mut view), (String::new(), String::new()));
+        feed(&mut view, b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n");
+        feed(&mut view, b"una\r\ndos\r\nana@web:~$ ");
+        assert_eq!(line(&mut view), ("ana@web:~$ ".to_string(), String::new()));
+        // Una pregunta más larga que la fila sigue en la de debajo.
+        feed(&mut view, b"\r\nAre you really sure about this? [y/N] ");
+        assert_eq!(
+            line(&mut view),
+            (
+                "Are you really sure about this? [y/N] ".to_string(),
+                String::new()
+            )
+        );
+        // Con el cursor en medio, lo de detrás va aparte; y aunque se esté
+        // mirando el historial se lee la pantalla de verdad.
+        feed(&mut view, b"\r\n$ ls -la\x1b[3D");
+        view.parser.screen_mut().set_scrollback(3);
+        assert_eq!(line(&mut view), ("$ ls ".to_string(), "-la".to_string()));
+        assert_eq!(view.parser.screen().scrollback(), 3);
+        // Caracteres de ancho doble.
+        view.parser.screen_mut().set_scrollback(0);
+        feed(&mut view, "\r\n\x1b[K日本 $ ".as_bytes());
+        assert_eq!(line(&mut view).0, "日本 $ ");
+    }
+
+    #[test]
+    fn triggers_answer_questions_and_ignore_their_own_echo() {
+        use crate::triggers::{Compiled as Rules, Scope, Trigger, TriggerSettings};
+        let (mut view, mut sent, events) = fake_terminal();
+        let feed = |view: &mut TerminalView, data: &[u8]| {
+            events.send(TermEvent::Data(data.to_vec())).unwrap();
+            view.poll();
+        };
+        let rules = Rules::new(&TriggerSettings {
+            rules: vec![
+                Trigger {
+                    name: "confirmar".into(),
+                    pattern: "[y/N]".into(),
+                    send: Some("y\n".into()),
+                    notify: false,
+                    ..Default::default()
+                },
+                Trigger {
+                    pattern: "error".into(),
+                    cooldown_secs: 0,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        let all = |_: &Scope| true;
+        let names = |fired: Vec<crate::triggers::Fired>| -> Vec<String> {
+            fired.into_iter().map(|f| f.name).collect()
+        };
+        // La primera llamada solo empieza a vigilar.
+        assert!(view.run_triggers(&rules, &all).is_empty());
+        assert_eq!(view.next_wake(), None);
+        feed(
+            &mut view,
+            b"todo bien\r\n\x1b[31mERROR\x1b[0m grave\r\nContinue? [y/N] ",
+        );
+        // El aviso es inmediato; la respuesta espera a que la pregunta se
+        // quede quieta.
+        assert_eq!(names(view.run_triggers(&rules, &all)), ["error"]);
+        assert!(sent_bytes(&mut sent).is_empty());
+        assert!(view.next_wake().is_some());
+        // Lo que conteste el disparador no se repite en otros terminales.
+        view.mirror = Some(vec![]);
+        let mut fired = vec![];
+        wait_until(&mut view, "la respuesta del disparador", |view| {
+            fired = view.run_triggers(&rules, &all);
+            !fired.is_empty()
+        });
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].name, "confirmar");
+        assert_eq!(fired[0].line, "Continue? [y/N]");
+        assert_eq!(sent_bytes(&mut sent), [b"y\r".to_vec()]);
+        assert!(view.mirror.take().unwrap().is_empty());
+        assert_eq!(view.next_wake(), None);
+        // Su eco, y la pregunta ya contestada, no vuelven a dispararla.
+        feed(&mut view, b"y\r\n");
+        std::thread::sleep(crate::triggers::SETTLE + std::time::Duration::from_millis(50));
+        assert!(view.run_triggers(&rules, &all).is_empty());
+        assert!(sent_bytes(&mut sent).is_empty());
+        // Fuera del ámbito de las reglas no pasa nada.
+        feed(&mut view, b"otro error\r\n");
+        assert!(view.run_triggers(&rules, &|_| false).is_empty());
+        // Una aplicación a pantalla completa no se contesta.
+        feed(&mut view, b"\x1b[?1049hDelete all? [y/N] ");
+        std::thread::sleep(crate::triggers::SETTLE + std::time::Duration::from_millis(50));
+        assert!(view.run_triggers(&rules, &all).is_empty());
+        feed(&mut view, b"\x1b[?1049l");
+        // Sin conexión no se envía nada, aunque la pregunta siga ahí.
+        feed(&mut view, b"\r\nReally? [y/N] ");
+        events.send(TermEvent::Closed(None)).unwrap();
+        view.poll();
+        std::thread::sleep(crate::triggers::SETTLE + std::time::Duration::from_millis(50));
+        let fired = view.run_triggers(&rules, &all);
+        assert!(fired.iter().all(|f| f.send.is_none()), "{fired:?}");
+        assert!(sent_bytes(&mut sent).is_empty());
+        // Sin reglas se deja de vigilar.
+        view.run_triggers(&Rules::default(), &all);
+        assert!(view.watch.is_none());
+    }
+
+    #[test]
+    fn long_commands_are_reported_by_the_shell_marks() {
+        use crate::triggers::{Compiled as Rules, LongCommand, TriggerSettings};
+        let (mut view, _sent, events) = fake_terminal();
+        let feed = |view: &mut TerminalView, data: &[u8]| {
+            events.send(TermEvent::Data(data.to_vec())).unwrap();
+            view.poll();
+        };
+        let rules = Rules::new(&TriggerSettings {
+            long_command: LongCommand {
+                enabled: true,
+                seconds: 5,
+                bell: false,
+            },
+            ..Default::default()
+        });
+        view.run_triggers(&rules, &|_| true);
+        assert_eq!(view.long_command, Some(std::time::Duration::from_secs(5)));
+        // Para la prueba, «larga» es mucho menos.
+        view.long_command = Some(std::time::Duration::from_millis(40));
+
+        feed(&mut view, b"\x1b]133;A\x07ana@web:~$ \x1b]133;B\x07");
+        assert!(view.shell.is_integrated() && !view.shell.is_running());
+        view.input(TermInput::Bytes(b"make".to_vec()));
+        view.input(TermInput::Key(Key::Enter, egui::Modifiers::NONE));
+        assert!(view.shell.is_running());
+        feed(&mut view, b"make\r\n\x1b]133;C\x1b\\compilando\r\n");
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // Mientras corre no hay nada que mirar por tiempo.
+        assert_eq!(view.next_wake(), None);
+        feed(
+            &mut view,
+            b"fallo\r\n\x1b]133;D;2\x07\x1b]133;A\x07ana@web:~$ ",
+        );
+        assert!(!view.shell.is_running());
+        let [Signal::CommandDone(done)] = view.signals.as_slice() else {
+            panic!("{:?}", view.signals);
+        };
+        assert!(done.exact && done.exit_code == Some(2));
+        assert!(done.duration >= std::time::Duration::from_millis(40));
+        view.signals.clear();
+        // Una orden corta no merece aviso.
+        view.input(TermInput::Key(Key::Enter, egui::Modifiers::NONE));
+        feed(
+            &mut view,
+            b"\r\n\x1b]133;C\x07hecho\r\n\x1b]133;D;0\x07\x1b]133;A\x07ana@web:~$ ",
+        );
+        assert!(view.signals.is_empty());
+        // Con el aviso apagado tampoco.
+        view.long_command = None;
+        view.input(TermInput::Key(Key::Enter, egui::Modifiers::NONE));
+        feed(&mut view, b"\r\n\x1b]133;C\x07");
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        feed(&mut view, b"\x1b]133;D\x07");
+        assert!(view.signals.is_empty());
+        // Una avalancha de marcadores no se acumula.
+        feed(&mut view, &b"\x1b]133;A\x07".repeat(10_000));
+        assert!(view.parser.callbacks().marks.is_empty());
+    }
+
+    #[test]
+    fn long_commands_are_guessed_without_shell_marks() {
+        let (mut view, _sent, events) = fake_terminal();
+        let feed = |view: &mut TerminalView, data: &[u8]| {
+            events.send(TermEvent::Data(data.to_vec())).unwrap();
+            view.poll();
+        };
+        view.long_command = Some(std::time::Duration::from_millis(40));
+        view.shell.quiet = std::time::Duration::from_millis(60);
+        feed(&mut view, b"ana@web:~$ ");
+        // Sin haber pulsado Intro, el silencio no significa nada.
+        assert_eq!(view.next_wake(), None);
+        view.input(TermInput::Bytes(b"make".to_vec()));
+        view.input(TermInput::Key(Key::Enter, egui::Modifiers::NONE));
+        feed(&mut view, b"make\r\ncompilando 1\r\n");
+        assert!(view.next_wake().is_some());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        feed(&mut view, b"compilando 2\r\n");
+        // Silencio, pero el cursor no está en un indicador: sigue en marcha.
+        wait_until(&mut view, "la comprobación del silencio", |view| {
+            view.next_wake().is_none()
+        });
+        assert!(view.signals.is_empty() && view.shell.is_running());
+        // Vuelve el indicador y, tras el silencio, se da por terminada.
+        feed(&mut view, b"hecho\r\nana@web:~$ ");
+        assert!(view.signals.is_empty());
+        wait_until(&mut view, "el aviso de fin de orden", |view| {
+            !view.signals.is_empty()
+        });
+        let [Signal::CommandDone(done)] = view.signals.as_slice() else {
+            panic!("{:?}", view.signals);
+        };
+        assert!(!done.exact && done.exit_code.is_none());
+        assert!(done.duration >= std::time::Duration::from_millis(40));
+        assert!(!view.shell.is_running());
+        view.signals.clear();
+        // Una aplicación a pantalla completa (un editor) no es una orden
+        // que termina, y lo que se teclea en ella no cuenta.
+        view.input(TermInput::Bytes(b"vi".to_vec()));
+        view.input(TermInput::Key(Key::Enter, egui::Modifiers::NONE));
+        feed(&mut view, b"vi\r\n\x1b[?1049h~\r\n~\r\n:");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        feed(&mut view, b" ");
+        wait_until(&mut view, "la comprobación del silencio", |view| {
+            view.next_wake().is_none()
+        });
+        assert!(view.signals.is_empty());
+        // Al cerrarse la sesión se olvida lo que hubiera en marcha.
+        events.send(TermEvent::Closed(None)).unwrap();
+        view.poll();
+        assert!(!view.shell.is_running());
+    }
+
+    /// Reproduce entera una grabación en un terminal nuevo.
+    fn play(path: &std::path::Path) -> TerminalView {
+        let cast = crate::cast::Cast::load(path).unwrap();
+        let mut copy = TerminalView::viewer(cast.cols, cast.rows);
+        let mut player = crate::cast::Player::new(cast);
+        player.seek(f64::MAX);
+        let pending = player.drain(usize::MAX, |step| match step {
+            crate::cast::Step::Output(bytes) => copy.viewer_feed(bytes),
+            crate::cast::Step::Resize(cols, rows) => copy.viewer_resize(cols, rows),
+        });
+        assert!(!pending);
+        copy
+    }
+
+    #[test]
+    fn sessions_are_recorded_and_play_back_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut view, _sent, events) = fake_terminal();
+        let feed = |view: &mut TerminalView, data: &[u8]| {
+            events.send(TermEvent::Data(data.to_vec())).unwrap();
+            view.poll();
+        };
+        view.resize(40, 10);
+        feed(&mut view, b"\x1b[1mantes\x1b[0m de grabar\r\nana@web:~$ ");
+        assert!(view.stop_cast().is_none());
+        let path = view.start_cast(dir.path(), "prueba").unwrap();
+        assert!(view.cast.is_some());
+        feed(&mut view, b"echo hola\r\nhola\r\nana@web:~$ ");
+        // Un cambio de tamaño, colores y un carácter partido en dos bloques.
+        view.resize(60, 12);
+        feed(&mut view, b"\x1b[31mrojo\x1b[0m a\xc3");
+        feed(&mut view, b"\xb1o\r\n");
+        // Los avisos del propio terminal también quedan grabados.
+        events.send(TermEvent::Closed(None)).unwrap();
+        view.poll();
+        assert_eq!(view.stop_cast(), Some(path.clone()));
+        assert!(view.cast.is_none());
+
+        let copy = play(&path);
+        assert_eq!(copy.size(), (60, 12));
+        let text = copy.contents();
+        assert_eq!(text, view.contents());
+        // Lo que había en pantalla al empezar a grabar está en la grabación.
+        assert!(
+            text.contains("antes de grabar") && text.contains("año"),
+            "{text}"
+        );
+        assert!(text.contains("[Sesión finalizada]"), "{text}");
+        // Y con sus atributos: la negrita de antes y el rojo de después.
+        let bold = copy.parser.screen().cell(0, 0).unwrap();
+        assert!(bold.bold() && bold.contents() == "a");
+        let cast = crate::cast::Cast::load(&path).unwrap();
+        assert_eq!(
+            (cast.cols, cast.rows, cast.title.as_str()),
+            (40, 10, "prueba")
+        );
+
+        // Si se empieza con una aplicación a pantalla completa, al
+        // reproducir se dibuja en su pantalla y al salir vuelve lo de antes.
+        let (mut view, _sent, events) = fake_terminal();
+        let feed = |view: &mut TerminalView, data: &[u8]| {
+            events.send(TermEvent::Data(data.to_vec())).unwrap();
+            view.poll();
+        };
+        view.resize(40, 10);
+        feed(&mut view, b"shell\r\n\x1b[?1049h\x1b[2J\x1b[Heditor");
+        let path = view.start_cast(dir.path(), "editor").unwrap();
+        feed(&mut view, b" abierto");
+        assert_eq!(view.contents(), "editor abierto");
+        assert!(play(&path).contents().contains("editor abierto"));
+        feed(&mut view, b"\x1b[?1049l");
+        view.stop_cast();
+        let copy = play(&path);
+        assert!(!copy.parser.screen().alternate_screen());
+        assert!(!copy.contents().contains("editor"));
+        assert!(!view.contents().contains("editor"));
+        // Una carpeta en la que no se puede escribir es un error, sin más.
+        let blocked = path.join("dentro");
+        assert!(view.start_cast(&blocked, "x").is_err());
+        assert!(view.cast.is_none());
+    }
+
+    #[test]
+    fn a_viewer_shows_but_never_sends() {
+        // Tamaños absurdos se acotan.
+        let mut view = TerminalView::viewer(10_000, 0);
+        assert_eq!(view.size(), (500, 1));
+        view.viewer_resize(0, 9_999);
+        assert_eq!(view.size(), (2, 300));
+        view.viewer_reset(30, 5);
+        // Lo que la grabación pregunte al terminal o haga sonar se ignora.
+        view.viewer_feed(b"hola\x1b[6n\x1b[c\x07\x1b]133;A\x07");
+        assert!(view.parser.callbacks().replies.is_empty());
+        assert!(view.parser.callbacks().marks.is_empty());
+        assert_eq!(view.take_activity(), (false, false));
+        assert_eq!(view.contents(), "hola");
+        // Teclear o pegar en él no hace nada.
+        view.input(TermInput::Bytes(b"x".to_vec()));
+        view.input(TermInput::Key(Key::Enter, egui::Modifiers::NONE));
+        view.user_paste("uno\ndos".into());
+        assert!(!view.is_confirming_paste());
+        view.poll();
+        assert!(!view.is_connected());
+        assert_eq!(view.contents(), "hola");
+        assert!(view.signals.is_empty());
+        // Vaciarlo lo deja como nuevo.
+        view.viewer_reset(30, 5);
+        assert_eq!(view.contents(), "");
+    }
+
+    #[test]
+    fn local_shell_sessions_can_be_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let waker: Waker = std::sync::Arc::new(|| {});
+        let backend = spawn_local_shell(waker, 80, 24).unwrap();
+        let mut view = TerminalView::new(backend);
+        let path = view.start_cast(dir.path(), "local").unwrap();
+        wait_until(&mut view, "la conexión de la shell local", |view| {
+            view.is_connected()
+        });
+        let command: &[u8] = if cfg!(windows) {
+            b"echo god^42remote\r"
+        } else {
+            b"echo god$((40+2))remote\r"
+        };
+        view.send(command.to_vec());
+        wait_until(&mut view, "la salida de la orden", |view| {
+            view.contents().contains("god42remote")
+        });
+        assert!(view.cast.as_ref().is_some_and(|cast| cast.error.is_none()));
+        view.stop_cast();
+        // La grabación es un asciicast válido, con tiempos crecientes, y al
+        // reproducirla aparece lo mismo que se vio.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut lines = text.lines();
+        let header: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(header["version"], 2);
+        let mut last = 0.0;
+        let mut events = 0;
+        for line in lines {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            let time = event[0].as_f64().unwrap();
+            assert!(time >= last, "{line}");
+            last = time;
+            assert!(event[1] == "o" || event[1] == "r", "{line}");
+            assert!(event[2].is_string(), "{line}");
+            events += 1;
+        }
+        assert!(events >= 1);
+        assert!(play(&path).contents().contains("god42remote"));
+    }
+
+    /// Las órdenes que el terminal ha reconocido, vaciando la lista.
+    fn commands(view: &mut TerminalView) -> Vec<String> {
+        std::mem::take(&mut view.signals)
+            .into_iter()
+            .filter_map(|signal| match signal {
+                Signal::Command(command) => Some(command),
+                Signal::CommandDone(_) => None,
+            })
+            .collect()
+    }
+
+    /// Teclea texto carácter a carácter, como lo haría el usuario.
+    fn type_text(view: &mut TerminalView, text: &str) {
+        for c in text.chars() {
+            view.input(TermInput::Bytes(c.to_string().into_bytes()));
+        }
+    }
+
+    fn press_enter(view: &mut TerminalView) {
+        view.input(TermInput::Key(Key::Enter, egui::Modifiers::NONE));
+    }
+
+    #[test]
+    fn executed_commands_are_recognised_from_the_screen() {
+        let (mut view, mut sent, events) = fake_terminal();
+        let feed = |view: &mut TerminalView, data: &[u8]| {
+            events.send(TermEvent::Data(data.to_vec())).unwrap();
+            view.poll();
+        };
+        // Sin pedirlo no se sigue nada.
+        feed(&mut view, b"ana@web:~$ ");
+        type_text(&mut view, "ls");
+        feed(&mut view, b"ls");
+        press_enter(&mut view);
+        feed(&mut view, b"\r\nfichero\r\nana@web:~$ ");
+        assert!(view.signals.is_empty() && view.tracker.is_none());
+
+        view.set_command_capture(true);
+        // Lo normal: se teclea, la shell lo repite, Intro.
+        type_text(&mut view, "ls -la /tmp");
+        feed(&mut view, b"ls -la /tmp");
+        press_enter(&mut view);
+        assert!(view.signals.is_empty());
+        feed(&mut view, b"\r\ntotal 0\r\nana@web:~$ ");
+        assert_eq!(commands(&mut view), ["ls -la /tmp"]);
+        // Lo tecleado llega a la shell tal cual.
+        let typed: Vec<u8> = sent_bytes(&mut sent).concat();
+        assert!(typed.ends_with(b"ls -la /tmp\r"));
+
+        // Con retardo: se pulsa Intro antes de que llegue el eco, y el
+        // final del eco viene en el mismo bloque que la salida.
+        type_text(&mut view, "df -h");
+        press_enter(&mut view);
+        feed(&mut view, b"df ");
+        assert!(view.signals.is_empty());
+        feed(
+            &mut view,
+            b"-h\r\nFilesystem  Size  Used\r\n/dev/sda1   50G   20G\r\nana@web:~$ ",
+        );
+        assert_eq!(commands(&mut view), ["df -h"]);
+
+        // Una contraseña: se teclea sin eco y no queda en ninguna parte.
+        type_text(&mut view, "sudo -s");
+        feed(&mut view, b"sudo -s");
+        press_enter(&mut view);
+        feed(&mut view, b"\r\n[sudo] password for ana: ");
+        assert_eq!(commands(&mut view), ["sudo -s"]);
+        type_text(&mut view, "hunter2");
+        press_enter(&mut view);
+        feed(&mut view, b"\r\nroot@web:~# ");
+        assert!(view.signals.is_empty(), "{:?}", view.signals);
+
+        // Una orden más larga que la fila sigue en la de debajo y se lee
+        // entera; la flecha arriba (historial de la shell) también vale.
+        view.resize(30, 10);
+        let long = "echo uno dos tres cuatro cinco seis";
+        type_text(&mut view, long);
+        feed(&mut view, long.as_bytes());
+        press_enter(&mut view);
+        feed(
+            &mut view,
+            b"\r\nuno dos tres cuatro cinco seis\r\nroot@web:~# ",
+        );
+        assert_eq!(commands(&mut view), [long]);
+        view.input(TermInput::Key(Key::ArrowUp, egui::Modifiers::NONE));
+        feed(&mut view, b"uptime");
+        press_enter(&mut view);
+        feed(&mut view, b"\r\n 10:00 up 3 days\r\nroot@web:~# ");
+        assert_eq!(commands(&mut view), ["uptime"]);
+
+        // Lo que se teclea en una aplicación a pantalla completa no cuenta.
+        type_text(&mut view, "vi notas");
+        feed(&mut view, b"vi notas");
+        press_enter(&mut view);
+        feed(&mut view, b"\r\n\x1b[?1049h\x1b[H~\r\n~");
+        assert_eq!(commands(&mut view), ["vi notas"]);
+        type_text(&mut view, "ihola");
+        press_enter(&mut view);
+        feed(&mut view, b"hola\r\n");
+        feed(&mut view, b"\x1b[?1049lroot@web:~# ");
+        assert!(view.signals.is_empty());
+        // Los snippets lanzados también son órdenes.
+        view.send_macro(b"systemctl status nginx\r".to_vec());
+        feed(
+            &mut view,
+            b"systemctl status nginx\r\nactive\r\nroot@web:~# ",
+        );
+        assert_eq!(commands(&mut view), ["systemctl status nginx"]);
+
+        // Al dejar de recordar se deja de seguir.
+        view.set_command_capture(false);
+        type_text(&mut view, "secreto");
+        feed(&mut view, b"secreto");
+        press_enter(&mut view);
+        feed(&mut view, b"\r\nroot@web:~# ");
+        assert!(view.signals.is_empty() && view.tracker.is_none());
+        // Un reproductor de grabaciones nunca sigue nada.
+        let mut viewer = TerminalView::viewer(80, 24);
+        viewer.set_command_capture(true);
+        assert!(viewer.tracker.is_none());
+    }
+
+    #[test]
+    fn shell_marks_tell_commands_from_program_input() {
+        let (mut view, _sent, events) = fake_terminal();
+        let feed = |view: &mut TerminalView, data: &[u8]| {
+            events.send(TermEvent::Data(data.to_vec())).unwrap();
+            view.poll();
+        };
+        view.set_command_capture(true);
+        // Un indicador que no se parece a ninguno, marcado por la shell.
+        feed(&mut view, "\x1b]133;A\x07web ~ ⟩ \x1b]133;B\x07".as_bytes());
+        type_text(&mut view, "mysql");
+        feed(&mut view, b"mysql");
+        press_enter(&mut view);
+        feed(&mut view, b"\r\n\x1b]133;C\x07Welcome\r\nmysql> ");
+        assert_eq!(commands(&mut view), ["mysql"]);
+        // Lo que se le escribe al programa no es una orden de la shell…
+        type_text(&mut view, "select 1;");
+        feed(&mut view, b"select 1;");
+        press_enter(&mut view);
+        feed(&mut view, b"\r\n1\r\nmysql> ");
+        // …ni una contraseña que el programa enseñe al teclearla.
+        type_text(&mut view, "set password = 'x';");
+        feed(&mut view, b"set password = 'x';");
+        press_enter(&mut view);
+        feed(&mut view, b"\r\nOK\r\nmysql> ");
+        assert!(view.signals.is_empty(), "{:?}", view.signals);
+        // De vuelta en la shell se sigue anotando. La shell puede haber
+        // reescrito lo tecleado (una abreviatura): vale lo que se ve.
+        feed(
+            &mut view,
+            "Bye\r\n\x1b]133;D;0\x07\x1b]133;A\x07web ~ ⟩ \x1b]133;B\x07".as_bytes(),
+        );
+        type_text(&mut view, "gco main");
+        feed(&mut view, b"gco main");
+        press_enter(&mut view);
+        feed(
+            &mut view,
+            "\r\x1b[Kweb ~ ⟩ git checkout main\r\n\x1b]133;C\x07".as_bytes(),
+        );
+        assert_eq!(commands(&mut view), ["git checkout main"]);
+    }
+
+    #[test]
+    fn local_shell_commands_reach_the_history_but_hidden_input_does_not() {
+        let waker: Waker = std::sync::Arc::new(|| {});
+        let backend = spawn_local_shell(waker, 100, 24).unwrap();
+        let mut view = TerminalView::new(backend);
+        view.set_command_capture(true);
+        // Se espera al indicador: algo escrito y la shell en silencio.
+        wait_until(&mut view, "el indicador de la shell", |view| {
+            view.is_connected() && !view.contents().trim().is_empty()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        view.poll();
+        let command = if cfg!(windows) {
+            "echo god^42remote"
+        } else {
+            "echo god$((40+2))remote"
+        };
+        type_text(&mut view, command);
+        // El eco completo, antes de pulsar Intro (no es obligado, pero así
+        // la prueba no depende de cómo redibuje la línea cada shell).
+        wait_until(&mut view, "el eco de lo tecleado", |view| {
+            view.contents().contains(command)
+        });
+        press_enter(&mut view);
+        wait_until(&mut view, "la salida de la orden", |view| {
+            view.contents().contains("god42remote")
+        });
+        assert_eq!(commands(&mut view), [command]);
+        if cfg!(windows) {
+            return;
+        }
+        // Una lectura sin eco, como la de una contraseña: lo que se teclea
+        // ahí no aparece en pantalla y no llega al historial.
+        let hidden = "stty -echo; read x; stty echo; echo leido$((1+1))";
+        type_text(&mut view, hidden);
+        wait_until(&mut view, "el eco de lo tecleado", |view| {
+            view.contents().contains(hidden)
+        });
+        press_enter(&mut view);
+        wait_until(&mut view, "que la orden empiece", |view| {
+            view.signals.contains(&Signal::Command(hidden.to_string()))
+        });
+        // (Un momento para que `stty -echo` haya hecho efecto.)
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        view.poll();
+        type_text(&mut view, "hunter2");
+        press_enter(&mut view);
+        wait_until(&mut view, "el final de la lectura", |view| {
+            view.contents().contains("leido2")
+        });
+        assert!(!view.contents().contains("hunter2"), "{}", view.contents());
+        assert_eq!(commands(&mut view), [hidden]);
     }
 
     #[test]

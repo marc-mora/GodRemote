@@ -27,6 +27,10 @@ pub enum Command {
     RunOnFolder,
     VaultContents,
     Dashboard,
+    Triggers,
+    ToggleCast,
+    PlayCast,
+    History,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +40,8 @@ pub enum PaletteAction {
     RunSnippet(Uuid),
     StartTunnel(Uuid),
     StopTunnel(Uuid),
+    /// Escribir en el terminal activo una orden de su historial.
+    TypeCommand(String),
     Command(Command),
 }
 

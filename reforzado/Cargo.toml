@@ -135,6 +135,10 @@ path = "../tests/totp_autofill.rs"
 name = "security_keys"
 path = "../tests/security_keys.rs"
 
+[[test]]
+name = "terminal_tools"
+path = "../tests/terminal_tools.rs"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

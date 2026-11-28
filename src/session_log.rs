@@ -24,6 +24,10 @@ pub struct LogSettings {
     /// Anteponer la hora a cada línea.
     #[serde(rename = "horas")]
     pub timestamps: bool,
+    /// Grabar además todas las sesiones con sus tiempos (asciicast,
+    /// `.cast`), en la misma carpeta, para poder reproducirlas.
+    #[serde(rename = "grabar_siempre")]
+    pub record_always: bool,
 }
 
 impl LogSettings {
@@ -52,6 +56,11 @@ enum Escape {
     /// `ESC (` y similares: falta un carácter más.
     Charset,
 }
+
+/// Una línea que no termina nunca (un fichero binario, un servidor
+/// malintencionado) se corta al llegar a este tamaño para no acumularla
+/// entera en memoria.
+const MAX_LINE_CHARS: usize = 16 * 1024;
 
 /// Convierte la salida de un terminal en líneas de texto legibles.
 #[derive(Debug)]
@@ -108,6 +117,11 @@ impl Plain {
             }
         }
         lines
+    }
+
+    /// La línea en curso, tal como va: lo escrito desde el último salto.
+    pub fn pending(&self) -> String {
+        self.line.iter().collect()
     }
 
     /// Devuelve la línea que quedara a medias (al cerrar el registro).
@@ -189,6 +203,11 @@ impl Plain {
                 c if c.is_control() => {}
                 c => self.put(c),
             }
+            if self.line.len() >= MAX_LINE_CHARS {
+                let line: String = std::mem::take(&mut self.line).into_iter().collect();
+                lines.push(line.trim_end().to_string());
+                self.column = 0;
+            }
         }
     }
 }
@@ -204,7 +223,7 @@ pub struct SessionLog {
 }
 
 /// Nombre de fichero seguro a partir del nombre de una sesión.
-fn file_stem(name: &str) -> String {
+pub(crate) fn file_stem(name: &str) -> String {
     let stem: String = name
         .trim()
         .chars()
@@ -224,26 +243,54 @@ fn file_stem(name: &str) -> String {
     }
 }
 
+/// Crea en `dir` un fichero nuevo para una sesión, con la fecha en el nombre
+/// (`sesion_20260131-101500.ext`) y, en Unix, legible solo por el usuario:
+/// lo que muestra un terminal puede incluir datos que nadie más debe ver.
+/// Nunca reutiliza un fichero que ya exista.
+pub(crate) fn create_session_file(
+    dir: &Path,
+    session: &str,
+    extension: &str,
+) -> Result<(PathBuf, std::fs::File)> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("No se pudo crear la carpeta {}", dir.display()))?;
+    let now = chrono::Local::now();
+    let base = format!("{}_{}", file_stem(session), now.format("%Y%m%d-%H%M%S"));
+    let mut last_error = None;
+    // Dos sesiones del mismo equipo abiertas en el mismo segundo.
+    for n in 0..100 {
+        let path = if n == 0 {
+            dir.join(format!("{base}.{extension}"))
+        } else {
+            dir.join(format!("{base}-{n}.{extension}"))
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_error = Some(e),
+            Err(e) => {
+                return Err(e).with_context(|| format!("No se pudo crear {}", path.display()));
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "No se pudo crear un fichero para «{session}» en {}: {}",
+        dir.display(),
+        last_error.map(|e| e.to_string()).unwrap_or_default()
+    ))
+}
+
 impl SessionLog {
     /// Crea el fichero de registro de una sesión en la carpeta indicada.
     pub fn start(dir: &Path, session: &str, target: &str, timestamps: bool) -> Result<Self> {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("No se pudo crear la carpeta {}", dir.display()))?;
         let now = chrono::Local::now();
-        let base = format!("{}_{}", file_stem(session), now.format("%Y%m%d-%H%M%S"));
-        // Dos sesiones del mismo equipo abiertas en el mismo segundo.
-        let path = (0..100)
-            .map(|n| {
-                if n == 0 {
-                    dir.join(format!("{base}.log"))
-                } else {
-                    dir.join(format!("{base}-{n}.log"))
-                }
-            })
-            .find(|p| !p.exists())
-            .unwrap_or_else(|| dir.join(format!("{base}.log")));
-        let file = std::fs::File::create(&path)
-            .with_context(|| format!("No se pudo crear {}", path.display()))?;
+        let (path, file) = create_session_file(dir, session, "log")?;
         let mut log = Self {
             path,
             file: std::io::BufWriter::new(file),
@@ -405,6 +452,38 @@ mod tests {
     }
 
     #[test]
+    fn endless_lines_are_cut() {
+        // Sin saltos de línea (un binario, un servidor malintencionado) la
+        // línea en curso no crece sin límite.
+        let mut p = Plain::default();
+        let lines = p.feed("x".repeat(MAX_LINE_CHARS * 2 + 10).as_bytes());
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|l| l.chars().count() == MAX_LINE_CHARS));
+        assert_eq!(p.pending(), "x".repeat(10));
+        assert_eq!(p.feed(b" fin\r\n"), vec![format!("{} fin", "x".repeat(10))]);
+        assert_eq!(p.pending(), "");
+    }
+
+    #[test]
+    fn session_files_are_private_and_never_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, _file) = create_session_file(dir.path(), "web", "log").unwrap();
+        let (second, _file) = create_session_file(dir.path(), "web", "log").unwrap();
+        assert_ne!(first, second);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [&first, &second] {
+                let mode = std::fs::metadata(path).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600, "{}", path.display());
+            }
+        }
+        // Una carpeta que no se puede crear es un error, no un pánico.
+        let blocked = first.join("dentro");
+        assert!(create_session_file(&blocked, "web", "log").is_err());
+    }
+
+    #[test]
     fn timestamps_and_settings() {
         let dir = tempfile::tempdir().unwrap();
         let mut log = SessionLog::start(dir.path(), "", "", true).unwrap();
@@ -427,7 +506,7 @@ mod tests {
 
         let settings: LogSettings =
             serde_json::from_str(r#"{"siempre":true,"carpeta":"/tmp/reg"}"#).unwrap();
-        assert!(settings.always && !settings.timestamps);
+        assert!(settings.always && !settings.timestamps && !settings.record_always);
         assert_eq!(settings.dir(), PathBuf::from("/tmp/reg"));
         assert_eq!(LogSettings::default().dir(), crate::paths::logs_dir());
     }

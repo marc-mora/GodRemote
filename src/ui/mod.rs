@@ -2,11 +2,13 @@
 
 pub mod auth_extras;
 pub mod backdrop_view;
+pub mod cast_view;
 pub mod dashboard_view;
 pub mod desktop_view;
 pub mod editor;
 pub mod fleet_view;
 pub mod folder_editor;
+pub mod history_view;
 pub mod keys_view;
 pub mod macros_view;
 pub mod palette_view;
@@ -14,8 +16,10 @@ pub mod probe;
 pub mod server_bar;
 pub mod settings_view;
 pub mod sftp_view;
+mod term_tools;
 pub mod themes_view;
 pub mod transfer_view;
+pub mod triggers_view;
 pub mod tunnels_view;
 pub mod util;
 pub mod vault_view;
@@ -82,6 +86,8 @@ struct Tab {
     renamed: bool,
     /// Es la pantalla del servidor X integrado.
     x_server: bool,
+    /// Ha saltado un disparador (o ha terminado una orden larga) sin verse.
+    alert: Option<term_tools::TabAlert>,
 }
 
 /// Pestañas que se han pedido cerrar y tienen sesiones conectadas: se
@@ -323,6 +329,8 @@ pub struct App {
     /// Tamaño que pide la pestaña del servidor X y desde cuándo: se aplica
     /// cuando deja de cambiar.
     x_resize: Option<((u32, u32), Instant)>,
+    /// Disparadores y demás herramientas de los terminales.
+    term_tools: term_tools::TermTools,
 }
 
 /// Vista dividida: varios terminales a la vez, en mosaico.
@@ -474,6 +482,7 @@ impl App {
 
         Self {
             rt,
+            term_tools: term_tools::TermTools::new(&settings, &tree),
             prompter: Prompter::new(prompt_tx, waker.clone()),
             waker,
             tree,
@@ -587,6 +596,7 @@ impl App {
             rang: false,
             renamed: false,
             x_server: false,
+            alert: None,
         });
         self.active = self.tabs.len() - 1;
     }
@@ -1478,6 +1488,7 @@ impl App {
                 self.keys_window = Some(KeysWindow::default());
             }
             self.macros_menu(ui);
+            self.term_tools_menu(ui);
             let active = self
                 .tunnel_runs
                 .values()
@@ -1985,11 +1996,11 @@ impl App {
                             }
                             let in_group = matches!(tab.kind, TabKind::Terminal(_))
                                 && self.broadcast.includes(tab.id);
-                            let bell = if tab.rang { "🔔 " } else { "" };
+                            let bell = tab.mark();
                             let mut label = RichText::new(format!("{bell}{icon} {}", tab.title));
                             if in_group {
                                 label = label.color(warn_color());
-                            } else if tab.unseen || tab.rang {
+                            } else if tab.unseen || tab.rang || tab.alert.is_some() {
                                 // Actividad sin ver: destacado.
                                 label = label.strong().color(ui.visuals().hyperlink_color);
                             }
@@ -1998,6 +2009,8 @@ impl App {
                                 .interact(egui::Sense::click_and_drag());
                             let hover = if in_group {
                                 "Recibe lo que se escriba con la difusión activa"
+                            } else if let Some(alert) = &tab.alert {
+                                alert.text.as_str()
                             } else if tab.rang {
                                 "Ha sonado la campana en este terminal"
                             } else if tab.unseen {
@@ -2247,6 +2260,32 @@ impl App {
         );
         command("Túneles", "gestor de túneles", Command::Tunnels);
         command("Snippets y atajos", "", Command::Snippets);
+        command(
+            "Disparadores",
+            "avisar o contestar cuando aparezca un texto",
+            Command::Triggers,
+        );
+        if let Some(recording) = self.active_cast() {
+            command(
+                if recording {
+                    "Terminar la grabación de esta sesión"
+                } else {
+                    "Grabar esta sesión"
+                },
+                "asciicast, .cast",
+                Command::ToggleCast,
+            );
+        }
+        command(
+            "Reproducir una grabación…",
+            "asciicast, .cast",
+            Command::PlayCast,
+        );
+        command(
+            "Historial de órdenes",
+            "las ejecutadas en cada equipo",
+            Command::History,
+        );
         command("Claves SSH", "", Command::Keys);
         command("Temas", "aspecto, colores y letra", Command::Themes);
         command("Ajustes", "preferencias", Command::Settings);
@@ -2317,6 +2356,7 @@ impl App {
                 },
             });
         }
+        self.history_palette_items(&mut items);
         items
     }
 
@@ -2356,6 +2396,7 @@ impl App {
                 }
             }
             PaletteAction::StopTunnel(id) => self.stop_tunnel(id),
+            PaletteAction::TypeCommand(command) => self.type_in_terminal(&command, false),
             PaletteAction::Command(command) => self.run_command(command),
         }
     }
@@ -2372,6 +2413,10 @@ impl App {
             Command::Snippets => {
                 self.macros_window = Some(MacrosWindow::new(&self.macros, None));
             }
+            Command::Triggers => self.open_triggers_window(),
+            Command::ToggleCast => self.toggle_active_cast(),
+            Command::PlayCast => self.pick_cast(),
+            Command::History => self.open_history_window(),
             Command::Tunnels => {
                 self.tunnels_window = Some(TunnelsWindow::new(&self.tunnel_store));
             }
@@ -3402,6 +3447,15 @@ impl App {
                             notice = Some((error, true));
                             term.log = None;
                         }
+                        // Grabación de la sesión (.cast) e historial de órdenes.
+                        term_tools::header_buttons(
+                            ui,
+                            term,
+                            &tab.title,
+                            &self.settings.log,
+                            &mut notice,
+                            &mut self.term_tools,
+                        );
                     });
                 });
                 // La barra de información del servidor ocupa una franja fija
@@ -4324,6 +4378,7 @@ impl eframe::App for App {
                 .is_some_and(|id| self.tree.find(id).is_some())
         });
         self.store_secrets(secrets);
+        self.term_tools_poll(ui.ctx());
         self.note_background_activity();
         self.sync_sftp_views();
         self.auto_reconnect(ui.ctx());
@@ -4536,6 +4591,7 @@ impl eframe::App for App {
             }
         }
         self.tunnels_window_ui(&ctx);
+        self.term_tools_windows(&ctx);
         self.vault_guard(&ctx);
         self.fleet_window_ui(&ctx);
         self.dashboard_ui(&ctx);
