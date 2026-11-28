@@ -4,9 +4,12 @@ Gestor de conexiones remotas escrito en Rust, al estilo de MobaXterm: un árbol
 jerárquico de equipos, terminales con pestañas (SSH, Telnet, puerto serie),
 explorador SFTP, escritorios remotos integrados (RDP y VNC), servidor X propio
 para las aplicaciones gráficas remotas, túneles con su gestor, gestor de
-claves, snippets con atajos, vista dividida y escritura simultánea en varios
-terminales, ajustes heredados por carpeta, importación desde otras
-herramientas, temas personalizables y un baúl cifrado para las credenciales.
+claves, autenticación SSH con certificados, segundo factor (TOTP) y llaves
+de seguridad, snippets con atajos, vista dividida y escritura simultánea en
+varios terminales, disparadores, grabación de sesiones e historial de
+órdenes, panel de estado de los equipos de una carpeta, ajustes heredados
+por carpeta, importación desde otras herramientas, temas personalizables y
+un baúl cifrado para las credenciales.
 
 **Descargas:** ejecutables para Windows, Linux y macOS en la
 [última versión publicada](https://github.com/marc-mora/GodRemote/releases/latest).
@@ -20,6 +23,7 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 ![Paleta de órdenes](docs/paleta.png)
 ![Confirmación al pegar varias líneas y color de la carpeta](docs/protecciones.png)
 ![Una orden en varios equipos](docs/varios-equipos.png)
+![Panel de estado de una carpeta, con alertas](docs/panel-estado.png)
 ![Visor del baúl](docs/baul.png)
 ![Sincronizar carpetas por SFTP](docs/sftp-sincronizar.png)
 ![Servidor X integrado](docs/servidor-x.png)
@@ -36,13 +40,15 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 | **Equipos** | Árbol de carpetas y subcarpetas, búsqueda, mover, duplicar, renombrar y eliminar. Conexión rápida `usuario@host[:puerto]`. |
 | **Carpetas con valores** | Una carpeta puede dar a sus equipos el usuario, la autenticación, los saltos, el fondo del terminal y la barra de información. |
 | **Importar y copiar** | Importa equipos de `~/.ssh/config`, PuTTY y MobaXterm. Copia de seguridad de toda la configuración en un solo fichero. |
-| **SSH** | Terminal integrado (xterm-256color, historial de 10 000 líneas, selección y copiar/pegar, ratón para `htop`, `mc`, `vim`…). Autenticación por contraseña, keyboard-interactive (PAM, códigos OTP), clave privada (OpenSSH, PEM, PuTTY `.ppk`) y agente SSH / Pageant. |
+| **SSH** | Terminal integrado (xterm-256color, historial de 10 000 líneas, selección y copiar/pegar, ratón para `htop`, `mc`, `vim`…). |
+| **Autenticación SSH** | Contraseña, keyboard-interactive (PAM, códigos OTP), clave privada (OpenSSH, PEM, PuTTY `.ppk`), certificados OpenSSH, agente SSH (el de OpenSSH y, en Windows, Pageant) y llaves de seguridad FIDO2 a través del agente. El código del segundo factor (TOTP) puede rellenarse solo al conectar. |
 | **Saltos (bastiones)** | Cada equipo tiene su lista ordenada de saltos SSH, como `ProxyJump a,b,c`. Vale para SSH, SFTP, Telnet, VNC y RDP integrado. |
 | **Túneles** | Reenvío local (`-L`), remoto (`-R`) y dinámico SOCKS5 (`-D`). Ligados a una sesión (se abren y se cierran con su terminal) o guardados en el **gestor de túneles**, que los inicia y los detiene sin abrir un terminal. |
-| **X11** | Servidor X propio, escrito en Rust e integrado: las aplicaciones gráficas remotas (clásicas, GTK 3, Qt 5, Tk, Motif, Java) se ven en una pestaña sin instalar VcXsrv, Xming ni XQuartz. También puede usarse el servidor X del sistema. Reenvío por SSH con cookie de autenticación. |
+| **X11** | Servidor X propio, escrito en Rust e integrado: las aplicaciones gráficas remotas (clásicas, GTK 3, GTK 4, Qt 5, Tk, Motif, Java) se ven en una pestaña sin instalar VcXsrv, Xming ni XQuartz, con sus ventanas (mover, redimensionar, minimizar, maximizar) y el puntero que pide cada aplicación; de forma experimental, cada una en su propia ventana del sistema. También puede usarse el servidor X del sistema. Reenvío por SSH con cookie de autenticación. |
 | **Agente y proxy** | Reenvío del agente SSH a un equipo (como `ssh -A`) y salida a través de un proxy HTTP o SOCKS5 de empresa. |
 | **Verificación de host** | Usa `~/.ssh/known_hosts`, compartido con OpenSSH. Pregunta la primera vez y **rechaza** la conexión si la clave del servidor cambia. |
 | **Terminal** | Búsqueda en pantalla e historial, registro de la sesión en un fichero, reconexión automática si se cae la red y reapertura de las pestañas al arrancar. Enlaces que se abren con `Ctrl+clic` y palabras resaltadas (errores en rojo, avisos en amarillo…) con reglas propias. |
+| **Disparadores, grabación e historial** | Reglas que avisan —o, si se pide expresamente, contestan— cuando en la salida de un terminal aparece un texto, y aviso cuando termina una orden larga en una pestaña que no estás mirando. Grabación de la sesión con sus tiempos (asciicast, `.cast`) y reproductor integrado. Historial de las órdenes ejecutadas en cada equipo, con buscador. |
 | **Pestañas** | Se reordenan arrastrando, se renombran con doble clic, llevan el color de su carpeta (producción en rojo) y avisan cuando hay salida nueva (o suena la campana) en una que no estás mirando. |
 | **Paleta de órdenes** | `Ctrl+Mayús+P` y escribir: salta a un equipo, una pestaña, un snippet, un túnel o una acción. Atajos para cambiar, abrir y cerrar pestañas. |
 | **Protecciones** | Pregunta antes de pegar varias líneas y antes de cerrar pestañas (o la aplicación) con sesiones conectadas. |
@@ -55,9 +61,10 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 | **Snippets** | Textos y órdenes con nombre que se envían al terminal desde el menú o con un atajo de teclado propio (`Ctrl+Alt+D`, `F6`…). Se escriben a mano o se graban tecleando, y admiten variables (`{{host}}`, `{{?Pregunta}}`). |
 | **Difusión** | Lo que escribes en un terminal se envía a la vez a todos los terminales abiertos o solo a los que elijas. |
 | **Barra de información** | Bajo cada terminal SSH: nombre del servidor, sistema, tiempo encendido, CPU, memoria, disco, red… Se elige qué se muestra, en qué orden y cada cuánto se actualiza. |
+| **Panel de estado** | Todos los equipos SSH de una carpeta a la vez: conexión, latencia, CPU, carga, memoria, disco más lleno, tiempo encendido y minigráfica de tendencia; alertas por umbrales con historial. |
 | **Temas** | Claro u oscuro según el sistema operativo, y cambia con él. Cinco temas integrados y editor en vivo de colores, tipos y tamaños de letra, interlineados, separaciones y bordes. Importar y exportar en JSON. |
 | **Fondo del terminal** | Un texto, un dibujo ASCII o una imagen detrás del texto, con la opacidad que se quiera. Por tema o por equipo. |
-| **Claves** | Lista las claves de `~/.ssh` y las propias, genera pares Ed25519 / ECDSA (con passphrase opcional), importa claves y copia la pública. |
+| **Claves** | Lista las claves de `~/.ssh` y las propias, con sus certificados, y lo que hay cargado en el agente; genera pares Ed25519 / ECDSA (con passphrase opcional), importa claves y copia la pública. |
 | **Credenciales** | Baúl cifrado con contraseña maestra (Argon2id + XChaCha20-Poly1305). Las contraseñas solo se guardan tras una autenticación correcta. Se bloquea solo tras un rato sin actividad y tiene un visor para revisar y borrar lo guardado. |
 | **Terminal local** | Con la shell que elijas: PowerShell, cmd, WSL o Git Bash en Windows; bash, zsh, fish… en Linux y macOS. |
 
@@ -170,8 +177,9 @@ segunda edición.
 
 **Ctrl+Mayús+P** abre una caja de búsqueda sobre todo lo que se puede abrir:
 pestañas abiertas, equipos del árbol (por nombre, carpeta, usuario o
-dirección), snippets, túneles y acciones (terminal local, vista dividida,
-difusión, ajustes…). Se escribe parte del nombre —varias palabras, sin
+dirección), snippets, túneles, las últimas órdenes del historial del equipo
+de la pestaña activa y acciones (terminal local, vista dividida, difusión,
+ajustes…). Se escribe parte del nombre —varias palabras, sin
 acentos, o sus iniciales salteadas: «prd» encuentra «producción»—, se elige
 con las flechas e Intro lo abre.
 
@@ -248,8 +256,52 @@ En el editor de una sesión:
   terminal muestra cuántos están activos. Estos túneles viven mientras viva
   el terminal de la sesión.
 - **Reenviar el agente SSH**: como `ssh -A`. Las claves de tu agente
-  (OpenSSH en Linux, macOS y Windows) quedan disponibles en ese equipo para
-  saltar desde él a otros con `ssh` o `git`, sin copiar ninguna clave.
+  (OpenSSH en Linux, macOS y Windows; en Windows, también Pageant) quedan
+  disponibles en ese equipo para saltar desde él a otros con `ssh` o `git`,
+  sin copiar ninguna clave.
+
+### Más formas de autenticarse por SSH
+
+Además de la contraseña y la clave privada:
+
+- **Certificados OpenSSH**: con «Clave privada», si junto a la clave hay un
+  `<clave>-cert.pub` (lo que deja `ssh-keygen -s`), se presenta el
+  certificado al servidor, como hace OpenSSH. El campo «certificado» del
+  editor permite indicar otro fichero y resume el que se va a usar
+  (identidad, usuarios para los que vale y validez). Si el servidor no lo
+  acepta, o está caducado, se prueba la clave sola, y el aviso o el error
+  dicen qué pasó: caducado, de otra clave, el usuario no está entre sus
+  principales, o autoridad en la que el servidor no confía. **🔑 Claves**
+  muestra de cada certificado la identidad, los principales, la validez y
+  la autoridad que lo firmó, y marca en rojo los caducados. Importar o
+  borrar una clave se lleva su certificado. Los certificados cargados en el
+  agente también se ofrecen.
+- **Segundo factor (TOTP)**: en el editor del equipo, «Segundo factor»
+  admite el secreto TOTP en base32 o la dirección `otpauth://…` del código
+  QR (SHA-1/256/512, de 6 a 8 cifras, cualquier periodo). Se guarda cifrado
+  en el baúl, nunca en claro. Con el baúl abierto el editor enseña el código
+  actual, lo que le queda y un botón para copiarlo. Con «Rellenar el código
+  solo al conectar» (se marca al escribir un secreto), cuando el servidor
+  pide un código de verificación por keyboard-interactive GodRemote lo
+  contesta. Con el baúl bloqueado, o si el servidor no acepta el código, se
+  pregunta como siempre. Vale tanto si el servidor pide contraseña y código
+  juntos (PAM) como en dos pasos (con `AuthenticationMethods` en
+  `publickey,keyboard-interactive` o `password,keyboard-interactive`).
+  Nunca se envía dos veces el mismo código: si acabas de abrir otra conexión
+  al mismo equipo, se espera al siguiente.
+- **Agente SSH y Pageant**: «Agente SSH» usa el agente de OpenSSH y, en
+  Windows, también Pageant (PuTTY). **⚙ Ajustes → Conexión → Agente SSH**
+  (solo aparece en Windows) elige entre automático (OpenSSH y, si no está o
+  no tiene claves, Pageant), solo OpenSSH o solo Pageant. El reenvío del
+  agente (`ssh -A`) usa el mismo. **🔑 Claves** lista lo que hay cargado en
+  el agente. Lo de Pageant compila para Windows, pero no se ha ejecutado
+  (véase «Limitaciones conocidas»).
+- **Llaves de seguridad FIDO2** (`ed25519-sk`, `ecdsa-sk`): se usan a través
+  del agente SSH; `ssh-add` las carga y el agente pide la firma a la llave.
+  Con «Agente SSH» no hay que hacer nada más. También se puede elegir el
+  fichero de la llave como «Clave privada»: GodRemote busca esa clave en el
+  agente. Antes de firmar avisa de que hay que tocar la llave. **🔑 Claves**
+  las marca como «llave de seguridad».
 
 ### Proxy de salida
 
@@ -286,6 +338,14 @@ Con el integrado:
   clic y se cierra con su aspa. Los diálogos salen centrados sobre su
   ventana. El teclado va a la ventana que tiene el foco; el ratón, a la que
   está debajo.
+- El botón de **minimizar** de la barra deja la ventana como una ficha en
+  una tira al pie de la pantalla X, y vuelve con un clic. También se atiende
+  a las aplicaciones que se minimizan o se restauran solas. Las ventanas
+  maximizadas dejan sitio a la tira.
+- El **puntero** es el que pide la aplicación: los de forma (texto, mano,
+  espera, redimensionar…) con el cursor del sistema, y los de imagen o
+  animados dibujados tal cual. Sobre los bordes de las ventanas aparece el
+  de redimensionar.
 - La pantalla se ajusta sola al tamaño de la pestaña, y las ventanas
   maximizadas la siguen.
 - El portapapeles va en los dos sentidos: lo que selecciones en una
@@ -297,21 +357,40 @@ Con el integrado:
 - **Aceptar también programas de este equipo** hace que escuche en
   `127.0.0.1`; la pestaña muestra el `DISPLAY` que hay que usar (por ejemplo,
   desde WSL o desde un terminal local).
+- **Cada aplicación en su ventana** (experimental): en **⚙ Ajustes →
+  Aplicaciones gráficas (X11) → Aplicaciones** se elige «en una pestaña»
+  (por defecto) o «cada una en su ventana». Con lo segundo, cada ventana de
+  las aplicaciones remotas sale como una ventana más del sistema, con su
+  título y su marco: se mueve, se redimensiona y se cierra como cualquier
+  otra, y los menús y listas desplegables salen en su sitio. La pestaña
+  **Servidor X** sigue ahí como mando: cerrarla para el servidor y cierra
+  las aplicaciones. El cambio vale para la próxima vez que arranque el
+  servidor. Solo se ha probado en Linux con X11; en Wayland no está
+  disponible y las aplicaciones siguen en la pestaña.
 
 El servidor entiende el protocolo X11 básico (*core*: ventanas, dibujo,
 fuentes, colores, teclado, ratón y selecciones) y las extensiones que piden
 las aplicaciones actuales: **RENDER** (composición con transparencia y texto
-suavizado: la usan GTK, Xft y Java), **SHAPE** (ventanas con forma) y
-**RANDR** (para que sepan el tamaño de la pantalla y cuándo cambia).
+suavizado: la usan GTK, Xft y Java), **SHAPE** (ventanas con forma),
+**RANDR** (para que sepan el tamaño de la pantalla y cuándo cambia),
+**XKEYBOARD** (XKB: el mapa y el estado del teclado) y **XInput 2.0**
+(teclado y ratón como dispositivos). Con las dos últimas arrancan las
+aplicaciones **GTK 4**.
+
+A las aplicaciones GTK 4 conviene lanzarlas con `GSK_RENDERER=cairo` (por
+ejemplo, `GSK_RENDERER=cairo gtk4-demo &`): sin ello pintan con OpenGL por
+software, mandan la ventana entera en cada fotograma y, al maximizar o
+redimensionar, pueden dejar zonas sin pintar.
 
 | Aplicaciones | Estado |
 |--------------|--------|
 | Clásicas (`xterm` —también con `-fa`—, `xclock`, `xcalc`, `xeyes`, `xlogo`, `xmessage`, `xfontsel`, `xev`) y utilidades (`xdpyinfo`, `xprop`, `xwininfo`, `xlsfonts`, `xrandr`, `wmctrl`) | Probadas |
+| `xdotool` | Encuentra e inspecciona ventanas; no puede teclear ni pulsar (falta XTEST) |
 | **GTK 3** | Probada: teclado (con Ñ y €), ratón, menús, portapapeles en los dos sentidos |
-| **Qt 5** | Probada: teclado, ratón y portapapeles |
+| **GTK 4** | Probada (`zenity` y `gtk4-widget-factory`; `gtk4-demo`, solo a ojo): teclado (con Ñ y €), ratón, menús emergentes y rueda; mejor con `GSK_RENDERER=cairo` |
+| **Qt 5** | Probada: teclado, ratón, portapapeles, y minimizarse y volver |
 | **Tk**, **Motif** | Probadas: botones, menús, diálogos y tecleo |
 | **Java (Swing)** | Probada: botones y tecleo; el texto sale sin suavizar |
-| **GTK 4** | No arranca (exige XInput2 y XKB) |
 | Qt 6, navegadores (Chromium, Electron, Firefox), LibreOffice | Sin probar |
 | Lo que necesite OpenGL (GLX) | No funciona |
 
@@ -358,6 +437,55 @@ servidor tenga una shell POSIX (`sh`); el uso de CPU, memoria y red sale de
 sistema y el disco. En equipos donde no proceda (routers, conmutadores) se
 desactiva en la ficha de la sesión, en «Terminal: barra de información y
 fondo».
+
+### Panel de estado de una carpeta
+
+Clic derecho sobre una carpeta → **📊 Panel de estado** (o, en la paleta,
+«Panel de estado de los equipos de una carpeta», que toma la carpeta
+seleccionada). Se abre una ventana que vigila a la vez todos los equipos SSH
+de la carpeta y de sus subcarpetas:
+
+- **Qué muestra de cada equipo**: estado de la conexión, latencia, uso de
+  CPU, carga, memoria, el disco más lleno, tiempo encendido, una minigráfica
+  de los últimos minutos (CPU o carga) y la hora del último dato. Con el
+  ratón sobre una fila se ve el detalle: carga a 1, 5 y 15 minutos, memoria,
+  todos los discos y el error si lo hay. Lo que un equipo no da (otro Unix,
+  un BusyBox recortado) queda vacío.
+- **Refresco**: cada 10 segundos de fábrica. Cada equipo conserva su
+  conexión entre refrescos; por ella corre una consulta ligera (lee `/proc`
+  y llama a `df`) y se mide la latencia con un sondeo SSH. Al cerrar la
+  ventana se cierran todas las conexiones. Plegada (el triángulo del título)
+  sigue vigilando y avisando, pero no repinta.
+- **Tabla**: pulsar el título de una columna ordena por ella, y otra vez, al
+  revés. La caja filtra por nombre, dirección, estado o alerta. «Solo con
+  problemas» deja lo que va mal. Doble clic abre el terminal del equipo;
+  botón derecho → «Reintentar ahora».
+- **Conexiones**: como mucho 32 abiertas a la vez (ajustable), y se abren de
+  cuatro en cuatro. Si la carpeta tiene más equipos que el tope, se turnan:
+  cada uno conecta, da sus datos y cede el sitio.
+- **Si un equipo cae** se reintenta solo, con esperas de 2, 5, 10, 20, 30,
+  60 y 120 segundos. No se insiste si lo que falla es la autenticación o la
+  clave del servidor.
+- **Credenciales**: las contraseñas o passphrases que no estén en el baúl, y
+  las claves de servidores desconocidos, se preguntan como en el resto de la
+  aplicación al abrir el panel o al pulsar «Reintentar ahora». Si se
+  cancela, el equipo queda en «falta credencial» y los demás siguen. Las
+  reconexiones automáticas nunca preguntan. Al bloquearse el baúl el panel
+  olvida las credenciales; al desbloquearlo, los equipos que esperaban una
+  se reintentan solos.
+- **Alertas** (botón «⚙ Refresco y alertas»):
+  - CPU por encima del 90 %, o carga por encima de 2 por núcleo, durante 3
+    muestras seguidas;
+  - memoria por encima del 90 %;
+  - disco más lleno por encima del 90 %;
+  - equipo inalcanzable (falla el intento de conectar) o sin acceso (falta
+    una credencial, o el servidor la rechaza).
+
+  La fila se resalta y el dato va en rojo. La aplicación avisa en su barra
+  de estado, al pie de la ventana, al saltar una alerta y al resolverse, no
+  en cada muestra; las que coinciden van en un solo aviso. Abajo queda el
+  historial de las últimas 200. Cada umbral se puede cambiar o desactivar;
+  se guardan en `settings.json` (`panel_estado`).
 
 ### Temas
 
@@ -448,7 +576,8 @@ responde cada uno.
 - **⏺ Registrar** guarda en un fichero de texto lo que vaya mostrando el
   terminal, sin colores ni secuencias de escape. En **⚙ Ajustes** se puede
   pedir que se registre siempre, con la hora en cada línea, y elegir la
-  carpeta.
+  carpeta. Para guardar la sesión con sus tiempos y volver a verla, véase
+  «Grabar y reproducir sesiones».
 - **Reconexión**: si un terminal pierde la conexión, se vuelve a conectar
   solo, con esperas crecientes, conservando lo que había en pantalla. No se
   reintenta si lo que falla es la contraseña o la clave, ni si cierras tú la
@@ -471,10 +600,92 @@ responde cada uno.
   otra se destaca; si además ha sonado la campana, lleva un 🔔. Se quita al
   abrirla, y se puede desactivar en **⚙ Ajustes**.
 
+### Disparadores y aviso de fin de orden
+
+**🛠 Herramientas → Disparadores**, en la barra superior (o «Disparadores»
+en la paleta), gestiona reglas «cuando en la salida de un terminal aparezca
+este texto, haz algo»:
+
+- **Texto**: literal o, marcando *Comodines*, con `*` (cualquier texto) y
+  `?` (un carácter); `\*` y `\?` son los signos tal cual. No distingue
+  mayúsculas salvo que se pida. «Probar con» dice si una línea de ejemplo
+  dispararía la regla.
+- **Ámbito**: todos los terminales (también los locales), una carpeta o un
+  equipo.
+- **Avisar**: aviso en la barra de estado de la aplicación y marca ❗ en la
+  pestaña si no se está mirando; *con campana* la marca es 🔔 y, si
+  GodRemote no está en primer plano, pide atención en la barra de tareas.
+- **Enviar un texto** (contestar `y` a una pregunta): hay que marcarlo y
+  confirmarlo, y la regla queda señalada en la lista con «⚠ ENVÍA TEXTO».
+  Se escribe como un snippet (un salto de línea es Intro). Cada respuesta se
+  anuncia.
+- **Enfriamiento**: segundos antes de que la regla pueda volver a dispararse
+  en el mismo terminal (mínimo 2 s si envía texto).
+
+Salvaguardas: lo que tecleas, pegas o envía un snippet o un disparador no
+dispara nada (la línea en la que se escribe no se mira hasta que termina, y
+lo que envía un disparador se ignora si reaparece en los 5 s siguientes).
+Una regla que envía texto solo contesta a la línea donde espera el cursor,
+cuando lleva un momento quieta: nunca a lo que pasa de largo en un listado
+ni a una aplicación a pantalla completa. Solo contesta una regla por
+pregunta, no se puede guardar una regla cuya respuesta contenga su propio
+texto, y la que contesta más de 6 veces en un minuto queda en pausa en esa
+pestaña.
+
+**Órdenes largas**: en la misma ventana, «Avisar cuando termine una orden
+que dure más de N s en una pestaña que no estoy mirando» (activado, 30 s).
+Si la shell marca sus órdenes (OSC 133: fish 4, PowerShell en Windows
+Terminal, bash o zsh con la integración de kitty, WezTerm, iTerm2…) el aviso
+es exacto y dice si terminó con error. Si no, se deduce: se pulsó Intro,
+pasó ese tiempo hasta la última salida y después hay silencio con el cursor
+en algo que parece un indicador o una pregunta.
+
+### Grabar y reproducir sesiones
+
+- **🎬 Grabar**, en la cabecera de cada terminal (también en
+  **🛠 Herramientas** y en la paleta), guarda la sesión con sus tiempos en
+  **asciicast v2** (`.cast`, el formato de asciinema). Se graba lo que el
+  terminal muestra y sus cambios de tamaño, no lo que se teclea. Empieza con
+  lo que haya en pantalla, va a la carpeta de los registros y se detiene
+  sola al llegar a 1 GB. En **⚙ Ajustes → Registro de sesiones** se puede
+  pedir que se graben siempre todas.
+- **🛠 Herramientas → Reproducir una grabación…** abre un `.cast` propio o
+  de asciinema (versiones 2 y 3) en una ventana; el menú lista las últimas
+  grabaciones de la carpeta. Tiene reproducir/pausa (Espacio), volver al
+  principio (Inicio), barra de posición (flechas: ±5 s), velocidad de 0,5× a
+  8× y «Saltar silencios» (ninguna pausa dura más de 2 s, o lo que
+  recomiende la grabación). El terminal se ve con el tamaño grabado,
+  encogiendo la letra si no cabe. Se pueden abrir varias.
+
+### Historial de órdenes
+
+GodRemote recuerda las órdenes que ejecutas en cada equipo del árbol (los
+terminales locales comparten un historial). El botón **🕘** de la cabecera
+del terminal, **🛠 Herramientas → Historial de órdenes** o la paleta abren
+una ventana con buscador: Intro o doble clic **escribe** la orden en el
+terminal activo sin ejecutarla, Mayús+Intro (o ▶ Ejecutar) la ejecuta, y se
+puede copiar o borrar. Las 40 últimas del equipo de la pestaña activa salen
+también en la paleta («Historial»).
+
+- Se anota lo que el terminal **muestra** al pulsar Intro, sin el indicador
+  de la shell; nunca lo que se teclea. Una contraseña escrita sin eco no se
+  guarda. Tampoco las respuestas a preguntas (líneas que acaban en `:`, `?`
+  o `[s/N]`), lo tapado con asteriscos ni las órdenes que empiezan por un
+  espacio.
+- Con OSC 133 el indicador se conoce con exactitud y solo se anotan las
+  órdenes de la shell. Sin él, el indicador es lo que había delante del
+  cursor al empezar a teclear o, en último caso, se reconoce por su forma
+  (`$ `, `# `, `> `…).
+- En la misma ventana: dejar de recordar las de ese equipo, desactivar el
+  historial entero, cambiar el máximo por equipo (500; de 20 a 5000) y
+  borrar el de un equipo o todo. El de un equipo borrado del árbol se olvida
+  al arrancar.
+
 ### Baúl de credenciales
 
-**🔐 Baúl** guarda contraseñas y passphrases cifradas con una contraseña
-maestra. Además de crear, desbloquear, bloquear y cambiar la contraseña:
+**🔐 Baúl** guarda contraseñas, passphrases y secretos TOTP (los del segundo
+factor) cifrados con una contraseña maestra. Además de crear, desbloquear,
+bloquear y cambiar la contraseña:
 
 - **Ver lo guardado…** lista cada secreto con su dueño (el equipo o la
   carpeta) y permite borrarlo. Para ver o copiar un valor hay que repetir la
@@ -598,12 +809,13 @@ Linux, `%APPDATA%\godremote` en Windows; se puede cambiar con la variable
 | Fichero | Contenido |
 |---------|-----------|
 | `sessions.json` | Árbol de equipos. **No contiene secretos.** |
-| `vault.json` | Contraseñas y passphrases, cifradas. |
+| `vault.json` | Contraseñas, passphrases y secretos TOTP, cifrados. |
 | `keys/` | Claves generadas o importadas desde la aplicación. |
 | `themes/` | Temas del usuario. |
-| `settings.json` | Tema elegido y demás ajustes. |
+| `settings.json` | Tema elegido y demás ajustes, entre ellos los disparadores y los del panel de estado (`panel_estado`). |
 | `state.json` | Pestañas abiertas al cerrar (para reabrirlas). |
-| `logs/` | Registros de las sesiones de terminal. |
+| `logs/` | Registros de las sesiones de terminal y grabaciones `.cast`. |
+| `command_history.json` | Historial de órdenes por equipo. No entra en la copia de seguridad. |
 | `edit/` | Copias temporales de los ficheros remotos en edición. |
 | `macros.json` | Snippets y sus atajos. |
 | `tunnels.json` | Túneles del gestor de túneles. |
@@ -642,6 +854,18 @@ recuperar; el resto de la configuración sigue intacta.
   de abrirlo (aparece al pasar el ratón).
 - Un túnel del gestor marcado para iniciarse solo abre una conexión SSH cada
   vez que arrancas GodRemote: márcalo solo en equipos de confianza.
+- **Segundo factor (TOTP)**: el secreto se guarda cifrado en el baúl, nunca
+  en claro, y un mismo código no se envía dos veces.
+- **Disparadores que envían texto**: contestan a cualquier servidor o
+  programa que escriba ese texto. No pongas contraseñas en ellos: se guardan
+  sin cifrar en `settings.json`.
+- **Registros, grabaciones e historial de órdenes**: guardan lo que se vio
+  en pantalla, incluidos los secretos escritos a la vista (`mysql -pclave`).
+  En Linux y macOS se crean legibles solo por el usuario (permisos 0600).
+- El historial de órdenes se lee de la pantalla, que la escribe el servidor:
+  por eso lo normal es escribir la orden en el terminal sin ejecutarla.
+- Un `.cast` ajeno es entrada no fiable: al abrirlo se acotan su tamaño, sus
+  dimensiones y sus tiempos, y lo que pregunte al terminal no se contesta.
 
 ## Limitaciones conocidas
 
@@ -686,33 +910,89 @@ recuperar; el resto de la configuración sigue intacta.
 - Escritorios remotos: la tecla Windows y Ctrl+Alt+Supr solo desde los
   botones; Ctrl+Alt a la vez se trata como AltGr.
 - **Servidor X integrado**: protocolo básico de X11, BIG-REQUESTS, RENDER,
-  SHAPE y RANDR (este solo informa: no cambia resoluciones). Sin XKB,
-  XInput, XFIXES, MIT-SHM, Composite, DAMAGE, SYNC, XTEST ni GLX: las
-  aplicaciones **GTK 4** no arrancan, tampoco lo que use OpenGL, y no se han
-  probado Qt 6, Chromium/Electron, Firefox ni LibreOffice; para ellas, el
-  servidor X del sistema. De RENDER faltan piezas poco usadas (los
-  operadores «disjoint» y «conjoint» se tratan como los básicos, los filtros
-  de convolución como «nearest», y no hay mapas de alfa). No hay visual con
-  transparencia (ARGB), así que no hay ventanas translúcidas. Trabaja en una
-  sola pantalla dentro de su pestaña (las ventanas no salen al escritorio
-  como ventanas nativas), con un gestor de ventanas sencillo: mover,
-  redimensionar, maximizar, traer al frente y cerrar; **sin minimizar**, y
-  la pantalla completa y el arrastre desde las barras propias de GTK están
-  hechos pero sin probar con aplicaciones reales. Los cursores que piden las
-  aplicaciones no se dibujan (se ve el del sistema). El texto del protocolo
-  básico se dibuja con dos fuentes integradas (una de ancho fijo y otra
-  proporcional), sea cual sea la fuente X pedida, así que sus medidas no
-  coinciden al píxel con las de un servidor X tradicional (las aplicaciones
-  que traen sus propias letras por RENDER —GTK, Qt, `xterm -fa`— no lo
-  notan). En las aplicaciones Xlib clásicas (Tk, Motif) solo se ha probado
-  el tecleo Latin-1: el «€» no llegó en la prueba, hecha sin configuración
-  regional UTF-8. Qt avisa de que falta la extensión de teclado y sigue. Las
-  selecciones grandes (más de 1 MB) no se transfieren. `xdotool` contra este
-  servidor falla (necesita XKB). Una aplicación hostil no puede tumbar
-  GodRemote ni agotar su memoria, pero sí tener ocupado el servidor X un
-  rato. El rendimiento solo se ha medido en local, no por una red real.
-- **Reenvío del agente**: solo con el agente de OpenSSH; Pageant (PuTTY) no
-  se puede reenviar. En Windows no se ha probado.
+  SHAPE, RANDR (este solo informa: no cambia resoluciones), XKEYBOARD y
+  XInput 2.0. Sin XFIXES, MIT-SHM, XTEST, Composite, DAMAGE, SYNC,
+  Present/DRI3, XINERAMA ni GLX: no funciona lo que use OpenGL, y siguen sin
+  probar Qt 6, Chromium/Electron, Firefox y LibreOffice; para ellas, el
+  servidor X del sistema.
+  - De XKB se sirve el teclado (mapa, nombres, controles, compatibilidad y
+    estado), con un solo grupo; no hay geometría, indicadores ni
+    `GetKbdByName`, y las peticiones que cambian el teclado se aceptan sin
+    efecto.
+  - De XInput solo hay la versión 2.0, con un puntero y un teclado: sin
+    desplazamiento suave (la rueda llega como botones 4–7), pantallas
+    táctiles, gestos, barreras, eventos «raw» ni propiedades de dispositivo;
+    de XInput 1 solo hay la versión y la lista de dispositivos.
+  - De RENDER faltan piezas poco usadas (los operadores «disjoint» y
+    «conjoint» se tratan como los básicos, los filtros de convolución como
+    «nearest», y no hay mapas de alfa).
+  - No hay visual con transparencia (ARGB), así que no hay ventanas
+    translúcidas, y los menús flotantes de GTK 4 salen con un margen negro
+    donde iría su sombra.
+  - GTK 4 sin `GSK_RENDERER=cairo` va lento y puede dejar zonas sin pintar
+    al redimensionar; es cosa de Mesa cuando no hay MIT-SHM. De GTK 4 tienen
+    prueba automática `zenity` y `gtk4-widget-factory`; `gtk4-demo` solo se
+    ha visto a ojo.
+  - En su pestaña trabaja en una sola pantalla, con un gestor de ventanas
+    sencillo: mover, redimensionar, minimizar, maximizar, traer al frente y
+    cerrar. La pantalla completa y el arrastre desde las barras propias de
+    GTK están hechos pero sin probar con aplicaciones reales. Los cursores
+    animados solo tienen prueba unitaria: no se han visto en pantalla.
+  - Las ventanas sueltas son experimentales y vienen desactivadas. Solo
+    están probadas en Linux con X11 (ni Windows, ni macOS, ni HiDPI, ni
+    varios monitores): con prueba automática, `xterm`; a ojo, aplicaciones
+    GTK 3 y GTK 4 y un diálogo de `yad`; no con Qt 5, Tk, Motif ni Java, ni
+    sin gestor de ventanas, ni a través de una conexión SSH real. En Wayland
+    no están disponibles: la vuelta a la pestaña está programada, pero no se
+    ha visto en un Wayland real. Los diálogos no quedan ligados a su ventana
+    y pueden quedar detrás. Minimizar o maximizar desde el marco del sistema
+    no se le cuenta a la aplicación. Las ventanas con forma salen
+    rectangulares. Con monitores a la izquierda o encima del principal
+    (coordenadas negativas) el ratón no llega bien. Un píxel X equivale a un
+    punto de la interfaz, así que con HiDPI o zoom saldrán escaladas. El
+    arrastre desde las barras propias de GTK lo hace el sistema y tarda unos
+    fotogramas en empezar, y el cursor de imagen se pinta por software
+    dentro de la ventana.
+  - El texto del protocolo básico se dibuja con dos fuentes integradas (una
+    de ancho fijo y otra proporcional), sea cual sea la fuente X pedida, así
+    que sus medidas no coinciden al píxel con las de un servidor X
+    tradicional (las aplicaciones que traen sus propias letras por RENDER
+    —GTK, Qt, `xterm -fa`— no lo notan).
+  - En las aplicaciones Xlib clásicas (Tk, Motif) solo se ha probado el
+    tecleo Latin-1: el «€» no llegó en la prueba, hecha sin configuración
+    regional UTF-8.
+  - Las selecciones grandes (más de 1 MB) no se transfieren.
+  - `xdotool` encuentra e inspecciona ventanas, pero no puede teclear ni
+    pulsar (falta XTEST).
+  - Una aplicación hostil no puede tumbar GodRemote ni agotar su memoria,
+    pero sí tener ocupado el servidor X un rato. El rendimiento solo se ha
+    medido en local, no por una red real.
+  - Nada de lo nuevo (cursores, minimizar, XKEYBOARD y XInput, ventanas
+    sueltas) se ha probado en Windows ni en macOS.
+- **Agente SSH y Pageant**: con Pageant (PuTTY), la autenticación, el
+  listado de claves y el reenvío del agente están hechos y compilan para
+  Windows, pero no se han ejecutado. El agente de OpenSSH, reenvío incluido,
+  tampoco se ha probado en Windows.
+- **Certificados SSH**: solo de usuario; los certificados de host siguen sin
+  admitirse. Al importar de OpenSSH no se lee `CertificateFile`. Las
+  carpetas no tienen campo de certificado: con la clave de la carpeta solo
+  vale el `-cert.pub` que haya junto a ella. No se generan ni se firman
+  certificados. Los certificados de llaves `-sk` no se han probado.
+- **Segundo factor (TOTP)**: solo códigos por hora, no HOTP ni avisos push.
+  El relleno depende del texto de la pregunta («verification code», «código
+  de verificación», «OTP», «one-time», «token», «passcode»…); si el
+  servidor pregunta de otra forma, se pide a mano. Hace falta que el reloj
+  esté en hora. No hay lector de QR. Cualquier texto de letras es base32
+  válido, así que un secreto mal copiado no siempre se detecta al
+  escribirlo. Con periodos largos, si el código actual ya se usó y el
+  siguiente tarda más de 45 s, se pide a mano. Un segundo paso que no sea
+  contraseña o keyboard-interactive (dos claves, GSSAPI) falla con un
+  mensaje que lo dice.
+- **Llaves FIDO2**: solo a través del agente; GodRemote no habla con la
+  llave (no genera claves `-sk` ni pide el PIN). Probado sin hardware: con
+  una llave simulada en software y con `sk-dummy`, el proveedor de pruebas
+  de OpenSSH; nunca con una llave física (toque real, PIN, llave
+  desconectada).
 - **Proxy de salida**: HTTP `CONNECT` con autenticación básica y SOCKS5 sin
   autenticación o con usuario y contraseña; sin NTLM ni Kerberos, sin
   proxies encadenados y sin fichero de configuración automática (PAC). El
@@ -730,6 +1010,37 @@ recuperar; el resto de la configuración sigue intacta.
   de modo que no sirve para órdenes que preguntan algo; guarda hasta 512 KB
   de salida por equipo; si se agota el tiempo o se cancela, la orden puede
   seguir ejecutándose en el servidor.
+- **Panel de estado**:
+  - Solo equipos SSH, y datos completos solo en Linux (`/proc`). Hace falta
+    una shell POSIX y poder ejecutar órdenes; si no, el equipo figura «sin
+    datos», con su latencia.
+  - Una ventana (una carpeta) a la vez. Cambiar de carpeta o recargar
+    reinicia conexiones, historial y gráficas, que solo viven en memoria.
+    Los cambios del árbol y el tope de conexiones se aplican al recargar
+    (🔄).
+  - Cada equipo abre su propia conexión y las de sus saltos: N equipos tras
+    el mismo bastión son N conexiones al bastión.
+  - Con más equipos que conexiones permitidas, cada uno se actualiza solo
+    cuando le toca y reconecta en cada turno.
+  - Las credenciales tecleadas sin guardar en el baúl no se recuerdan: la
+    siguiente reconexión deja el equipo en «falta credencial».
+  - Los umbrales son comunes a todos los equipos, y la carga solo se juzga
+    si se conoce el número de núcleos.
+  - El disco más lleno descarta por tipo tmpfs, squashfs, overlay, FUSE de
+    usuario y los de solo lectura, salvo la raíz.
+  - La latencia es la de un sondeo SSH de extremo a extremo, no un ping.
+  - Los avisos son los de la barra de estado de la aplicación, no
+    notificaciones del sistema.
+  - Al cerrar, la consulta remota termina en su siguiente escritura, como
+    mucho un intervalo después.
+  - La ventana necesita unos 980 puntos de ancho.
+  - Sin comprobar: Windows (solo se sabe que compila), servidores reales que
+    no sean Linux o que lleven BusyBox (se han simulado), la contraseña como
+    credencial (se probó con una passphrase, que usa la misma pregunta), el
+    caso «la clave del servidor ha cambiado», el bloqueo del baúl por
+    inactividad (se probó bloqueándolo desde la paleta), carpetas de cientos
+    de equipos, sesiones de horas y, desde la interfaz, equipos tras un
+    salto (sí en las pruebas automáticas).
 - **Baúl**: el bloqueo por inactividad mira el teclado y el ratón dentro de
   GodRemote, no la sesión del sistema. Las sesiones ya abiertas siguen; una
   reconexión que necesite una contraseña guardada la pedirá.
@@ -744,6 +1055,41 @@ recuperar; el resto de la configuración sigue intacta.
   expresiones regulares, y son las mismas para todos los terminales.
 - **Aviso de actividad**: solo en pestañas de terminal; un programa que
   escribe sin parar (`top`, `tail -f`) mantiene su pestaña siempre marcada.
+- **Disparadores**: trabajan sobre líneas, así que no ven lo que dibuja una
+  aplicación a pantalla completa. Una línea en la que pulsas una tecla deja
+  de vigilarse hasta su salto de línea. Con salida torrencial solo se miran
+  las 2000 últimas líneas de cada fotograma. La «campana» no suena: es la
+  marca 🔔 y la petición de atención en la barra de tareas, y esta no se ha
+  podido comprobar (se probó sin gestor de ventanas).
+- **Aviso de fin de orden**: sin OSC 133 es una heurística, que puede avisar
+  de un programa que se queda callado tras «: » o «> » y no reconoce
+  indicadores raros salvo que el historial ya los haya visto. Con OSC 133,
+  lo que se ejecute dentro de una orden en marcha (otra shell abierta con
+  `sudo` o `ssh` que no marque) ni se avisa ni se anota. El umbral mínimo es
+  5 s. No se ha probado con shells que traen OSC 133 de serie (fish,
+  kitty…), solo con una integración de bash hecha a mano.
+- **Grabación y reproductor**: no se graba lo tecleado; lo que no es UTF-8
+  se sustituye. La captura inicial no incluye el historial de
+  desplazamiento. Retroceder rehace la reproducción desde el principio,
+  repartida entre fotogramas; con grabaciones enormes tarda. Máximos al
+  abrir: 256 MB, 2 millones de eventos y líneas de 8 MB; las pausas de más
+  de una hora se acortan a una hora. No lee asciicast v1. La versión 2 se ha
+  cruzado con asciinema 2.4 en los dos sentidos; la 3, solo con ficheros
+  hechos a mano según la especificación. El diálogo del sistema para elegir
+  un `.cast` no se ha podido probar (sí la lista del menú).
+- **Historial de órdenes**: sin OSC 133 no distingue la shell de otros
+  programas con indicador propio (mysql, python): también se anota lo que
+  se les escribe. Si el indicador de tu shell acaba en `:` o `?`, se toma
+  por una pregunta y no se anota nada. Solo equipos del árbol y terminales
+  locales; las conexiones rápidas no. Si desde un terminal saltas a otro
+  equipo con `ssh`, sus órdenes se apuntan al equipo de la pestaña. De un
+  pegado de varias líneas solo se reconoce la primera; de uno entre
+  corchetes de varias líneas, ninguna. Si tecleas dos órdenes antes de que
+  llegue el eco de la primera, no se anota ninguna. Con indicador a la
+  derecha (zsh) la orden se corta al encontrar 10 espacios seguidos. Las
+  órdenes de más de 1000 caracteres no se guardan. Desde la interfaz solo se
+  ha comprobado con el terminal local; con equipos SSH, en las pruebas
+  automáticas.
 - Barra de información: solo en terminales SSH (no en Telnet, serie ni en el
   terminal local) y pensada para servidores Linux; en Windows no da datos.
   Un servidor que limite a una las sesiones por conexión (`MaxSessions 1`)
@@ -767,7 +1113,10 @@ recuperar; el resto de la configuración sigue intacta.
   pasa sus pruebas automáticas en cada cambio (entre ellas la del terminal
   local), pero la interfaz no se ha manejado allí: quedan sin comprobar a
   mano, por ejemplo, la detección de shells, arrastrar ficheros desde el
-  explorador y el reenvío del agente en Windows.
+  explorador, el reenvío del agente en Windows y todo lo de Pageant. Tampoco
+  se han visto funcionar allí el panel de estado, los disparadores, la
+  grabación y reproducción de sesiones, el historial de órdenes ni lo nuevo
+  del servidor X.
 
 ## Pruebas
 
@@ -782,15 +1131,37 @@ cargo test --manifest-path reforzado/Cargo.toml --target-dir target
 La segunda orden pasa las mismas pruebas (menos las del RDP integrado) con
 la edición «SSH reforzada», es decir, contra russh 0.65.4.
 
-- Pruebas unitarias del modelo y la herencia por carpetas, baúl, claves,
-  terminal (búsqueda, reinicio, carpeta de trabajo), registro de sesiones,
-  temas, tipos de letra, fondos, barra de información, snippets (atajos y
-  variables), difusión, vista dividida, importadores, copia de seguridad,
-  enlaces y palabras resaltadas, Telnet, X11, túneles, VNC y RDP.
+- Pruebas unitarias del modelo y la herencia por carpetas, baúl, claves
+  (también certificados y llaves de seguridad), códigos TOTP (vectores de la
+  RFC 6238, base32 y `otpauth://`), terminal (búsqueda, reinicio, carpeta de
+  trabajo), registro de sesiones, disparadores, marcadores de la shell
+  (OSC 133) y fin de orden, grabaciones asciicast (también ficheros
+  hostiles), historial de órdenes, temas, tipos de letra, fondos, barra de
+  información, panel de estado (alertas, tendencia, orden y filtro),
+  snippets (atajos y variables), difusión, vista dividida, importadores,
+  copia de seguridad, enlaces y palabras resaltadas, Telnet, X11, servidor X
+  (cursores, minimizar, XKB, XInput 2, ventanas sueltas y peticiones al azar
+  que no deben tumbarlo), túneles, VNC y RDP.
 - `tests/auth_methods.rs`: contraseña y keyboard-interactive contra un
   servidor SSH en el propio proceso.
 - `tests/ssh_integration.rs`: clave con passphrase, verificación de host,
   shell y SFTP contra un `sshd` real.
+- `tests/ssh_certificates.rs`: certificados OpenSSH, firmados con
+  `ssh-keygen -s`, contra un `sshd` real que confía en una autoridad
+  (`TrustedUserCAKeys`): Ed25519, ECDSA y RSA, clave con passphrase,
+  certificado en otra ruta, caducado, aún no válido, de otro usuario, de
+  otra autoridad, fichero que no es un certificado y certificado cargado en
+  el agente.
+- `tests/totp_autofill.rs`: segundo factor contra un servidor SSH en el
+  propio proceso que rechaza los códigos repetidos: contraseña y código
+  juntos, clave y código, contraseña y luego código, sin secreto, secreto
+  equivocado, tres fallos y dos conexiones seguidas.
+- `tests/security_keys.rs`: llaves FIDO2 a través del agente contra un
+  `sshd` real, sin hardware. Una parte usa un agente de mentira con una
+  llave simulada en software (incluida la llave que no firma) y corre
+  siempre; la otra usa el `ssh-agent` real con `sk-dummy`, el proveedor de
+  pruebas de las fuentes de OpenSSH, y solo corre si se indica en
+  `GODREMOTE_SK_PROVIDER`.
 - `tests/ssh_features.rs`: uno y varios saltos encadenados (tres `sshd`
   reales), túneles `-L`/`-R`/`-D` y X11; Telnet contra un `telnetd` real,
   directo y a través de dos saltos.
@@ -799,19 +1170,31 @@ la edición «SSH reforzada», es decir, contra russh 0.65.4.
   iniciar, puerto ocupado, caída de la conexión y servidor apagado.
 - `tests/xserver_integration.rs`: el servidor X integrado contra clientes X
   reales —los clásicos (`xterm`, `xclock`, `xeyes`, `xcalc`, `xlogo`,
-  `xmessage`, `xev`…) y aplicaciones GTK 3, Qt 5, Tk, Motif y Java (Swing)—:
-  dibujo, RENDER, ventanas con forma, RANDR, teclado, ratón, portapapeles,
-  gestor de ventanas (mover, redimensionar, maximizar) y autenticación por
-  cookie.
+  `xmessage`, `xev`…) y aplicaciones GTK 3, GTK 4 (`zenity` y
+  `gtk4-widget-factory`), Qt 5, Tk, Motif y Java (Swing)—: dibujo, RENDER,
+  ventanas con forma, RANDR, teclado, ratón, forma del puntero,
+  portapapeles, gestor de ventanas (mover, redimensionar, maximizar,
+  minimizar y volver, también una ventana Qt 5 que se minimiza sola),
+  ventanas sueltas (con `xterm`) y autenticación por cookie.
 - `tests/agent_and_proxy.rs`: el equipo remoto lista las claves del agente
-  local solo cuando se pide el reenvío, y SSH a través de un proxy HTTP con
-  sus excepciones, contra un `sshd` real.
+  local solo cuando se pide el reenvío, el listado de lo que hay cargado en
+  el agente coincide con el de `ssh-add -l`, y SSH a través de un proxy HTTP
+  con sus excepciones, contra un `sshd` real.
 - `tests/sftp_features.rs`: permisos (también recursivos y sin seguir
   enlaces), reanudar subidas y descargas, conflictos, sincronización en sus
   tres modos con y sin borrado, y que nada sale de las carpetas elegidas,
   contra un `sshd` real.
 - `tests/fleet.rs`: una orden en varios equipos contra un `sshd` real:
   salida, códigos, límite en paralelo, tiempo máximo y cancelación.
+- `tests/dashboard.rs`: panel de estado contra `sshd` reales (varios
+  equipos, puerto cerrado, caída y vuelta, tope de conexiones, credenciales,
+  servidores sin datos, salto).
+- `tests/terminal_tools.rs`: disparadores, grabación e historial sobre un
+  terminal conectado a un `sshd` real: una orden llega al historial y su
+  salida dispara un aviso, un disparador contesta una sola vez a una
+  pregunta, lo tecleado sin eco no aparece ni en el historial ni en el
+  `.cast`, la grabación reproduce la pantalla y una orden larga con
+  marcadores OSC 133 avisa con su código de salida.
 - `tests/xserver_ssh.rs`: de extremo a extremo: una aplicación lanzada por
   SSH con reenvío X11 (contra un `sshd` real) acaba dibujada en el servidor
   X integrado; cambio de tamaño, parada y rearranque.
@@ -834,13 +1217,15 @@ como root.
 src/
   model.rs        árbol de carpetas y sesiones
   vault.rs        baúl cifrado
-  keys.rs         claves SSH
+  keys.rs         claves SSH y certificados
+  totp.rs         códigos TOTP del segundo factor
   ssh.rs          conexión, saltos, autenticación y shell
-  agent.rs        reenvío del agente SSH
+  agent.rs        agente SSH (OpenSSH y Pageant) y su reenvío
   tunnels.rs      reenvío de puertos y SOCKS5
   tunnel_manager.rs  túneles guardados, con su propia conexión
   x11.rs          reenvío X11
-  xserver/        servidor X propio (protocolo, dibujo, fuentes, ventanas)
+  xserver/        servidor X propio (protocolo, dibujo, fuentes, ventanas,
+                  cursores, XKB, XInput 2 y ventanas sueltas)
   xhost.rs        arranque del servidor X integrado bajo demanda
   sftp.rs         cliente SFTP y transferencias
   telnet.rs       cliente Telnet
@@ -855,8 +1240,13 @@ src/
   fonts.rs        tipos de letra del sistema
   backdrop.rs     fondo del terminal (texto, ASCII, imagen)
   monitor.rs      consulta del estado del servidor
+  dashboard.rs    panel de estado: conexiones persistentes, alertas y tendencia
   session_log.rs  registro de sesiones en ficheros
+  cast.rs         grabación y reproducción de sesiones (asciicast)
   highlight.rs    enlaces y palabras resaltadas del terminal
+  triggers.rs     disparadores: reglas sobre la salida del terminal
+  shell_marks.rs  estado de la shell (OSC 133) y fin de las órdenes
+  cmd_history.rs  historial de órdenes por equipo
   macros.rs       snippets de terminal, atajos y variables
   palette.rs      búsqueda de la paleta de órdenes
   fleet.rs        una orden en varios equipos a la vez
