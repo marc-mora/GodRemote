@@ -8,6 +8,7 @@ pub mod folder_editor;
 pub mod keys_view;
 pub mod macros_view;
 pub mod palette_view;
+pub mod probe;
 pub mod server_bar;
 pub mod settings_view;
 pub mod sftp_view;
@@ -263,6 +264,8 @@ pub struct App {
     system_theme: crate::system_theme::Watcher,
     /// Nombre del tema que está aplicado (`None`: hay que volver a aplicarlo).
     applied_theme: Option<String>,
+    /// Prueba de arranque (captura y cierre), si se ha pedido.
+    probe: Option<probe::StartupProbe>,
     themes_window: Option<ThemesWindow>,
     server_bar_window: Option<ServerBarWindow>,
     settings_window: Option<SettingsWindow>,
@@ -488,6 +491,7 @@ impl App {
             settings,
             system_theme,
             applied_theme: Some(applied_theme),
+            probe: probe::StartupProbe::from_env(),
             themes_window: None,
             server_bar_window: None,
             settings_window: None,
@@ -4180,6 +4184,9 @@ impl eframe::App for App {
         // Antes de abrir ninguna conexión en este fotograma.
         self.sync_proxy();
         self.sync_theme(ui.ctx());
+        if let Some(probe) = &mut self.probe {
+            probe.tick(ui.ctx());
+        }
 
         // --- Eventos de fondo ---------------------------------------------
         while let Ok(req) = self.prompt_rx.try_recv() {

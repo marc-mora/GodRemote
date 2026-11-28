@@ -77,6 +77,20 @@ jobs:
       - name: Devolver los ficheros a su dueño
         if: always()
         run: sudo chown -R "$(id -u):$(id -g)" . "$HOME/.cargo" || true
+      # La aplicación de verdad: se abre, pinta su ventana, guarda una captura
+      # y se cierra sola (src/ui/probe.rs).
+      - name: Arranque de la aplicación
+        timeout-minutes: 3
+        run: |
+          mkdir -p "$RUNNER_TEMP/perfil"
+          GODREMOTE_HOME="$RUNNER_TEMP/perfil" GODREMOTE_CAPTURA="$PWD/arranque-Linux.png" \
+            xvfb-run -a target/debug/godremote
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arranque-Linux
+          path: arranque-Linux.png
+          if-no-files-found: ignore
       - name: Avisos (clippy), edición completa
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Avisos (clippy), edición SSH reforzada
@@ -113,6 +127,21 @@ jobs:
           restore-keys: ${{ runner.os }}-${{ env.RUST_VERSION }}-
       - name: Pruebas, edición completa
         run: cargo test --locked
+      # La aplicación de verdad: se abre, pinta su ventana, guarda una captura
+      # y se cierra sola (src/ui/probe.rs).
+      - name: Arranque de la aplicación
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          mkdir -p "$RUNNER_TEMP/perfil"
+          GODREMOTE_HOME="$RUNNER_TEMP/perfil" GODREMOTE_CAPTURA="$PWD/arranque-${{ runner.os }}.png" \
+            "target/debug/godremote${{ runner.os == 'Windows' && '.exe' || '' }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arranque-${{ runner.os }}
+          path: arranque-${{ runner.os }}.png
+          if-no-files-found: ignore
       - name: Compila la edición SSH reforzada
         run: cargo check --locked --all-targets --manifest-path reforzado/Cargo.toml --target-dir target
 
