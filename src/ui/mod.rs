@@ -37,6 +37,7 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::desktop::{DesktopBackend, KeyCode};
+use crate::i18n::tr;
 use crate::macros::MacroStore;
 use crate::model::{AuthMethod, Node, Protocol, Session, Tree};
 use crate::sftp::SftpSource;
@@ -49,6 +50,7 @@ use crate::theme::{ok_color, warn_color};
 use crate::tunnel_manager::{RunState, RunningTunnel, TunnelStore};
 use crate::tunnels::TunnelStatus;
 use crate::vault::Vault;
+use crate::{mark, trf};
 use desktop_view::{DesktopState, DesktopView};
 use editor::{EditorResult, SessionEditor};
 use fleet_view::{FleetRequest, FleetWindow};
@@ -459,7 +461,10 @@ impl App {
             Ok(t) => t,
             Err(e) => {
                 toast = Some((
-                    format!("No se pudieron leer las sesiones: {e:#}"),
+                    trf!(
+                        "No se pudieron leer las sesiones: {error}",
+                        error = format!("{e:#}")
+                    ),
                     true,
                     Instant::now(),
                 ));
@@ -557,7 +562,13 @@ impl App {
 
     fn save_tree(&mut self) {
         if let Err(e) = self.tree.save(&crate::paths::sessions_file()) {
-            self.notify(format!("No se pudieron guardar las sesiones: {e:#}"), true);
+            self.notify(
+                trf!(
+                    "No se pudieron guardar las sesiones: {error}",
+                    error = format!("{e:#}")
+                ),
+                true,
+            );
         }
     }
 
@@ -582,12 +593,15 @@ impl App {
         let mut error = None;
         for (key, value) in secrets {
             if let Err(e) = vault.set(&key, &value) {
-                error = Some(format!("No se pudo guardar en el baúl: {e:#}"));
+                error = Some(trf!(
+                    "No se pudo guardar en el baúl: {error}",
+                    error = format!("{e:#}")
+                ));
             }
         }
         match error {
             Some(e) => self.notify(e, true),
-            None => self.notify("Credencial guardada en el baúl", false),
+            None => self.notify(tr("Credencial guardada en el baúl"), false),
         }
     }
 
@@ -696,7 +710,11 @@ impl App {
             self.tabs.retain(|t| !t.x_server);
             let mut view = DesktopView::new(backend, true);
             view.clipboard_on_focus = true;
-            self.push_tab("Servidor X".into(), None, TabKind::Desktop(Box::new(view)));
+            self.push_tab(
+                tr("Servidor X").into(),
+                None,
+                TabKind::Desktop(Box::new(view)),
+            );
             if let Some(tab) = self.tabs.last_mut() {
                 tab.x_server = true;
             }
@@ -761,13 +779,13 @@ impl App {
             .tunnel_store
             .get(id)
             .cloned()
-            .ok_or("El túnel ya no existe")?;
+            .ok_or(tr("El túnel ya no existe"))?;
         saved.validate()?;
         let session = saved
             .session
             .and_then(|session| self.tree.resolved_session(session))
             .filter(|session| session.protocol.is_ssh())
-            .ok_or("El equipo SSH del túnel ya no existe")?;
+            .ok_or(tr("El equipo SSH del túnel ya no existe"))?;
         let endpoint = self.endpoint_for(&session)?;
         let running = crate::tunnel_manager::spawn(
             self.rt.handle(),
@@ -805,7 +823,7 @@ impl App {
                         .get(id)
                         .map(|t| t.display_name())
                         .unwrap_or_default();
-                    self.notify(format!("Túnel «{name}»: {e}"), true);
+                    self.notify(trf!("Túnel «{name}»: {error}", name, error = e), true);
                 }
             }
         }
@@ -867,14 +885,17 @@ impl App {
             .iter()
             .map(|(id, run)| {
                 let retry = run.retry.as_ref().and_then(|r| match r.next {
-                    Some(at) => Some(format!(
-                        "Conexión perdida. Reintento {} de {max} en {} s…",
-                        r.attempt + 1,
-                        at.saturating_duration_since(now).as_secs() + 1
+                    Some(at) => Some(trf!(
+                        "Conexión perdida. Reintento {n} de {max} en {secs} s…",
+                        n = r.attempt + 1,
+                        max,
+                        secs = at.saturating_duration_since(now).as_secs() + 1
                     )),
-                    None if matches!(run.running.state, RunState::Connecting(_)) => {
-                        Some(format!("Reconectando… intento {} de {max}", r.attempt))
-                    }
+                    None if matches!(run.running.state, RunState::Connecting(_)) => Some(trf!(
+                        "Reconectando… intento {n} de {max}",
+                        n = r.attempt,
+                        max
+                    )),
                     None => None,
                 });
                 (
@@ -1003,7 +1024,7 @@ impl App {
             }
         }
         for (index, attempt) in due {
-            let message = format!("[Reconectando… intento {attempt} de {max}]");
+            let message = trf!("[Reconectando… intento {attempt} de {max}]", attempt, max);
             match self.restart_terminal(index, &message) {
                 Ok(()) => {
                     self.tabs[index].reconnect = Some(Reconnect {
@@ -1105,9 +1126,13 @@ impl App {
         ) {
             Ok(log) => Some(log),
             Err(e) => {
-                let _ = self
-                    .notice_tx
-                    .send((format!("No se pudo registrar la sesión: {e:#}"), true));
+                let _ = self.notice_tx.send((
+                    trf!(
+                        "No se pudo registrar la sesión: {error}",
+                        error = format!("{e:#}")
+                    ),
+                    true,
+                ));
                 None
             }
         }
@@ -1127,7 +1152,7 @@ impl App {
     /// Abre un terminal local con la shell de los ajustes.
     fn open_local_terminal(&mut self) {
         let command = self.settings.local_shell.clone();
-        self.open_local_shell("Terminal local", &command);
+        self.open_local_shell(tr("Terminal local"), &command);
     }
 
     /// Abre un terminal local con la shell indicada (vacía: la habitual).
@@ -1144,7 +1169,11 @@ impl App {
                 self.push_tab(title.into(), None, TabKind::Terminal(Box::new(view)))
             }
             Err(e) => self.notify(
-                format!("No se pudo abrir la shell local «{command}»: {e:#}"),
+                trf!(
+                    "No se pudo abrir la shell local «{command}»: {error}",
+                    command,
+                    error = format!("{e:#}")
+                ),
                 true,
             ),
         }
@@ -1226,7 +1255,7 @@ impl App {
             #[cfg(not(feature = "rdp-integrado"))]
             _ => {
                 let _ = (password, via);
-                return Err("Esta edición no incluye el cliente RDP integrado".into());
+                return Err(tr("Esta edición no incluye el cliente RDP integrado").into());
             }
         };
         let clipboard = session.protocol == Protocol::Vnc || session.rdp.clipboard;
@@ -1247,8 +1276,8 @@ impl App {
     fn open_rdp(&mut self, session: Session) {
         if !session.jumps.is_empty() {
             return self.notify(
-                "Los saltos solo funcionan con el cliente RDP integrado: \
-                 ábrelo integrado o quita los saltos de la sesión",
+                tr("Los saltos solo funcionan con el cliente RDP integrado: \
+                     ábrelo integrado o quita los saltos de la sesión"),
                 true,
             );
         }
@@ -1273,7 +1302,10 @@ impl App {
         match crate::rdp::launch(session, password) {
             Ok((mut child, log)) => {
                 self.notify(
-                    format!("Cliente RDP lanzado para {}", session.display_name()),
+                    trf!(
+                        "Cliente RDP lanzado para {name}",
+                        name = session.display_name()
+                    ),
                     false,
                 );
                 let name = session.display_name();
@@ -1287,9 +1319,9 @@ impl App {
                             .and_then(|p| std::fs::read_to_string(p).ok())
                             .map(|text| rdp_error_summary(&text))
                             .unwrap_or_default();
-                        format!("RDP «{name}» terminó con error. {detail}")
+                        trf!("RDP «{name}» terminó con error. {detail}", name, detail)
                     } else {
-                        format!("Sesión RDP «{name}» finalizada")
+                        trf!("Sesión RDP «{name}» finalizada", name)
                     };
                     let _ = tx.send((msg, failed));
                     waker();
@@ -1304,7 +1336,13 @@ impl App {
     fn reload_config(&mut self, ctx: &egui::Context) {
         match Tree::load(&crate::paths::sessions_file()) {
             Ok(tree) => self.tree = tree,
-            Err(e) => self.notify(format!("No se pudieron leer las sesiones: {e:#}"), true),
+            Err(e) => self.notify(
+                trf!(
+                    "No se pudieron leer las sesiones: {error}",
+                    error = format!("{e:#}")
+                ),
+                true,
+            ),
         }
         self.themes = ThemeStore::load(&crate::paths::themes_dir());
         self.settings = Settings::load(&crate::paths::settings_file());
@@ -1380,9 +1418,9 @@ impl App {
                     if embedded && !self.embedded_rdp_enabled() {
                         self.notify(
                             if crate::HAS_EMBEDDED_RDP {
-                                "El cliente RDP integrado está desactivado en Ajustes"
+                                tr("El cliente RDP integrado está desactivado en Ajustes")
                             } else {
-                                "Esta edición no incluye el cliente RDP integrado"
+                                tr("Esta edición no incluye el cliente RDP integrado")
                             },
                             true,
                         );
@@ -1401,7 +1439,7 @@ impl App {
                     if let Some(original) = self.tree.session(id).cloned() {
                         let mut copy = original.clone();
                         copy.id = Uuid::new_v4();
-                        copy.name = format!("{} (copia)", original.display_name());
+                        copy.name = trf!("{name} (copia)", name = original.display_name());
                         if let Some(vault) = &mut self.vault {
                             for (from, to) in [
                                 (original.password_key(), copy.password_key()),
@@ -1436,7 +1474,7 @@ impl App {
                     if self.tree.move_node(id, parent) {
                         self.save_tree();
                     } else {
-                        self.notify("No se puede mover una carpeta dentro de sí misma", true);
+                        self.notify(tr("No se puede mover una carpeta dentro de sí misma"), true);
                     }
                 }
             }
@@ -1463,20 +1501,20 @@ impl App {
             ui.label(RichText::new("GodRemote").strong().size(16.0));
             ui.separator();
             if ui
-                .button("➕ Sesión")
-                .on_hover_text("Nueva sesión SSH / SFTP / RDP")
+                .button(tr("➕ Sesión"))
+                .on_hover_text(tr("Nueva sesión SSH / SFTP / RDP"))
                 .clicked()
             {
                 self.editor = Some(self.new_session(self.target_folder()));
             }
             if ui
-                .button("📁 Carpeta")
-                .on_hover_text("Nueva carpeta de equipos")
+                .button(tr("📁 Carpeta"))
+                .on_hover_text(tr("Nueva carpeta de equipos"))
                 .clicked()
             {
                 self.folder_editor = Some(FolderEditor::new(self.target_folder()));
             }
-            if ui.button("💻 Terminal local").clicked() {
+            if ui.button(tr("💻 Terminal local")).clicked() {
                 self.open_local_terminal();
             }
             // Las demás shells del equipo, para una sola pestaña.
@@ -1507,14 +1545,14 @@ impl App {
                     egui::Stroke::NONE,
                 ));
                 menu.response
-                    .on_hover_text("Abrir un terminal local con otra shell");
+                    .on_hover_text(tr("Abrir un terminal local con otra shell"));
             });
             if let Some(shell) = chosen {
                 self.open_local_shell(&shell.name, &shell.command);
             }
             if ui
-                .button("🔑 Claves")
-                .on_hover_text("Gestionar claves SSH")
+                .button(tr("🔑 Claves"))
+                .on_hover_text(tr("Gestionar claves SSH"))
                 .clicked()
             {
                 self.keys_window = Some(KeysWindow::default());
@@ -1531,8 +1569,8 @@ impl App {
                 .values()
                 .any(|run| matches!(run.running.state, RunState::Failed(_)));
             let mut label = RichText::new(match active {
-                0 => "🔀 Túneles".to_string(),
-                n => format!("🔀 Túneles ({n})"),
+                0 => tr("🔀 Túneles").to_string(),
+                n => trf!("🔀 Túneles ({n})", n),
             });
             if failed {
                 label = label.color(ui.visuals().error_fg_color);
@@ -1541,39 +1579,41 @@ impl App {
             }
             if ui
                 .button(label)
-                .on_hover_text("Túneles SSH que se inician y se detienen sin abrir un terminal")
+                .on_hover_text(tr(
+                    "Túneles SSH que se inician y se detienen sin abrir un terminal",
+                ))
                 .clicked()
             {
                 self.tunnels_window = Some(TunnelsWindow::new(&self.tunnel_store));
             }
             if ui
-                .button("🎨 Temas")
-                .on_hover_text("Cambiar o personalizar el aspecto")
+                .button(tr("🎨 Temas"))
+                .on_hover_text(tr("Cambiar o personalizar el aspecto"))
                 .clicked()
             {
                 self.open_themes_window();
             }
             if ui
-                .button("⚙ Ajustes")
-                .on_hover_text(
+                .button(tr("⚙ Ajustes"))
+                .on_hover_text(tr(
                     "Cliente RDP, barra de información del servidor y otras preferencias",
-                )
+                ))
                 .clicked()
             {
                 self.settings_window = Some(SettingsWindow::default());
             }
             let vault_exists = Vault::exists(&crate::paths::vault_file());
-            ui.menu_button("🔐 Baúl", |ui| {
+            ui.menu_button(tr("🔐 Baúl"), |ui| {
                 if self.vault.is_some() {
-                    if ui.button("Bloquear").clicked() {
+                    if ui.button(tr("Bloquear")).clicked() {
                         self.vault = None;
                         ui.close();
                     }
-                    if ui.button("Ver lo guardado…").clicked() {
+                    if ui.button(tr("Ver lo guardado…")).clicked() {
                         self.vault_window = Some(Default::default());
                         ui.close();
                     }
-                    if ui.button("Cambiar contraseña maestra…").clicked() {
+                    if ui.button(tr("Cambiar contraseña maestra…")).clicked() {
                         self.vault_dialog = Some(VaultDialog::Change {
                             password: String::new(),
                             confirm: String::new(),
@@ -1582,7 +1622,7 @@ impl App {
                         ui.close();
                     }
                 } else if vault_exists {
-                    if ui.button("Desbloquear…").clicked() {
+                    if ui.button(tr("Desbloquear…")).clicked() {
                         self.vault_dialog = Some(VaultDialog::Unlock {
                             password: String::new(),
                             error: None,
@@ -1590,7 +1630,7 @@ impl App {
                         });
                         ui.close();
                     }
-                } else if ui.button("Crear baúl…").clicked() {
+                } else if ui.button(tr("Crear baúl…")).clicked() {
                     self.vault_dialog = Some(VaultDialog::Create {
                         password: String::new(),
                         confirm: String::new(),
@@ -1609,10 +1649,10 @@ impl App {
         let mut toggle_recording = false;
         let mut manage = false;
         let mut create = false;
-        ui.menu_button("⚡ Snippets", |ui| {
+        ui.menu_button(tr("⚡ Snippets"), |ui| {
             ui.set_min_width(260.0);
             if self.macros.macros.is_empty() {
-                ui.weak("Aún no hay snippets");
+                ui.weak(tr("Aún no hay snippets"));
             }
             for m in &self.macros.macros {
                 let mut button = egui::Button::new(format!("▶ {}", m.name));
@@ -1621,7 +1661,7 @@ impl App {
                 }
                 if ui
                     .add_enabled(can_run, button)
-                    .on_disabled_hover_text("Abre un terminal conectado")
+                    .on_disabled_hover_text(tr("Abre un terminal conectado"))
                     .clicked()
                 {
                     run = Some(m.id);
@@ -1629,30 +1669,32 @@ impl App {
                 }
             }
             ui.separator();
-            if ui.button("➕ Nuevo snippet…").clicked() {
+            if ui.button(tr("➕ Nuevo snippet…")).clicked() {
                 create = true;
                 ui.close();
             }
             let label = if recording {
-                "⏹ Detener y guardar…"
+                tr("⏹ Detener y guardar…")
             } else {
-                "⏺ Grabar tecleando en el terminal activo"
+                tr("⏺ Grabar tecleando en el terminal activo")
             };
             if ui
                 .add_enabled(can_run, egui::Button::new(label))
-                .on_disabled_hover_text("Abre un terminal conectado")
+                .on_disabled_hover_text(tr("Abre un terminal conectado"))
                 .clicked()
             {
                 toggle_recording = true;
                 ui.close();
             }
-            if ui.button("Gestionar snippets y atajos…").clicked() {
+            if ui.button(tr("Gestionar snippets y atajos…")).clicked() {
                 manage = true;
                 ui.close();
             }
         })
         .response
-        .on_hover_text("Textos y órdenes que se envían al terminal desde aquí o con un atajo");
+        .on_hover_text(tr(
+            "Textos y órdenes que se envían al terminal desde aquí o con un atajo",
+        ));
         if let Some(id) = run {
             self.run_macro(id);
         }
@@ -1686,8 +1728,8 @@ impl App {
         let mut close = false;
         egui::Modal::new(egui::Id::unique("recorded_macro")).show(ctx, |ui| {
             ui.set_width(420.0);
-            ui.heading("Guardar snippet");
-            ui.label("Nombre de lo que acabas de grabar:");
+            ui.heading(tr("Guardar snippet"));
+            ui.label(tr("Nombre de lo que acabas de grabar:"));
             let resp =
                 ui.add(egui::TextEdit::singleline(&mut recorded.name).desired_width(f32::INFINITY));
             if !recorded.focused {
@@ -1706,13 +1748,13 @@ impl App {
             let valid = !recorded.name.trim().is_empty();
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(valid, egui::Button::new("Guardar"))
+                    .add_enabled(valid, egui::Button::new(tr("Guardar")))
                     .clicked()
                     || (enter && valid)
                 {
                     save = true;
                 }
-                if ui.button("Descartar").clicked()
+                if ui.button(tr("Descartar")).clicked()
                     || ui.input(|i| i.key_pressed(egui::Key::Escape))
                 {
                     close = true;
@@ -1730,7 +1772,13 @@ impl App {
                     Ok(()) => {
                         self.macros_window = Some(MacrosWindow::new(&self.macros, Some(id)));
                     }
-                    Err(e) => self.notify(format!("No se pudo guardar el snippet: {e:#}"), true),
+                    Err(e) => self.notify(
+                        trf!(
+                            "No se pudo guardar el snippet: {error}",
+                            error = format!("{e:#}")
+                        ),
+                        true,
+                    ),
                 }
             }
         } else if close {
@@ -1753,15 +1801,15 @@ impl App {
             match &self.vault {
                 Some(v) => ui.colored_label(
                     ok_color(),
-                    format!("🔓 Baúl abierto · {} secreto(s)", v.len()),
+                    trf!("🔓 Baúl abierto · {n} secreto(s)", n = v.len()),
                 ),
-                None => ui.colored_label(warn_color(), "🔒 Baúl bloqueado"),
+                None => ui.colored_label(warn_color(), tr("🔒 Baúl bloqueado")),
             };
             if self.settings.check_updates
                 && let Some(version) = self.updates.newer()
                 && ui
-                    .link(format!("⬆ Versión {version} disponible"))
-                    .on_hover_text("Abre la página de descargas en el navegador")
+                    .link(trf!("⬆ Versión {version} disponible", version))
+                    .on_hover_text(tr("Abre la página de descargas en el navegador"))
                     .clicked()
             {
                 // (Si el navegador no se abre, la dirección sigue a la vista.)
@@ -1786,7 +1834,7 @@ impl App {
         ui.add_space(4.0);
         ui.add(
             egui::TextEdit::singleline(&mut self.filter)
-                .hint_text("🔍 Buscar equipo…")
+                .hint_text(tr("🔍 Buscar equipo…"))
                 .desired_width(f32::INFINITY),
         );
         ui.add_space(4.0);
@@ -1798,8 +1846,8 @@ impl App {
             .show(ui, |ui| {
                 if self.tree.nodes.is_empty() {
                     ui.add_space(12.0);
-                    ui.weak("Aún no hay equipos.");
-                    ui.weak("Crea una sesión con «➕ Sesión».");
+                    ui.weak(tr("Aún no hay equipos."));
+                    ui.weak(tr("Crea una sesión con «➕ Sesión»."));
                 } else if self.filter.trim().is_empty() {
                     tree_ui(ui, &self.tree.nodes, self.selected, &folders, &mut actions);
                 } else {
@@ -1807,7 +1855,7 @@ impl App {
                     let mut matches = vec![];
                     collect_matches(&self.tree.nodes, &needle, &mut matches);
                     if matches.is_empty() {
-                        ui.weak("Sin resultados.");
+                        ui.weak(tr("Sin resultados."));
                     }
                     for s in matches {
                         session_row(ui, s, self.selected, &folders, &mut actions);
@@ -1816,11 +1864,11 @@ impl App {
                 // Clic derecho en el hueco libre: crear en la raíz.
                 let rest = ui.allocate_response(ui.available_size(), egui::Sense::click());
                 rest.context_menu(|ui| {
-                    if ui.button("➕ Nueva sesión").clicked() {
+                    if ui.button(tr("➕ Nueva sesión")).clicked() {
                         actions.push(TreeAction::NewSession(None));
                         ui.close();
                     }
-                    if ui.button("📁 Nueva carpeta").clicked() {
+                    if ui.button(tr("📁 Nueva carpeta")).clicked() {
                         actions.push(TreeAction::NewFolder(None));
                         ui.close();
                     }
@@ -1854,9 +1902,9 @@ impl App {
             .map(|(i, tab)| (tab.id, format!("{}. {}", i + 1, tab.title)))
             .collect();
         let label = if self.split.enabled {
-            RichText::new("⊞ Dividida").strong()
+            RichText::new(tr("⊞ Dividida")).strong()
         } else {
-            RichText::new("⊞ Dividir")
+            RichText::new(tr("⊞ Dividir"))
         };
         let config =
             MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
@@ -1866,14 +1914,14 @@ impl App {
             ui.set_min_width(280.0);
             ui.set_max_width(340.0);
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-            ui.checkbox(&mut split.enabled, "Ver varios terminales a la vez");
-            ui.weak(
+            ui.checkbox(&mut split.enabled, tr("Ver varios terminales a la vez"));
+            ui.weak(tr(
                 "Los terminales se reparten en mosaico. Un clic en uno le da el teclado; \
                  doble clic en su título lo deja a pantalla completa.",
-            );
+            ));
             ui.add_enabled_ui(split.enabled, |ui| {
-                ui.radio_value(&mut split.all, true, "Todos los terminales abiertos");
-                ui.radio_value(&mut split.all, false, "Solo los que elija:");
+                ui.radio_value(&mut split.all, true, tr("Todos los terminales abiertos"));
+                ui.radio_value(&mut split.all, false, tr("Solo los que elija:"));
                 ui.add_enabled_ui(!split.all, |ui| {
                     ui.indent("split_tabs", |ui| {
                         for (id, title) in &terminals {
@@ -1889,15 +1937,15 @@ impl App {
                     });
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Columnas");
-                    ui.selectable_value(&mut split.columns, 0, "Auto");
+                    ui.label(tr("Columnas"));
+                    ui.selectable_value(&mut split.columns, 0, tr("Auto"));
                     for n in 1..=4 {
                         ui.selectable_value(&mut split.columns, n, n.to_string());
                     }
                 });
             });
         });
-        response.on_hover_text("Ver varios terminales a la vez, en mosaico");
+        response.on_hover_text(tr("Ver varios terminales a la vez, en mosaico"));
         if self.split.enabled != was_enabled {
             self.focus_active_terminal();
         }
@@ -2051,15 +2099,15 @@ impl App {
                                 .selectable_label(self.active == i, label)
                                 .interact(egui::Sense::click_and_drag());
                             let hover = if in_group {
-                                "Recibe lo que se escriba con la difusión activa"
+                                tr("Recibe lo que se escriba con la difusión activa")
                             } else if let Some(alert) = &tab.alert {
                                 alert.text.as_str()
                             } else if tab.rang {
-                                "Ha sonado la campana en este terminal"
+                                tr("Ha sonado la campana en este terminal")
                             } else if tab.unseen {
-                                "Hay salida nueva sin ver"
+                                tr("Hay salida nueva sin ver")
                             } else {
-                                "Arrastra para cambiarla de sitio; doble clic para renombrarla"
+                                tr("Arrastra para cambiarla de sitio; doble clic para renombrarla")
                             };
                             let resp = resp.on_hover_text(hover);
                             if resp.double_clicked() {
@@ -2078,28 +2126,32 @@ impl App {
                                         ui.close();
                                     }
                                 };
-                                item(ui, "✏ Renombrar…", TabAction::Rename(i));
-                                item(ui, "Duplicar", TabAction::Duplicate(i));
+                                item(ui, tr("✏ Renombrar…"), TabAction::Rename(i));
+                                item(ui, tr("Duplicar"), TabAction::Duplicate(i));
                                 ui.separator();
                                 ui.add_enabled_ui(i > 0, |ui| {
-                                    item(ui, "Mover al principio", TabAction::MoveFirst(i));
+                                    item(ui, tr("Mover al principio"), TabAction::MoveFirst(i));
                                 });
                                 ui.add_enabled_ui(i < last, |ui| {
-                                    item(ui, "Mover al final", TabAction::MoveLast(i));
+                                    item(ui, tr("Mover al final"), TabAction::MoveLast(i));
                                 });
                                 ui.separator();
-                                item(ui, "Cerrar", TabAction::Close(i));
+                                item(ui, tr("Cerrar"), TabAction::Close(i));
                                 ui.add_enabled_ui(last > 0, |ui| {
-                                    item(ui, "Cerrar las demás", TabAction::CloseOthers(i));
+                                    item(ui, tr("Cerrar las demás"), TabAction::CloseOthers(i));
                                 });
                                 ui.add_enabled_ui(i < last, |ui| {
-                                    item(ui, "Cerrar las de la derecha", TabAction::CloseRight(i));
+                                    item(
+                                        ui,
+                                        tr("Cerrar las de la derecha"),
+                                        TabAction::CloseRight(i),
+                                    );
                                 });
                             });
                             if resp.middle_clicked()
                                 || ui
                                     .small_button("×")
-                                    .on_hover_text("Cerrar pestaña")
+                                    .on_hover_text(tr("Cerrar pestaña"))
                                     .clicked()
                             {
                                 *close = Some(i);
@@ -2238,7 +2290,7 @@ impl App {
                 continue;
             }
             items.push(PaletteItem {
-                kind: "Pestaña",
+                kind: mark!("Pestaña"),
                 label: tab.title.clone(),
                 detail: tab.session.as_ref().map(|s| s.target()).unwrap_or_default(),
                 action: PaletteAction::SwitchTab(tab.id),
@@ -2250,31 +2302,35 @@ impl App {
         );
         let mut command = |label: &str, detail: &str, command: Command| {
             items.push(PaletteItem {
-                kind: "Acción",
+                kind: mark!("Acción"),
                 label: label.to_string(),
                 detail: detail.to_string(),
                 action: PaletteAction::Command(command),
             });
         };
         command(
-            "Abrir un terminal local",
-            "Ctrl+Mayús+T",
+            tr("Abrir un terminal local"),
+            tr("Ctrl+Mayús+T"),
             Command::LocalTerminal,
         );
         if !self.tabs.is_empty() {
-            command("Cerrar la pestaña", "Ctrl+Mayús+W", Command::CloseTab);
+            command(
+                tr("Cerrar la pestaña"),
+                tr("Ctrl+Mayús+W"),
+                Command::CloseTab,
+            );
         }
         if has_terminal {
             command(
-                "Buscar en el terminal",
-                "Ctrl+Mayús+F",
+                tr("Buscar en el terminal"),
+                tr("Ctrl+Mayús+F"),
                 Command::SearchTerminal,
             );
             command(
                 if self.broadcast.enabled {
-                    "Desactivar la difusión"
+                    tr("Desactivar la difusión")
                 } else {
-                    "Activar la difusión: escribir en varios terminales"
+                    tr("Activar la difusión: escribir en varios terminales")
                 },
                 "",
                 Command::ToggleBroadcast,
@@ -2282,89 +2338,89 @@ impl App {
         }
         command(
             if self.split.enabled {
-                "Quitar la vista dividida"
+                tr("Quitar la vista dividida")
             } else {
-                "Vista dividida: varios terminales a la vez"
+                tr("Vista dividida: varios terminales a la vez")
             },
             "",
             Command::ToggleSplit,
         );
-        command("Nuevo equipo…", "", Command::NewSession);
-        command("Nueva carpeta…", "", Command::NewFolder);
+        command(tr("Nuevo equipo…"), "", Command::NewSession);
+        command(tr("Nueva carpeta…"), "", Command::NewFolder);
         command(
-            "Ejecutar una orden en los equipos de una carpeta…",
+            tr("Ejecutar una orden en los equipos de una carpeta…"),
             "",
             Command::RunOnFolder,
         );
         command(
-            "Panel de estado de los equipos de una carpeta",
-            "CPU, memoria, disco y alertas",
+            tr("Panel de estado de los equipos de una carpeta"),
+            tr("CPU, memoria, disco y alertas"),
             Command::Dashboard,
         );
-        command("Túneles", "gestor de túneles", Command::Tunnels);
-        command("Snippets y atajos", "", Command::Snippets);
+        command(tr("Túneles"), tr("gestor de túneles"), Command::Tunnels);
+        command(tr("Snippets y atajos"), "", Command::Snippets);
         command(
-            "Disparadores",
-            "avisar o contestar cuando aparezca un texto",
+            tr("Disparadores"),
+            tr("avisar o contestar cuando aparezca un texto"),
             Command::Triggers,
         );
         if let Some(recording) = self.active_cast() {
             command(
                 if recording {
-                    "Terminar la grabación de esta sesión"
+                    tr("Terminar la grabación de esta sesión")
                 } else {
-                    "Grabar esta sesión"
+                    tr("Grabar esta sesión")
                 },
                 "asciicast, .cast",
                 Command::ToggleCast,
             );
         }
         command(
-            "Reproducir una grabación…",
+            tr("Reproducir una grabación…"),
             "asciicast, .cast",
             Command::PlayCast,
         );
         command(
-            "Historial de órdenes",
-            "las ejecutadas en cada equipo",
+            tr("Historial de órdenes"),
+            tr("las ejecutadas en cada equipo"),
             Command::History,
         );
-        command("Claves SSH", "", Command::Keys);
-        command("Temas", "aspecto, colores y letra", Command::Themes);
-        command("Ajustes", "preferencias", Command::Settings);
+        command(tr("Claves SSH"), "", Command::Keys);
+        command(tr("Temas"), tr("aspecto, colores y letra"), Command::Themes);
+        command(tr("Ajustes"), tr("preferencias"), Command::Settings);
         command(
-            "Importar equipos o hacer una copia de seguridad",
+            tr("Importar equipos o hacer una copia de seguridad"),
             "",
             Command::Transfer,
         );
         command(
-            "Sincronización entre mis equipos",
-            "carpeta cifrada, conflictos",
+            tr("Sincronización entre mis equipos"),
+            tr("carpeta cifrada, conflictos"),
             Command::Sync,
         );
         command(
-            "Carpetas compartidas con compañeros",
-            "publicar una carpeta de equipos o seguir la de otro",
+            tr("Carpetas compartidas con compañeros"),
+            tr("publicar una carpeta de equipos o seguir la de otro"),
             Command::Shares,
         );
         if self.settings.x_server.embedded {
             command(
-                "Servidor X: abrir su pestaña",
-                "aplicaciones gráficas",
+                tr("Servidor X: abrir su pestaña"),
+                tr("aplicaciones gráficas"),
                 Command::XServer,
             );
         }
         if self.vault.is_some() {
             command(
-                "Bloquear el baúl",
-                "contraseñas guardadas",
+                tr("Bloquear el baúl"),
+                tr("contraseñas guardadas"),
                 Command::VaultLock,
             );
-            command("Ver lo guardado en el baúl", "", Command::VaultContents);
+            command(tr("Ver lo guardado en el baúl"), "", Command::VaultContents);
         } else if Vault::exists(&crate::paths::vault_file()) {
             command(
-                "Desbloquear el baúl…",
-                "contraseñas guardadas",
+                tr("Desbloquear el baúl…"),
+                tr("contraseñas guardadas"),
                 Command::VaultUnlock,
             );
         }
@@ -2373,7 +2429,7 @@ impl App {
                 continue;
             };
             items.push(PaletteItem {
-                kind: "Equipo",
+                kind: mark!("Equipo"),
                 label: path,
                 detail: format!("{} · {}", session.protocol.label(), session.target()),
                 action: PaletteAction::Connect(id),
@@ -2382,7 +2438,7 @@ impl App {
         if has_terminal {
             for snippet in &self.macros.macros {
                 items.push(PaletteItem {
-                    kind: "Snippet",
+                    kind: mark!("Snippet"),
                     label: snippet.name.clone(),
                     detail: snippet.shortcut.map(|s| s.to_string()).unwrap_or_default(),
                     action: PaletteAction::RunSnippet(snippet.id),
@@ -2395,12 +2451,12 @@ impl App {
                 .get(&tunnel.id)
                 .is_some_and(|run| run.running.is_running());
             items.push(PaletteItem {
-                kind: "Túnel",
-                label: format!(
-                    "{} {}",
-                    if running { "Detener" } else { "Iniciar" },
-                    tunnel.display_name()
-                ),
+                kind: mark!("Túnel"),
+                label: if running {
+                    trf!("Detener {name}", name = tunnel.display_name())
+                } else {
+                    trf!("Iniciar {name}", name = tunnel.display_name())
+                },
                 detail: tunnel.tunnel.describe(),
                 action: if running {
                     PaletteAction::StopTunnel(tunnel.id)
@@ -2608,7 +2664,7 @@ impl App {
             if idle >= limit {
                 self.vault = None;
                 self.vault_window = None;
-                self.notify("Baúl bloqueado por inactividad", false);
+                self.notify(tr("Baúl bloqueado por inactividad"), false);
                 // El estado ya se ha pintado en este fotograma: hace falta
                 // otro para que se vea el cambio.
                 ctx.request_repaint();
@@ -2753,33 +2809,33 @@ impl App {
             ui.set_width(400.0);
             match (pending.ids.len(), pending.live.as_slice()) {
                 (1, [title]) => {
-                    ui.heading(format!("¿Cerrar «{title}»?"));
-                    ui.label(
+                    ui.heading(trf!("¿Cerrar «{title}»?", title));
+                    ui.label(tr(
                         "Tiene una sesión conectada o transferencias a medias: lo que esté en \
                          marcha se interrumpirá.",
-                    );
+                    ));
                 }
                 (total, live) => {
-                    ui.heading(format!("¿Cerrar {total} pestañas?"));
-                    ui.label(format!(
-                        "{} de ellas tienen sesiones conectadas o transferencias a medias; lo \
+                    ui.heading(trf!("¿Cerrar {total} pestañas?", total));
+                    ui.label(trf!(
+                        "{n} de ellas tienen sesiones conectadas o transferencias a medias; lo \
                          que esté en marcha se interrumpirá:",
-                        live.len()
+                        n = live.len()
                     ));
                     for title in live.iter().take(8) {
                         ui.label(format!("  • {title}"));
                     }
                     if live.len() > 8 {
-                        ui.weak(format!("  … y {} más", live.len() - 8));
+                        ui.weak(trf!("  … y {n} más", n = live.len() - 8));
                     }
                 }
             }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button("Cerrar").clicked() {
+                if ui.button(tr("Cerrar")).clicked() {
                     decision = Some(true);
                 }
-                let cancel = ui.button("Cancelar");
+                let cancel = ui.button(tr("Cancelar"));
                 if !pending.focused {
                     cancel.request_focus();
                     pending.focused = true;
@@ -2831,27 +2887,35 @@ impl App {
         let mut decision = None;
         egui::Modal::new(egui::Id::unique("quit_confirm")).show(ctx, |ui| {
             ui.set_width(400.0);
-            ui.heading("¿Salir de GodRemote?");
-            let mut parts = vec![];
-            match sessions {
-                0 => {}
-                1 => parts.push("1 pestaña con una sesión o transferencias en curso".to_string()),
-                n => parts.push(format!(
-                    "{n} pestañas con sesiones o transferencias en curso"
+            ui.heading(tr("¿Salir de GodRemote?"));
+            let sessions = match sessions {
+                0 => None,
+                1 => Some(tr("1 pestaña con una sesión o transferencias en curso").to_string()),
+                n => Some(trf!(
+                    "{n} pestañas con sesiones o transferencias en curso",
+                    n
                 )),
-            }
-            match tunnels {
-                0 => {}
-                1 => parts.push("1 túnel en marcha".to_string()),
-                n => parts.push(format!("{n} túneles en marcha")),
-            }
-            ui.label(format!("Hay {}: se cerrarán.", parts.join(" y ")));
+            };
+            let tunnels = match tunnels {
+                0 => None,
+                1 => Some(tr("1 túnel en marcha").to_string()),
+                n => Some(trf!("{n} túneles en marcha", n)),
+            };
+            // Frases enteras: cada idioma las ordena a su manera.
+            let what = match (sessions, tunnels) {
+                (Some(sessions), Some(tunnels)) => {
+                    trf!("{sessions} y {tunnels}", sessions, tunnels)
+                }
+                (Some(one), None) | (None, Some(one)) => one,
+                (None, None) => String::new(),
+            };
+            ui.label(trf!("Hay {what}: se cerrarán.", what));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button("Salir").clicked() {
+                if ui.button(tr("Salir")).clicked() {
                     decision = Some(true);
                 }
-                let cancel = ui.button("Cancelar");
+                let cancel = ui.button(tr("Cancelar"));
                 if !*focused {
                     cancel.request_focus();
                     *focused = true;
@@ -2960,19 +3024,22 @@ impl App {
                         };
                         status_dot(ui, color);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("×").on_hover_text("Cerrar").clicked() {
+                            if ui.small_button("×").on_hover_text(tr("Cerrar")).clicked() {
                                 close = Some(index);
                             }
                             if ui
                                 .small_button("⛶")
-                                .on_hover_text("Ver solo este terminal")
+                                .on_hover_text(tr("Ver solo este terminal"))
                                 .clicked()
                             {
                                 maximize = Some(index);
                             }
                             if matches!(term.state, ConnState::Closed(_))
                                 && tab.session.is_some()
-                                && ui.small_button("⟳").on_hover_text("Reconectar").clicked()
+                                && ui
+                                    .small_button("⟳")
+                                    .on_hover_text(tr("Reconectar"))
+                                    .clicked()
                             {
                                 reconnect = Some(index);
                             }
@@ -3063,7 +3130,7 @@ impl App {
             self.active = index;
         }
         if let Some(index) = reconnect {
-            match self.restart_terminal(index, "[Reconectando…]") {
+            match self.restart_terminal(index, tr("[Reconectando…]")) {
                 Ok(()) => self.tabs[index].reconnect = None,
                 Err(e) => self.notify(e, true),
             }
@@ -3119,7 +3186,10 @@ impl App {
     /// valores.
     fn run_macro(&mut self, id: Uuid) {
         if self.active_terminal().is_none() {
-            return self.notify("Abre un terminal conectado para lanzar el snippet", true);
+            return self.notify(
+                tr("Abre un terminal conectado para lanzar el snippet"),
+                true,
+            );
         }
         let Some(snippet) = self.macros.macros.iter().find(|m| m.id == id) else {
             return;
@@ -3184,7 +3254,7 @@ impl App {
         let mut cancel = false;
         egui::Modal::new(egui::Id::unique("snippet_prompt")).show(ctx, |ui| {
             ui.set_width(420.0);
-            ui.heading(format!("Lanzar «{}»", prompt.name));
+            ui.heading(trf!("Lanzar «{name}»", name = prompt.name));
             egui::Grid::new("snippet_prompt_grid")
                 .num_columns(2)
                 .show(ui, |ui| {
@@ -3201,10 +3271,11 @@ impl App {
                 });
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.horizontal(|ui| {
-                if ui.button("▶ Lanzar").clicked() || enter {
+                if ui.button(tr("▶ Lanzar")).clicked() || enter {
                     launch = true;
                 }
-                if ui.button("Cancelar").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                if ui.button(tr("Cancelar")).clicked()
+                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
                 {
                     cancel = true;
                 }
@@ -3272,15 +3343,17 @@ impl App {
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.18);
             ui.label(RichText::new("GodRemote").size(34.0).strong());
-            ui.weak("Gestor de conexiones remotas · SSH · SFTP · RDP · VNC · Telnet · Serie");
+            ui.weak(tr(
+                "Gestor de conexiones remotas · SSH · SFTP · RDP · VNC · Telnet · Serie",
+            ));
             ui.add_space(24.0);
-            ui.label("Conexión rápida");
+            ui.label(tr("Conexión rápida"));
             let mut go = None;
             ui.allocate_ui(egui::vec2(520.0, 28.0), |ui| {
                 ui.horizontal(|ui| {
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut self.quick_connect)
-                            .hint_text("usuario@host[:puerto]")
+                            .hint_text(tr("usuario@host[:puerto]"))
                             .desired_width(300.0),
                     );
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -3300,8 +3373,10 @@ impl App {
                 }
             }
             ui.add_space(24.0);
-            ui.weak("Doble clic en un equipo del árbol para conectar.");
-            ui.weak("Clic derecho para editar, mover, duplicar o abrir SFTP.");
+            ui.weak(tr("Doble clic en un equipo del árbol para conectar."));
+            ui.weak(tr(
+                "Clic derecho para editar, mover, duplicar o abrir SFTP.",
+            ));
         });
     }
 
@@ -3340,15 +3415,15 @@ impl App {
                     match &term.state {
                         ConnState::Connecting => {
                             ui.spinner();
-                            ui.label("Conectando…");
+                            ui.label(tr("Conectando…"));
                         }
                         ConnState::Connected => {
                             status_dot(ui, ok_color());
-                            ui.colored_label(ok_color(), "Conectado");
+                            ui.colored_label(ok_color(), tr("Conectado"));
                         }
                         ConnState::Closed(_) => {
                             status_dot(ui, ui.visuals().error_fg_color);
-                            ui.colored_label(ui.visuals().error_fg_color, "Desconectado");
+                            ui.colored_label(ui.visuals().error_fg_color, tr("Desconectado"));
                             if let Some(r) = &tab.reconnect {
                                 let max = self.settings.reconnect_attempts;
                                 match r.next {
@@ -3358,21 +3433,23 @@ impl App {
                                                 + 1;
                                         ui.colored_label(
                                             warn_color(),
-                                            format!(
-                                                "Reconectando en {secs} s (intento {} de {max})",
-                                                r.attempt + 1
+                                            trf!(
+                                                "Reconectando en {secs} s (intento {n} de {max})",
+                                                secs,
+                                                n = r.attempt + 1,
+                                                max
                                             ),
                                         );
-                                        if ui.small_button("Cancelar").clicked() {
+                                        if ui.small_button(tr("Cancelar")).clicked() {
                                             cancel_reconnect = true;
                                         }
                                     }
                                     None => {
-                                        ui.weak("No se pudo reconectar");
+                                        ui.weak(tr("No se pudo reconectar"));
                                     }
                                 }
                             }
-                            if tab.session.is_some() && ui.button("⟳ Reconectar").clicked() {
+                            if tab.session.is_some() && ui.button(tr("⟳ Reconectar")).clicked() {
                                 reconnect = true;
                             }
                         }
@@ -3383,7 +3460,7 @@ impl App {
                             && term.state == ConnState::Connected
                             && ui
                                 .button("📂 SFTP")
-                                .on_hover_text("Explorar ficheros sobre esta misma conexión")
+                                .on_hover_text(tr("Explorar ficheros sobre esta misma conexión"))
                                 .clicked()
                         {
                             open_sftp = Some((s.clone(), term.ssh.clone()));
@@ -3404,25 +3481,29 @@ impl App {
                                     let what =
                                         s.tunnels.get(i).map(|t| t.describe()).unwrap_or_default();
                                     match status {
-                                        Some(TunnelStatus::Active) => format!("Activo: {what}"),
+                                        Some(TunnelStatus::Active) => trf!("Activo: {what}", what),
                                         Some(TunnelStatus::Failed(e)) => {
-                                            format!("Error: {what}: {e}")
+                                            trf!("Error: {what}: {error}", what, error = e)
                                         }
-                                        None => format!("Pendiente: {what}"),
+                                        None => trf!("Pendiente: {what}", what),
                                     }
                                 })
                                 .collect();
                             ui.colored_label(
                                 color,
-                                format!("Túneles {active}/{}", term.tunnels.len()),
+                                trf!(
+                                    "Túneles {active}/{total}",
+                                    active,
+                                    total = term.tunnels.len()
+                                ),
                             )
                             .on_hover_text(details.join("\n"));
                         }
                     }
                     if term.is_recording() {
                         status_dot(ui, ui.visuals().error_fg_color);
-                        ui.label("Grabando snippet");
-                        if ui.button("⏹ Detener").clicked() {
+                        ui.label(tr("Grabando snippet"));
+                        if ui.button(tr("⏹ Detener")).clicked() {
                             recorded = Some(term.stop_recording());
                         }
                     }
@@ -3430,21 +3511,23 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .small_button("A+")
-                            .on_hover_text("Letra más grande")
+                            .on_hover_text(tr("Letra más grande"))
                             .clicked()
                         {
                             term.font_delta = (term.font_delta + 1.0).min(24.0);
                         }
                         if ui
                             .small_button("A−")
-                            .on_hover_text("Letra más pequeña")
+                            .on_hover_text(tr("Letra más pequeña"))
                             .clicked()
                         {
                             term.font_delta = (term.font_delta - 1.0).max(-8.0);
                         }
                         if ui
                             .small_button("🔍")
-                            .on_hover_text("Buscar en el terminal y su historial (Ctrl+Mayús+F)")
+                            .on_hover_text(tr(
+                                "Buscar en el terminal y su historial (Ctrl+Mayús+F)",
+                            ))
                             .clicked()
                         {
                             term.open_search();
@@ -3452,16 +3535,17 @@ impl App {
                         // Registro de la sesión en un fichero.
                         let (label, hover) = match &term.log {
                             Some(log) => (
-                                RichText::new("⏺ Registrando").color(ui.visuals().error_fg_color),
-                                format!(
-                                    "Guardando lo que muestra este terminal en\n{}\n\
+                                RichText::new(tr("⏺ Registrando"))
+                                    .color(ui.visuals().error_fg_color),
+                                trf!(
+                                    "Guardando lo que muestra este terminal en\n{ruta}\n\
                                      Pulsa para dejar de registrar.",
-                                    log.path().display()
+                                    ruta = log.path().display()
                                 ),
                             ),
                             None => (
-                                RichText::new("⏺ Registrar"),
-                                "Guardar en un fichero de texto lo que muestre este terminal"
+                                RichText::new(tr("⏺ Registrar")),
+                                tr("Guardar en un fichero de texto lo que muestre este terminal")
                                     .to_string(),
                             ),
                         };
@@ -3469,7 +3553,10 @@ impl App {
                             match term.log.take() {
                                 Some(log) => {
                                     notice = Some((
-                                        format!("Registro guardado en {}", log.path().display()),
+                                        trf!(
+                                            "Registro guardado en {ruta}",
+                                            ruta = log.path().display()
+                                        ),
                                         false,
                                     ));
                                 }
@@ -3487,7 +3574,10 @@ impl App {
                                     ) {
                                         Ok(log) => {
                                             notice = Some((
-                                                format!("Registrando en {}", log.path().display()),
+                                                trf!(
+                                                    "Registrando en {ruta}",
+                                                    ruta = log.path().display()
+                                                ),
                                                 false,
                                             ));
                                             term.log = Some(log);
@@ -3566,34 +3656,34 @@ impl App {
             TabKind::Desktop(view) if tab.x_server => {
                 ui.horizontal(|ui| {
                     status_dot(ui, ok_color());
-                    ui.colored_label(ok_color(), "Servidor X integrado");
+                    ui.colored_label(ok_color(), tr("Servidor X integrado"));
                     let clients = self.xhost.running().map_or(0, |s| s.client_count());
                     ui.weak(match clients {
-                        0 => "sin aplicaciones".to_string(),
-                        1 => "1 aplicación".to_string(),
-                        n => format!("{n} aplicaciones"),
+                        0 => tr("sin aplicaciones").to_string(),
+                        1 => tr("1 aplicación").to_string(),
+                        n => trf!("{n} aplicaciones", n),
                     });
                     if let Some((w, h)) = view.remote_size() {
                         ui.weak(format!("· {w}×{h}"));
                     }
                     if let Some(display) = self.xhost.local_display() {
-                        ui.weak("· programas locales:");
+                        ui.weak(tr("· programas locales:"));
                         if ui
                             .button(format!("DISPLAY={display}"))
-                            .on_hover_text("Copiar «export DISPLAY=…» al portapapeles")
+                            .on_hover_text(tr("Copiar «export DISPLAY=…» al portapapeles"))
                             .clicked()
                         {
                             ui.ctx().copy_text(format!("export DISPLAY={display}"));
-                            notice = Some(("Copiado al portapapeles".into(), false));
+                            notice = Some((tr("Copiado al portapapeles").into(), false));
                         }
                     } else if let Some(error) = self.xhost.local_error() {
                         ui.colored_label(ui.visuals().error_fg_color, error);
                     }
                     if clients == 0 {
-                        ui.weak(
+                        ui.weak(tr(
                             "· lanza una aplicación gráfica desde un terminal SSH con el \
                              reenvío X11 activado",
-                        );
+                        ));
                     }
                 });
                 if self.xhost.running().is_some_and(|s| s.rootless().is_some()) {
@@ -3607,16 +3697,16 @@ impl App {
                     match &view.state {
                         DesktopState::Connecting(_) => {
                             ui.spinner();
-                            ui.label("Conectando…");
+                            ui.label(tr("Conectando…"));
                         }
                         DesktopState::Connected => {
                             status_dot(ui, ok_color());
-                            ui.colored_label(ok_color(), "Conectado");
+                            ui.colored_label(ok_color(), tr("Conectado"));
                         }
                         DesktopState::Closed(_) => {
                             status_dot(ui, ui.visuals().error_fg_color);
-                            ui.colored_label(ui.visuals().error_fg_color, "Desconectado");
-                            if tab.session.is_some() && ui.button("⟳ Reconectar").clicked() {
+                            ui.colored_label(ui.visuals().error_fg_color, tr("Desconectado"));
+                            if tab.session.is_some() && ui.button(tr("⟳ Reconectar")).clicked() {
                                 reconnect = true;
                             }
                         }
@@ -3627,8 +3717,8 @@ impl App {
                     if let Some((w, h)) = view.remote_size() {
                         ui.weak(format!("{w}×{h}"));
                         if ui
-                            .button("Ctrl+Alt+Supr")
-                            .on_hover_text("Envía Ctrl+Alt+Supr al equipo remoto")
+                            .button(tr("Ctrl+Alt+Supr"))
+                            .on_hover_text(tr("Envía Ctrl+Alt+Supr al equipo remoto"))
                             .clicked()
                         {
                             view.send_combo(&[KeyCode::Control, KeyCode::Alt, KeyCode::Delete]);
@@ -3636,7 +3726,7 @@ impl App {
                         }
                         if ui
                             .button("⊞ Win")
-                            .on_hover_text("Pulsa la tecla Windows en el equipo remoto")
+                            .on_hover_text(tr("Pulsa la tecla Windows en el equipo remoto"))
                             .clicked()
                         {
                             view.send_combo(&[KeyCode::Meta]);
@@ -3661,7 +3751,7 @@ impl App {
                 }
             } else {
                 let active = self.active;
-                match self.restart_terminal(active, "[Reconectando…]") {
+                match self.restart_terminal(active, tr("[Reconectando…]")) {
                     Ok(()) => {
                         self.tabs[active].reconnect = None;
                         self.focus_active_terminal();
@@ -3690,7 +3780,10 @@ impl App {
 
     fn finish_recording(&mut self, bytes: Vec<u8>) {
         if bytes.is_empty() {
-            self.notify("No se tecleó nada: no se ha guardado ningún snippet", true);
+            self.notify(
+                tr("No se tecleó nada: no se ha guardado ningún snippet"),
+                true,
+            );
         } else {
             self.recorded_macro = Some(RecordedMacro {
                 name: String::new(),
@@ -3721,10 +3814,10 @@ impl App {
                     error,
                     focus,
                 } => {
-                    ui.heading("🔐 Desbloquear baúl");
-                    ui.label(
+                    ui.heading(tr("🔐 Desbloquear baúl"));
+                    ui.label(tr(
                         "Introduce la contraseña maestra para usar las credenciales guardadas.",
-                    );
+                    ));
                     let resp = ui.add(
                         egui::TextEdit::singleline(password)
                             .password(true)
@@ -3739,7 +3832,7 @@ impl App {
                         ui.colored_label(ui.visuals().error_fg_color, e.as_str());
                     }
                     ui.horizontal(|ui| {
-                        if ui.button("Desbloquear").clicked() || enter {
+                        if ui.button(tr("Desbloquear")).clicked() || enter {
                             match Vault::unlock(&path, password) {
                                 Ok(v) => opened = Some(v),
                                 Err(e) => {
@@ -3749,7 +3842,7 @@ impl App {
                                 }
                             }
                         }
-                        if ui.button("Continuar sin baúl").clicked() {
+                        if ui.button(tr("Continuar sin baúl")).clicked() {
                             close = true;
                         }
                     });
@@ -3759,36 +3852,36 @@ impl App {
                     confirm,
                     error,
                 } => {
-                    ui.heading("🔐 Crear baúl de credenciales");
-                    ui.label(
+                    ui.heading(tr("🔐 Crear baúl de credenciales"));
+                    ui.label(tr(
                         "Elige una contraseña maestra. Con ella se cifran las contraseñas y \
                          passphrases guardadas (Argon2id + XChaCha20-Poly1305).",
-                    );
+                    ));
                     ui.colored_label(
                         warn_color(),
-                        "Si la olvidas, los secretos guardados no se pueden recuperar.",
+                        tr("Si la olvidas, los secretos guardados no se pueden recuperar."),
                     );
                     ui.add(
                         egui::TextEdit::singleline(password)
                             .password(true)
-                            .hint_text("contraseña maestra")
+                            .hint_text(tr("contraseña maestra"))
                             .desired_width(f32::INFINITY),
                     );
                     ui.add(
                         egui::TextEdit::singleline(confirm)
                             .password(true)
-                            .hint_text("repetir")
+                            .hint_text(tr("repetir"))
                             .desired_width(f32::INFINITY),
                     );
                     if let Some(e) = error {
                         ui.colored_label(ui.visuals().error_fg_color, e.as_str());
                     }
                     ui.horizontal(|ui| {
-                        if ui.button("Crear baúl").clicked() || enter {
+                        if ui.button(tr("Crear baúl")).clicked() || enter {
                             if password.is_empty() {
-                                *error = Some("La contraseña no puede estar vacía".into());
+                                *error = Some(tr("La contraseña no puede estar vacía").into());
                             } else if password != confirm {
-                                *error = Some("Las contraseñas no coinciden".into());
+                                *error = Some(tr("Las contraseñas no coinciden").into());
                             } else {
                                 match Vault::create(&path, password) {
                                     Ok(v) => opened = Some(v),
@@ -3796,7 +3889,7 @@ impl App {
                                 }
                             }
                         }
-                        if ui.button("Ahora no").clicked() {
+                        if ui.button(tr("Ahora no")).clicked() {
                             close = true;
                         }
                     });
@@ -3806,37 +3899,37 @@ impl App {
                     confirm,
                     error,
                 } => {
-                    ui.heading("Cambiar contraseña maestra");
+                    ui.heading(tr("Cambiar contraseña maestra"));
                     ui.add(
                         egui::TextEdit::singleline(password)
                             .password(true)
-                            .hint_text("nueva contraseña maestra")
+                            .hint_text(tr("nueva contraseña maestra"))
                             .desired_width(f32::INFINITY),
                     );
                     ui.add(
                         egui::TextEdit::singleline(confirm)
                             .password(true)
-                            .hint_text("repetir")
+                            .hint_text(tr("repetir"))
                             .desired_width(f32::INFINITY),
                     );
                     if let Some(e) = error {
                         ui.colored_label(ui.visuals().error_fg_color, e.as_str());
                     }
                     ui.horizontal(|ui| {
-                        if ui.button("Cambiar").clicked() || enter {
+                        if ui.button(tr("Cambiar")).clicked() || enter {
                             if password.is_empty() {
-                                *error = Some("La contraseña no puede estar vacía".into());
+                                *error = Some(tr("La contraseña no puede estar vacía").into());
                             } else if password != confirm {
-                                *error = Some("Las contraseñas no coinciden".into());
+                                *error = Some(tr("Las contraseñas no coinciden").into());
                             } else {
                                 match self.vault.as_mut().map(|v| v.change_master(password)) {
                                     Some(Ok(())) => changed = true,
                                     Some(Err(e)) => *error = Some(format!("{e:#}")),
-                                    None => *error = Some("El baúl está bloqueado".into()),
+                                    None => *error = Some(tr("El baúl está bloqueado").into()),
                                 }
                             }
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button(tr("Cancelar")).clicked() {
                             close = true;
                         }
                     });
@@ -3846,10 +3939,10 @@ impl App {
         if let Some(v) = opened {
             self.vault = Some(v);
             self.vault_dialog = None;
-            self.notify("Baúl desbloqueado", false);
+            self.notify(tr("Baúl desbloqueado"), false);
         } else if changed {
             self.vault_dialog = None;
-            self.notify("Contraseña maestra cambiada", false);
+            self.notify(tr("Contraseña maestra cambiada"), false);
         } else if close {
             self.vault_dialog = None;
         }
@@ -3876,36 +3969,43 @@ impl App {
                     fingerprint,
                     reply,
                 } => {
-                    ui.heading("Host desconocido");
-                    ui.label(format!(
+                    ui.heading(tr("Host desconocido"));
+                    ui.label(trf!(
                         "No se puede verificar la autenticidad de {host}:{port}. \
-                         Es la primera vez que te conectas a este servidor."
+                         Es la primera vez que te conectas a este servidor.",
+                        host,
+                        port
                     ));
                     ui.add_space(4.0);
+                    // (La marca «certificado TLS» llega siempre sin traducir.)
                     let is_certificate = algorithm.starts_with("certificado");
                     if is_certificate {
-                        ui.label("Huella del certificado TLS:");
+                        ui.label(tr("Huella del certificado TLS:"));
                     } else {
-                        ui.label(format!("Huella de la clave {algorithm}:"));
+                        ui.label(trf!("Huella de la clave {algorithm}:", algorithm));
                     }
                     ui.label(RichText::new(fingerprint.as_str()).monospace().strong());
                     ui.add_space(4.0);
                     ui.weak(if is_certificate {
-                        "Comprueba la huella con el administrador del servidor. Si confías, \
-                         se recordará y la conexión se rechazará si cambia."
+                        tr(
+                            "Comprueba la huella con el administrador del servidor. Si confías, \
+                             se recordará y la conexión se rechazará si cambia.",
+                        )
                     } else {
-                        "Comprueba la huella con el administrador del servidor. Si confías, \
-                         se guardará en known_hosts y se avisará si cambia."
+                        tr(
+                            "Comprueba la huella con el administrador del servidor. Si confías, \
+                             se guardará en known_hosts y se avisará si cambia.",
+                        )
                     });
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Confiar y conectar").clicked() {
+                        if ui.button(tr("Confiar y conectar")).clicked() {
                             if let Some(r) = reply.take() {
                                 let _ = r.send(true);
                             }
                             done = true;
                         }
-                        if ui.button("Cancelar").clicked() || escape {
+                        if ui.button(tr("Cancelar")).clicked() || escape {
                             if let Some(r) = reply.take() {
                                 let _ = r.send(false);
                             }
@@ -3936,14 +4036,14 @@ impl App {
                     }
                     if *allow_save {
                         if vault_open {
-                            ui.checkbox(save, "Guardar en el baúl cifrado");
+                            ui.checkbox(save, tr("Guardar en el baúl cifrado"));
                         } else {
-                            ui.weak("Baúl bloqueado: no se guardará.");
+                            ui.weak(tr("Baúl bloqueado: no se guardará."));
                         }
                     }
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Aceptar").clicked() || enter {
+                        if ui.button(tr("Aceptar")).clicked() || enter {
                             if let Some(r) = reply.take() {
                                 let _ = r.send(Some(SecretAnswer {
                                     value: std::mem::take(value),
@@ -3952,7 +4052,7 @@ impl App {
                             }
                             done = true;
                         }
-                        if ui.button("Cancelar").clicked() || escape {
+                        if ui.button(tr("Cancelar")).clicked() || escape {
                             if let Some(r) = reply.take() {
                                 let _ = r.send(None);
                             }
@@ -3993,27 +4093,30 @@ impl App {
         let mut delete = false;
         egui::Modal::new(egui::Id::unique("confirm_delete")).show(ctx, |ui| {
             ui.set_width(400.0);
-            ui.heading("Eliminar");
+            ui.heading(tr("Eliminar"));
             if is_folder {
-                ui.label(format!(
-                    "Se eliminará la carpeta «{name}» con las {} sesión(es) que contiene \
+                ui.label(trf!(
+                    "Se eliminará la carpeta «{name}» con las {n} sesión(es) que contiene \
                      y sus credenciales guardadas.",
-                    session_ids.len()
+                    name,
+                    n = session_ids.len()
                 ));
             } else {
-                ui.label(format!(
-                    "Se eliminará la sesión «{name}» y sus credenciales guardadas."
+                ui.label(trf!(
+                    "Se eliminará la sesión «{name}» y sus credenciales guardadas.",
+                    name
                 ));
             }
-            ui.weak("Esta acción no se puede deshacer.");
+            ui.weak(tr("Esta acción no se puede deshacer."));
             ui.horizontal(|ui| {
                 if ui
-                    .button(RichText::new("Eliminar").color(ui.visuals().error_fg_color))
+                    .button(RichText::new(tr("Eliminar")).color(ui.visuals().error_fg_color))
                     .clicked()
                 {
                     delete = true;
                 }
-                if ui.button("Cancelar").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                if ui.button(tr("Cancelar")).clicked()
+                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
                 {
                     close = true;
                 }
@@ -4045,15 +4148,15 @@ impl App {
         let mut launch = false;
         egui::Modal::new(egui::Id::unique("rdp_prompt")).show(ctx, |ui| {
             ui.set_width(400.0);
-            ui.heading("Escritorio remoto");
-            ui.label(format!(
-                "Contraseña de {} en {}",
-                if prompt.session.username.is_empty() {
-                    "(usuario)"
+            ui.heading(tr("Escritorio remoto"));
+            ui.label(trf!(
+                "Contraseña de {user} en {host}",
+                user = if prompt.session.username.is_empty() {
+                    tr("(usuario)")
                 } else {
                     &prompt.session.username
                 },
-                prompt.session.host
+                host = prompt.session.host
             ));
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut prompt.password)
@@ -4065,22 +4168,26 @@ impl App {
                 prompt.focused = true;
             }
             if vault_open {
-                ui.checkbox(&mut prompt.save, "Guardar en el baúl cifrado");
+                ui.checkbox(&mut prompt.save, tr("Guardar en el baúl cifrado"));
             } else {
-                ui.weak("Baúl bloqueado: no se guardará.");
+                ui.weak(tr("Baúl bloqueado: no se guardará."));
             }
-            ui.weak(format!("Cliente: {}", crate::rdp::client_description()));
+            ui.weak(trf!(
+                "Cliente: {client}",
+                client = crate::rdp::client_description()
+            ));
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             let valid = !prompt.password.is_empty();
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(valid, egui::Button::new("Conectar"))
+                    .add_enabled(valid, egui::Button::new(tr("Conectar")))
                     .clicked()
                     || (enter && valid)
                 {
                     launch = true;
                 }
-                if ui.button("Cancelar").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                if ui.button(tr("Cancelar")).clicked()
+                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
                 {
                     close = true;
                 }
@@ -4147,8 +4254,8 @@ fn move_menu(
     folders: &[(Uuid, String)],
     actions: &mut Vec<TreeAction>,
 ) {
-    ui.menu_button("Mover a", |ui| {
-        if ui.button("(raíz)").clicked() {
+    ui.menu_button(tr("Mover a"), |ui| {
+        if ui.button(tr("(raíz)")).clicked() {
             actions.push(TreeAction::Move(id, None));
             ui.close();
         }
@@ -4193,28 +4300,28 @@ fn session_row(
         actions.push(TreeAction::Select(s.id));
     }
     resp.context_menu(|ui| {
-        if ui.button("Conectar").clicked() {
+        if ui.button(tr("Conectar")).clicked() {
             actions.push(TreeAction::Connect(s.id));
             ui.close();
         }
         match s.protocol {
             Protocol::Ssh => {
-                if ui.button("📂 Abrir SFTP").clicked() {
+                if ui.button(tr("📂 Abrir SFTP")).clicked() {
                     actions.push(TreeAction::OpenAs(s.id, Protocol::Sftp));
                     ui.close();
                 }
             }
             Protocol::Sftp => {
-                if ui.button("💻 Abrir terminal SSH").clicked() {
+                if ui.button(tr("💻 Abrir terminal SSH")).clicked() {
                     actions.push(TreeAction::OpenAs(s.id, Protocol::Ssh));
                     ui.close();
                 }
             }
             Protocol::Rdp => {
                 let (label, embedded) = if s.rdp.embedded {
-                    ("🖥 Abrir con el cliente externo", false)
+                    (tr("🖥 Abrir con el cliente externo"), false)
                 } else {
-                    ("🖥 Abrir integrado en una pestaña", true)
+                    (tr("🖥 Abrir integrado en una pestaña"), true)
                 };
                 if ui.button(label).clicked() {
                     actions.push(TreeAction::OpenRdp(s.id, embedded));
@@ -4224,17 +4331,17 @@ fn session_row(
             Protocol::Vnc | Protocol::Telnet | Protocol::Serial => {}
         }
         ui.separator();
-        if ui.button("✏ Editar…").clicked() {
+        if ui.button(tr("✏ Editar…")).clicked() {
             actions.push(TreeAction::Edit(s.id));
             ui.close();
         }
-        if ui.button("Duplicar").clicked() {
+        if ui.button(tr("Duplicar")).clicked() {
             actions.push(TreeAction::Duplicate(s.id));
             ui.close();
         }
         move_menu(ui, s.id, folders, actions);
         ui.separator();
-        if ui.button("🗑 Eliminar…").clicked() {
+        if ui.button(tr("🗑 Eliminar…")).clicked() {
             actions.push(TreeAction::Delete(s.id));
             ui.close();
         }
@@ -4261,7 +4368,7 @@ fn tree_ui(
                     .default_open(true)
                     .show(ui, |ui| {
                         if f.children.is_empty() {
-                            ui.weak("(vacía)");
+                            ui.weak(tr("(vacía)"));
                         }
                         tree_ui(ui, &f.children, selected, folders, actions);
                     });
@@ -4269,36 +4376,36 @@ fn tree_ui(
                     actions.push(TreeAction::Select(f.id));
                 }
                 header.header_response.context_menu(|ui| {
-                    if ui.button("➕ Nueva sesión aquí").clicked() {
+                    if ui.button(tr("➕ Nueva sesión aquí")).clicked() {
                         actions.push(TreeAction::NewSession(Some(f.id)));
                         ui.close();
                     }
-                    if ui.button("📁 Nueva subcarpeta").clicked() {
+                    if ui.button(tr("📁 Nueva subcarpeta")).clicked() {
                         actions.push(TreeAction::NewFolder(Some(f.id)));
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("✏ Editar carpeta…").clicked() {
+                    if ui.button(tr("✏ Editar carpeta…")).clicked() {
                         actions.push(TreeAction::RenameFolder(f.id));
                         ui.close();
                     }
                     if ui
-                        .button("▶ Ejecutar una orden en sus equipos…")
-                        .on_hover_text(
+                        .button(tr("▶ Ejecutar una orden en sus equipos…"))
+                        .on_hover_text(tr(
                             "Lanza la misma orden en todos sus equipos SSH y recoge lo que \
                              contesta cada uno",
-                        )
+                        ))
                         .clicked()
                     {
                         actions.push(TreeAction::RunOnFolder(f.id));
                         ui.close();
                     }
                     if ui
-                        .button("📊 Panel de estado")
-                        .on_hover_text(
+                        .button(tr("📊 Panel de estado"))
+                        .on_hover_text(tr(
                             "Vigila a la vez todos sus equipos SSH: conexión, CPU, memoria, \
                              disco y alertas",
-                        )
+                        ))
                         .clicked()
                     {
                         actions.push(TreeAction::Dashboard(f.id));
@@ -4306,7 +4413,7 @@ fn tree_ui(
                     }
                     move_menu(ui, f.id, folders, actions);
                     ui.separator();
-                    if ui.button("🗑 Eliminar…").clicked() {
+                    if ui.button(tr("🗑 Eliminar…")).clicked() {
                         actions.push(TreeAction::Delete(f.id));
                         ui.close();
                     }
@@ -4565,10 +4672,13 @@ impl eframe::App for App {
                 };
                 match result {
                     Ok(()) if password.is_empty() => {
-                        self.notify("Contraseña del proxy borrada del baúl", false)
+                        self.notify(tr("Contraseña del proxy borrada del baúl"), false)
                     }
-                    Ok(()) => self.notify("Contraseña del proxy guardada en el baúl", false),
-                    Err(e) => self.notify(format!("No se pudo guardar: {e:#}"), true),
+                    Ok(()) => self.notify(tr("Contraseña del proxy guardada en el baúl"), false),
+                    Err(e) => self.notify(
+                        trf!("No se pudo guardar: {error}", error = format!("{e:#}")),
+                        true,
+                    ),
                 }
             }
             if changed {
@@ -4589,7 +4699,10 @@ impl eframe::App for App {
             }
             if changed && let Err(e) = self.settings.save(&crate::paths::settings_file()) {
                 self.notify(
-                    format!("No se pudieron guardar las preferencias: {e:#}"),
+                    trf!(
+                        "No se pudieron guardar las preferencias: {error}",
+                        error = format!("{e:#}")
+                    ),
                     true,
                 );
             }
@@ -4608,7 +4721,14 @@ impl eframe::App for App {
             if let Some(folder) = request.open_folder {
                 let _ = std::fs::create_dir_all(&folder);
                 if let Err(e) = crate::paths::open_with_system(&folder) {
-                    self.notify(format!("No se pudo abrir {}: {e}", folder.display()), true);
+                    self.notify(
+                        trf!(
+                            "No se pudo abrir {ruta}: {error}",
+                            ruta = folder.display(),
+                            error = e
+                        ),
+                        true,
+                    );
                 }
             }
             if !open {
@@ -4639,7 +4759,10 @@ impl eframe::App for App {
                 self.settings.server_bar.sanitize();
                 if let Err(e) = self.settings.save(&crate::paths::settings_file()) {
                     self.notify(
-                        format!("No se pudieron guardar las preferencias: {e:#}"),
+                        trf!(
+                            "No se pudieron guardar las preferencias: {error}",
+                            error = format!("{e:#}")
+                        ),
                         true,
                     );
                 }
@@ -4748,15 +4871,15 @@ fn broadcast_button(
         .filter(|(id, ..)| broadcast.includes(*id))
         .count();
     let label = if !broadcast.enabled {
-        RichText::new("📡 Difusión")
+        RichText::new(tr("📡 Difusión"))
     } else if broadcast.includes(current) && receivers > 1 {
-        RichText::new(format!("📡 Escribiendo en {receivers} terminales"))
+        RichText::new(trf!("📡 Escribiendo en {receivers} terminales", receivers))
             .color(warn_color())
             .strong()
     } else if broadcast.includes(current) {
-        RichText::new("📡 Difusión: no hay más terminales").color(warn_color())
+        RichText::new(tr("📡 Difusión: no hay más terminales")).color(warn_color())
     } else {
-        RichText::new("📡 Difusión activa (este terminal no)").color(warn_color())
+        RichText::new(tr("📡 Difusión activa (este terminal no)")).color(warn_color())
     };
     // El menú no se cierra al marcar casillas: se suelen marcar varias.
     let config = MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
@@ -4766,26 +4889,30 @@ fn broadcast_button(
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
         ui.checkbox(
             &mut broadcast.enabled,
-            "Escribir a la vez en varios terminales",
+            tr("Escribir a la vez en varios terminales"),
         );
-        ui.weak(
+        ui.weak(tr(
             "Lo que teclees, pegues o lances con un snippet en uno de ellos se envía también a \
              los demás.",
-        );
+        ));
         ui.add_enabled_ui(broadcast.enabled, |ui| {
-            ui.radio_value(&mut broadcast.all, true, "En todos los terminales abiertos");
-            ui.radio_value(&mut broadcast.all, false, "Solo en los que elija:");
+            ui.radio_value(
+                &mut broadcast.all,
+                true,
+                tr("En todos los terminales abiertos"),
+            );
+            ui.radio_value(&mut broadcast.all, false, tr("Solo en los que elija:"));
             ui.add_enabled_ui(!broadcast.all, |ui| {
                 ui.indent("broadcast_tabs", |ui| {
                     for (id, title, connected) in terminals {
                         let mut on = broadcast.chosen.contains(id);
-                        let mut text = title.clone();
-                        if *id == current {
-                            text.push_str(" (este)");
-                        }
-                        if !connected {
-                            text.push_str(" · sin conexión");
-                        }
+                        // Frases enteras: cada idioma las ordena a su manera.
+                        let text = match (*id == current, *connected) {
+                            (true, true) => trf!("{title} (este)", title),
+                            (true, false) => trf!("{title} (este) · sin conexión", title),
+                            (false, false) => trf!("{title} · sin conexión", title),
+                            (false, true) => title.clone(),
+                        };
                         if ui.checkbox(&mut on, text).changed() {
                             if on {
                                 broadcast.chosen.insert(*id);
@@ -4795,10 +4922,10 @@ fn broadcast_button(
                         }
                     }
                     ui.horizontal(|ui| {
-                        if ui.small_button("Todos").clicked() {
+                        if ui.small_button(tr("Todos")).clicked() {
                             broadcast.chosen = terminals.iter().map(|(id, ..)| *id).collect();
                         }
-                        if ui.small_button("Ninguno").clicked() {
+                        if ui.small_button(tr("Ninguno")).clicked() {
                             broadcast.chosen.clear();
                         }
                     });
@@ -4806,7 +4933,7 @@ fn broadcast_button(
             });
         });
     });
-    response.on_hover_text("Enviar lo que escribes a varios terminales a la vez");
+    response.on_hover_text(tr("Enviar lo que escribes a varios terminales a la vez"));
 }
 
 /// `true` si el terminal de esta sesión lleva la barra de información del

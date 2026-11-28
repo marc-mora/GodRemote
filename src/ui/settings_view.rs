@@ -195,21 +195,21 @@ impl SettingsWindow {
                     request.open_transfer = true;
                 }
                         if ui
-                            .button("Sincronización entre mis equipos…")
-                            .on_hover_text(
+                            .button(tr("Sincronización entre mis equipos…"))
+                            .on_hover_text(tr(
                                 "Mantener la configuración al día en todos tus equipos a través \
                                  de una carpeta que ya repliques (Dropbox, Syncthing…), cifrada",
-                            )
+                            ))
                             .clicked()
                         {
                             request.open_sync = true;
                         }
                         if ui
-                            .button("Carpetas compartidas con compañeros…")
-                            .on_hover_text(
+                            .button(tr("Carpetas compartidas con compañeros…"))
+                            .on_hover_text(tr(
                                 "Publicar una carpeta de equipos (sin secretos) para tus \
                                  compañeros, o seguir las que publiquen ellos",
-                            )
+                            ))
                             .clicked()
                         {
                             request.open_shares = true;
@@ -438,7 +438,7 @@ fn highlight_section(ui: &mut egui::Ui, highlight: &mut Highlight) {
         for (index, rule) in highlight.rules.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt(("highlight_color", index))
-                    .selected_text(tr(rule.color.label()))
+                    .selected_text(rule.color.label())
                     .width(86.0)
                     .show_ui(ui, |ui| {
                         for (color, label) in HlColor::THEMED {
