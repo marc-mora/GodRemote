@@ -117,14 +117,12 @@ pub fn is_root() -> bool {
         .unwrap_or(false)
 }
 
-/// Arranca un `sshd` de OpenSSH de usar y tirar en 127.0.0.1. Devuelve el
-/// proceso, el puerto y el fichero donde escribe su registro.
-#[cfg(unix)]
 /// Escribe la configuración de un `sshd` de pruebas. Desde OpenSSH 9.8 el
 /// servidor penaliza a la dirección que falla varias veces seguidas al
 /// autenticarse y le corta las conexiones; las pruebas fallan a propósito
 /// desde 127.0.0.1, así que se desactiva donde el servidor lo entiende (uno
 /// anterior no conoce la opción y no arrancaría con ella).
+#[cfg(unix)]
 pub fn write_sshd_config(sshd: &std::path::Path, cfg: &std::path::Path, config: &str) {
     std::fs::create_dir_all("/run/sshd").ok();
     std::fs::write(cfg, format!("PerSourcePenalties no\n{config}")).unwrap();
@@ -140,6 +138,9 @@ pub fn write_sshd_config(sshd: &std::path::Path, cfg: &std::path::Path, config: 
     }
 }
 
+/// Arranca un `sshd` de OpenSSH de usar y tirar en 127.0.0.1. Devuelve el
+/// proceso, el puerto y el fichero donde escribe su registro.
+#[cfg(unix)]
 pub fn start_sshd(
     dir: &std::path::Path,
     authorized_keys: &std::path::Path,
