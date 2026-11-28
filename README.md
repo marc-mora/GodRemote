@@ -8,6 +8,9 @@ claves, snippets con atajos, vista dividida y escritura simultánea en varios
 terminales, ajustes heredados por carpeta, importación desde otras
 herramientas, temas personalizables y un baúl cifrado para las credenciales.
 
+**Descargas:** ejecutables para Windows, Linux y macOS en la
+[última versión publicada](https://github.com/marc-mora/GodRemote/releases/latest).
+
 ![Terminal SSH](docs/terminal.png)
 ![Barra de información del servidor y fondo del terminal](docs/barra-y-fondo.png)
 ![Vista dividida con difusión](docs/vista-dividida.png)
@@ -121,11 +124,11 @@ ediciones del mismo código:
 | **Completa** (`godremote`) | Sí | russh 0.65.1 | `cargo build --release` |
 | **SSH reforzada** (`godremote-reforzado`) | No (RDP con el cliente externo) | russh 0.65.4 | `cargo build --release --manifest-path reforzado/Cargo.toml --target-dir target` |
 
-Para Windows, ya compiladas (versión 0.7.0): `dist/GodRemote-windows-x64.zip`
-(completa) y `dist/GodRemote-ssh-reforzado-windows-x64.zip` (SSH reforzada).
-Las de Linux y macOS —y las de cada versión publicada— salen de GitHub
-Actions, como se explica arriba. Las dos ediciones usan la misma carpeta de
-configuración, así que se puede pasar de una a otra.
+Las dos se descargan ya compiladas, para Windows, Linux y macOS, de la
+[página de versiones](https://github.com/marc-mora/GodRemote/releases)
+(`GodRemote-…` es la completa y `GodRemote-ssh-reforzado-…` la SSH
+reforzada). Usan la misma carpeta de configuración, así que se puede pasar
+de una a otra.
 
 A la 0.65.1 le faltan varios endurecimientos frente a servidores SSH
 maliciosos publicados entre la 0.65.2 y la 0.65.4. Si no usas el RDP

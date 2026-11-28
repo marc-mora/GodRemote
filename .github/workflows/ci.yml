@@ -169,6 +169,8 @@ jobs:
           cp "target/release/godremote-reforzado${{ matrix.ext }}" "paquetes/reforzada/GodRemote-ssh-reforzado${{ matrix.ext }}"
           cp README.md paquetes/completa/LEEME.md
           cp README.md paquetes/reforzada/LEEME.md
+          # Carpeta limpia: solo lo que se acaba de compilar.
+          rm -rf dist
           mkdir -p dist
           if [ "${{ runner.os }}" = "Windows" ]; then
             (cd paquetes/completa && 7z a -tzip "../../dist/GodRemote-${{ matrix.nombre }}.zip" .)
@@ -211,9 +213,14 @@ jobs:
           ls -l publicar
           if gh release view "$etiqueta" > /dev/null 2>&1; then
             gh release upload "$etiqueta" publicar/*
-            # Si se creó sin descripción, se le ponen las notas.
-            if [ -f "$notas" ] && [ -z "$(gh release view "$etiqueta" --json body --jq .body)" ]; then
-              gh release edit "$etiqueta" --notes-file "$notas"
+            # Las notas van delante de lo que ya dijera la descripción
+            # (GitHub suele poner el enlace a los cambios), si no están ya.
+            if [ -f "$notas" ]; then
+              gh release view "$etiqueta" --json body --jq .body > descripcion.md
+              if ! grep -qF -- "$(head -n 1 "$notas")" descripcion.md; then
+                { cat "$notas"; echo; cat descripcion.md; } > notas-completas.md
+                gh release edit "$etiqueta" --notes-file notas-completas.md
+              fi
             fi
           else
             opciones=()
