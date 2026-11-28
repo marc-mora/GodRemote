@@ -4311,6 +4311,8 @@ impl eframe::App for App {
         self.sync_proxy();
         crate::agent::set_choice(self.settings.agent);
         self.sync_theme(ui.ctx());
+        // El idioma de los ajustes (solo cuesta una comparación).
+        crate::i18n::set(crate::i18n::resolve(self.settings.language));
         if let Some(probe) = &mut self.probe {
             probe.tick(ui.ctx());
         }

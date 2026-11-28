@@ -1242,6 +1242,9 @@ pub struct Settings {
     /// github.com al arrancar, como mucho una al día).
     #[serde(rename = "avisar_versiones")]
     pub check_updates: bool,
+    /// Idioma de la interfaz (de fábrica, el del sistema).
+    #[serde(rename = "idioma")]
+    pub language: crate::i18n::Language,
     /// Panel de estado: refresco, tope de conexiones y umbrales de alerta.
     #[serde(rename = "panel_estado")]
     pub dashboard: crate::dashboard::DashboardSettings,
@@ -1312,6 +1315,7 @@ impl Default for Settings {
             confirm_paste: true,
             confirm_close: true,
             check_updates: true,
+            language: Default::default(),
             dashboard: Default::default(),
             agent: Default::default(),
             triggers: Default::default(),
@@ -1615,6 +1619,7 @@ mod tests {
             confirm_paste: false,
             confirm_close: false,
             check_updates: false,
+            language: crate::i18n::Language::English,
             dashboard: crate::dashboard::DashboardSettings {
                 interval: 30,
                 max_connections: 8,

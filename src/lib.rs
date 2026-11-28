@@ -10,6 +10,7 @@ pub mod desktop;
 pub mod fleet;
 pub mod fonts;
 pub mod highlight;
+pub mod i18n;
 pub mod import;
 pub mod keys;
 pub mod macros;

@@ -60,6 +60,8 @@ impl SettingsWindow {
                         ui.set_width(520.0);
                         rdp_section(ui, settings);
                         ui.separator();
+                        language_ui(ui, &mut settings.language);
+                        ui.add_space(8.0);
                         ui.strong("Conexión");
                         ui.horizontal(|ui| {
                     ui.checkbox(
@@ -562,4 +564,29 @@ fn rdp_section(ui: &mut egui::Ui, settings: &mut Settings) {
             crate::rdp::client_description()
         ));
     }
+}
+
+/// Idioma de la interfaz. Los nombres de los idiomas van en su propio idioma,
+/// para que se encuentren aunque no se entienda el que está puesto.
+fn language_ui(ui: &mut egui::Ui, language: &mut crate::i18n::Language) {
+    use crate::i18n::{Language, tr};
+    ui.horizontal(|ui| {
+        ui.strong(tr("Idioma"));
+        let label = |choice: Language| match choice {
+            Language::Auto => tr("Automático (el del sistema)"),
+            Language::Spanish => "Español",
+            Language::English => "English",
+        };
+        egui::ComboBox::from_id_salt("interface_language")
+            .selected_text(label(*language))
+            .show_ui(ui, |ui| {
+                for choice in [Language::Auto, Language::Spanish, Language::English] {
+                    ui.selectable_value(language, choice, label(choice));
+                }
+            })
+            .response
+            .on_hover_text(tr(
+                "En automático se usa el español si el sistema está en español y, si no, el inglés",
+            ));
+    });
 }

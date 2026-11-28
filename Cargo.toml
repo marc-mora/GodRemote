@@ -73,7 +73,7 @@ zeroize = "1"
 eframe = { version = "0.37", default-features = false, features = ["wgpu_no_default_features"] }
 wgpu = { version = "30", default-features = false, features = ["dx12", "wgsl", "std", "parking_lot"] }
 # Para leer del registro de Windows si el sistema está en modo oscuro.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Registry"] }
 
 [build-dependencies]
 # Icono y datos del ejecutable de Windows.
