@@ -57,6 +57,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 vt100 = "0.18"
 zeroize = "1"
 
+# Para leer del registro de Windows si el sistema está en modo oscuro.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
 [dev-dependencies]
 tempfile = "3"
 

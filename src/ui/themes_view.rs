@@ -16,6 +16,9 @@ struct Editing {
 
 pub struct ThemesWindow {
     selected: String,
+    /// Modo del sistema (`Some(true)`: oscuro) cuando el tema lo sigue y se
+    /// ha podido averiguar; se anota al empezar cada fotograma.
+    system_dark: Option<bool>,
     editing: Option<Editing>,
     /// Ruta escrita a mano para importar o exportar sin diálogo.
     path: String,
@@ -180,6 +183,7 @@ impl ThemesWindow {
     pub fn new(active: &str) -> Self {
         Self {
             selected: active.to_string(),
+            system_dark: None,
             editing: None,
             path: String::new(),
             message: None,
@@ -198,7 +202,8 @@ impl ThemesWindow {
         self.message = Some((msg.into(), true));
     }
 
-    /// Activa un tema y lo recuerda en las preferencias.
+    /// Activa un tema y lo recuerda en las preferencias (con el tema
+    /// automático, para el modo en que está ahora el sistema).
     fn activate(
         &mut self,
         ctx: &egui::Context,
@@ -206,13 +211,25 @@ impl ThemesWindow {
         settings: &mut Settings,
         name: &str,
     ) {
-        if let Some(theme) = store.get(name) {
+        if store.exists(name) {
+            settings.choose_theme(name, self.system_dark);
+            self.apply_active(ctx, store, settings);
+            self.save(settings);
+        }
+    }
+
+    /// Pone el tema que toca según las preferencias y lo marca en la lista.
+    fn apply_active(&mut self, ctx: &egui::Context, store: &ThemeStore, settings: &Settings) {
+        let active = settings.active_theme(self.system_dark);
+        if let Some(theme) = store.get(active) {
             theme.apply(ctx);
-            self.selected = name.to_string();
-            settings.theme = name.to_string();
-            if let Err(e) = settings.save(&crate::paths::settings_file()) {
-                self.fail(format!("No se pudieron guardar las preferencias: {e:#}"));
-            }
+        }
+        self.selected = active.to_string();
+    }
+
+    fn save(&mut self, settings: &Settings) {
+        if let Err(e) = settings.save(&crate::paths::settings_file()) {
+            self.fail(format!("No se pudieron guardar las preferencias: {e:#}"));
         }
     }
 
@@ -278,7 +295,16 @@ impl ThemesWindow {
         ctx: &egui::Context,
         store: &mut ThemeStore,
         settings: &mut Settings,
+        system_dark: Option<bool>,
     ) -> bool {
+        // Si el sistema cambia de modo con la ventana abierta, la lista
+        // marca el tema que ha entrado (lo aplica la aplicación).
+        if self.system_dark != system_dark {
+            self.system_dark = system_dark;
+            if self.editing.is_none() {
+                self.selected = settings.active_theme(system_dark).to_string();
+            }
+        }
         // Soltar un fichero .json sobre la ventana lo importa.
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
@@ -344,7 +370,10 @@ impl ThemesWindow {
                         match store.delete_user(&name) {
                             Ok(()) => {
                                 self.editing = None;
-                                self.activate(ctx, store, settings, theme::BASE_NAME);
+                                // Donde se usara vuelve el de fábrica.
+                                settings.fix_themes(|theme| store.exists(theme));
+                                self.apply_active(ctx, store, settings);
+                                self.save(settings);
                                 self.ok(format!("Tema «{name}» eliminado"));
                             }
                             Err(e) => self.fail(format!("{e:#}")),
@@ -363,13 +392,70 @@ impl ThemesWindow {
 
         if !open {
             // Lo que no se guardó se descarta: vuelve el tema activo.
-            if self.editing.take().is_some()
-                && let Some(active) = store.get(&settings.theme)
-            {
-                active.apply(ctx);
+            if self.editing.take().is_some() {
+                self.apply_active(ctx, store, settings);
             }
         }
         open
+    }
+
+    /// Tema automático: seguir el modo claro u oscuro del sistema y con qué
+    /// tema en cada caso.
+    fn follow_system(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        store: &ThemeStore,
+        settings: &mut Settings,
+    ) {
+        let mut changed = ui
+            .checkbox(
+                &mut settings.theme_auto,
+                "Seguir al sistema (claro u oscuro)",
+            )
+            .on_hover_text(
+                "Usa un tema u otro según el sistema operativo esté en modo claro o en \
+                 modo oscuro, y cambia con él",
+            )
+            .changed();
+        if settings.theme_auto {
+            ui.weak(match self.system_dark {
+                Some(true) => "El sistema está ahora en modo oscuro.",
+                Some(false) => "El sistema está ahora en modo claro.",
+                None => {
+                    "No se ha podido saber cómo está el sistema: se usa el tema \
+                     elegido en la lista."
+                }
+            });
+            let names = store.names();
+            egui::Grid::new("themes_by_mode")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    for (label, salt, slot) in [
+                        ("En claro:", "theme_for_light", &mut settings.theme_light),
+                        ("En oscuro:", "theme_for_dark", &mut settings.theme_dark),
+                    ] {
+                        ui.label(label);
+                        egui::ComboBox::from_id_salt(salt)
+                            .selected_text(slot.as_str())
+                            .width(200.0)
+                            .show_ui(ui, |ui| {
+                                for (name, _) in &names {
+                                    changed |= ui
+                                        .selectable_value(slot, name.clone(), name.as_str())
+                                        .changed();
+                                }
+                            });
+                        ui.end_row();
+                    }
+                });
+        }
+        if changed {
+            // Deja de verse lo que se estuviera editando sin guardar.
+            self.editing = None;
+            self.apply_active(ctx, store, settings);
+            self.save(settings);
+        }
     }
 
     fn list(
@@ -379,11 +465,13 @@ impl ThemesWindow {
         store: &mut ThemeStore,
         settings: &mut Settings,
     ) {
+        self.follow_system(ui, ctx, store, settings);
+        ui.add_space(6.0);
         ui.strong("Temas disponibles");
         let mut activate = None;
         egui::ScrollArea::vertical()
             .id_salt("theme_list")
-            .max_height(230.0)
+            .max_height(if settings.theme_auto { 170.0 } else { 230.0 })
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 for (name, builtin) in store.names() {
@@ -727,6 +815,9 @@ impl ThemesWindow {
             match store.save_user(theme.clone(), original.as_deref()) {
                 Ok(()) => {
                     let name = theme.name.trim().to_string();
+                    if let Some(old) = original.as_deref() {
+                        settings.rename_theme(old, &name);
+                    }
                     self.editing = Some(Editing {
                         theme,
                         original: Some(name.clone()),
@@ -738,9 +829,7 @@ impl ThemesWindow {
             }
         } else if cancel {
             self.editing = None;
-            if let Some(active) = store.get(&settings.theme) {
-                active.apply(ctx);
-            }
+            self.apply_active(ctx, store, settings);
         }
     }
 }

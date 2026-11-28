@@ -259,6 +259,10 @@ pub struct App {
     keys_window: Option<KeysWindow>,
     themes: ThemeStore,
     settings: Settings,
+    /// Modo claro u oscuro del sistema, para el tema automático.
+    system_theme: crate::system_theme::Watcher,
+    /// Nombre del tema que está aplicado (`None`: hay que volver a aplicarlo).
+    applied_theme: Option<String>,
     themes_window: Option<ThemesWindow>,
     server_bar_window: Option<ServerBarWindow>,
     settings_window: Option<SettingsWindow>,
@@ -401,10 +405,19 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Runtime) -> Self {
         let themes = ThemeStore::load(&crate::paths::themes_dir());
         let mut settings = Settings::load(&crate::paths::settings_file());
-        if !themes.exists(&settings.theme) {
-            settings.theme = crate::theme::BASE_NAME.into();
-        }
-        if let Some(theme) = themes.get(&settings.theme) {
+        settings.fix_themes(|name| themes.exists(name));
+        let ctx = cc.egui_ctx.clone();
+        let waker: Waker = Arc::new(move || ctx.request_repaint());
+        // Se pregunta ya al sistema si está en claro u oscuro, para no
+        // arrancar con un tema y cambiar al momento.
+        let system_theme = crate::system_theme::Watcher::start(waker.clone());
+        let system_dark = if settings.theme_auto {
+            system_theme.dark()
+        } else {
+            None
+        };
+        let applied_theme = settings.active_theme(system_dark).to_string();
+        if let Some(theme) = themes.get(&applied_theme) {
             theme.apply(&cc.egui_ctx);
         }
         crate::highlight::set(&settings.highlight);
@@ -413,8 +426,6 @@ impl App {
         // los sistemas (medio segundo) no se pierde si uno tarda en pintarse.
         cc.egui_ctx
             .options_mut(|o| o.input_options.max_double_click_delay = 0.5);
-        let ctx = cc.egui_ctx.clone();
-        let waker: Waker = Arc::new(move || ctx.request_repaint());
         let xhost = crate::xhost::XHost::new(rt.handle().clone(), waker.clone());
         xhost.configure(settings.x_server.embedded, settings.x_server.listen_local);
         crate::xhost::install(xhost.clone());
@@ -475,6 +486,8 @@ impl App {
             keys_window: None,
             themes,
             settings,
+            system_theme,
+            applied_theme: Some(applied_theme),
             themes_window: None,
             server_bar_window: None,
             settings_window: None,
@@ -1247,12 +1260,10 @@ impl App {
         }
         self.themes = ThemeStore::load(&crate::paths::themes_dir());
         self.settings = Settings::load(&crate::paths::settings_file());
-        if !self.themes.exists(&self.settings.theme) {
-            self.settings.theme = crate::theme::BASE_NAME.into();
-        }
-        if let Some(theme) = self.themes.get(&self.settings.theme) {
-            theme.apply(ctx);
-        }
+        self.settings.fix_themes(|name| self.themes.exists(name));
+        // Puede ser otro tema, o el mismo nombre con otros colores.
+        self.applied_theme = None;
+        self.sync_theme(ctx);
         crate::highlight::set(&self.settings.highlight);
         crate::terminal::set_paste_guard(self.settings.confirm_paste);
         self.xhost.configure(
@@ -1482,7 +1493,7 @@ impl App {
                 .on_hover_text("Cambiar o personalizar el aspecto")
                 .clicked()
             {
-                self.themes_window = Some(ThemesWindow::new(&self.settings.theme));
+                self.open_themes_window();
             }
             if ui
                 .button("⚙ Ajustes")
@@ -2345,7 +2356,7 @@ impl App {
                 self.tunnels_window = Some(TunnelsWindow::new(&self.tunnel_store));
             }
             Command::Themes => {
-                self.themes_window = Some(ThemesWindow::new(&self.settings.theme));
+                self.open_themes_window();
             }
             Command::Settings => self.settings_window = Some(SettingsWindow::default()),
             Command::Transfer => self.transfer_window = Some(TransferWindow::default()),
@@ -2396,6 +2407,45 @@ impl App {
                     self.active = index;
                 }
             }
+        }
+    }
+
+    /// Modo del sistema (`Some(true)`: oscuro) si el tema lo sigue y se ha
+    /// podido averiguar. (No se usa lo que diga la librería de ventanas: como
+    /// la ventana lleva el modo del tema, podría devolvernos el nuestro.)
+    fn system_dark(&self) -> Option<bool> {
+        if self.settings.theme_auto {
+            self.system_theme.dark()
+        } else {
+            None
+        }
+    }
+
+    /// Nombre del tema que toca ahora.
+    fn active_theme(&self) -> &str {
+        self.settings.active_theme(self.system_dark())
+    }
+
+    fn open_themes_window(&mut self) {
+        self.themes_window = Some(ThemesWindow::new(self.active_theme()));
+    }
+
+    /// Aplica el tema que toca si no es el que está puesto. Se llama en
+    /// cada fotograma: con el tema automático, además, vuelve a preguntar
+    /// al sistema de vez en cuando.
+    fn sync_theme(&mut self, ctx: &egui::Context) {
+        if self.settings.theme_auto {
+            self.system_theme.refresh();
+            // Aunque no pase nada en la ventana, se mira cada cierto tiempo.
+            ctx.request_repaint_after(crate::system_theme::IDLE_INTERVAL);
+        }
+        let wanted = self.active_theme();
+        if self.applied_theme.as_deref() != Some(wanted) {
+            let wanted = wanted.to_string();
+            if let Some(theme) = self.themes.get(&wanted) {
+                theme.apply(ctx);
+            }
+            self.applied_theme = Some(wanted);
         }
     }
 
@@ -4129,6 +4179,7 @@ impl eframe::App for App {
         self.dispatch_shortcuts(ui.ctx());
         // Antes de abrir ninguna conexión en este fotograma.
         self.sync_proxy();
+        self.sync_theme(ui.ctx());
 
         // --- Eventos de fondo ---------------------------------------------
         while let Ok(req) = self.prompt_rx.try_recv() {
@@ -4324,11 +4375,18 @@ impl eframe::App for App {
             self.keys_window = None;
             self.focus_active_terminal();
         }
-        if let Some(win) = &mut self.themes_window
-            && !win.show(&ctx, &mut self.themes, &mut self.settings)
-        {
-            self.themes_window = None;
-            self.focus_active_terminal();
+        if self.themes_window.is_some() {
+            let system_dark = self.system_dark();
+            if let Some(win) = &mut self.themes_window
+                && !win.show(&ctx, &mut self.themes, &mut self.settings, system_dark)
+            {
+                self.themes_window = None;
+                self.focus_active_terminal();
+            }
+            // La ventana aplica por su cuenta lo que se elige o se edita en
+            // ella: aquí solo se anota cuál toca, para no pisarle la vista
+            // previa de lo que está sin guardar.
+            self.applied_theme = Some(self.settings.active_theme(system_dark).to_string());
         }
         if let Some(win) = &mut self.settings_window {
             let proxy_vault = ProxyVault {

@@ -426,6 +426,9 @@ impl Default for Shape {
 
 pub const BASE_NAME: &str = "GodRemote Oscuro";
 
+/// El tema claro que viene con la aplicación.
+pub const LIGHT_NAME: &str = "GodRemote Claro";
+
 impl Theme {
     /// Tema base (oscuro). Es el que se exporta como punto de partida.
     pub fn base() -> Self {
@@ -486,7 +489,7 @@ impl Theme {
     fn light() -> Self {
         let h = Rgb::hex;
         Theme {
-            name: "GodRemote Claro".into(),
+            name: LIGHT_NAME.into(),
             dark: false,
             ui: UiColors {
                 background: h(0xf3f3f3),
@@ -1170,8 +1173,19 @@ pub fn default_export_dir() -> PathBuf {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// Tema elegido a mano. Es el que vale sin el modo automático, o cuando
+    /// no se puede saber cómo está el sistema.
     #[serde(rename = "tema")]
     pub theme: String,
+    /// Elegir el tema solo, según el sistema esté en modo claro u oscuro.
+    #[serde(rename = "tema_automatico")]
+    pub theme_auto: bool,
+    /// Tema del modo automático con el sistema en claro.
+    #[serde(rename = "tema_claro")]
+    pub theme_light: String,
+    /// Tema del modo automático con el sistema en oscuro.
+    #[serde(rename = "tema_oscuro")]
+    pub theme_dark: String,
     /// Servidor X para las aplicaciones gráficas reenviadas.
     #[serde(rename = "servidor_x")]
     pub x_server: XServerSettings,
@@ -1255,6 +1269,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: BASE_NAME.into(),
+            theme_auto: true,
+            theme_light: LIGHT_NAME.into(),
+            theme_dark: BASE_NAME.into(),
             server_bar: ServerBar::default(),
             rdp_embedded: true,
             log: Default::default(),
@@ -1277,9 +1294,9 @@ impl Default for Settings {
 
 impl Settings {
     pub fn load(path: &Path) -> Self {
-        let mut settings: Settings = std::fs::read(path)
+        let mut settings = std::fs::read(path)
             .ok()
-            .and_then(|data| serde_json::from_slice(&data).ok())
+            .and_then(|data| Self::from_json(&data))
             .unwrap_or_default();
         settings.server_bar.sanitize();
         settings.highlight.sanitize();
@@ -1291,6 +1308,63 @@ impl Settings {
     pub fn save(&self, path: &Path) -> Result<()> {
         crate::paths::write_private(path, &serde_json::to_vec_pretty(self)?)?;
         Ok(())
+    }
+
+    fn from_json(data: &[u8]) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_slice(data).ok()?;
+        let asked_before = value.get("tema_automatico").is_some();
+        let mut settings: Settings = serde_json::from_value(value).ok()?;
+        // Preferencias de antes de que existiera el modo automático: quien
+        // había elegido un tema lo conserva; quien seguía con el de fábrica
+        // pasa a seguir al sistema, que es el comportamiento de fábrica ahora.
+        if !asked_before {
+            settings.theme_auto = settings.theme == BASE_NAME;
+        }
+        Some(settings)
+    }
+
+    /// Nombre del tema que toca ahora. `system_dark` es el modo del sistema
+    /// (`Some(true)` oscuro, `Some(false)` claro), si se ha podido saber.
+    pub fn active_theme(&self, system_dark: Option<bool>) -> &str {
+        match system_dark {
+            Some(true) if self.theme_auto => &self.theme_dark,
+            Some(false) if self.theme_auto => &self.theme_light,
+            _ => &self.theme,
+        }
+    }
+
+    /// Recuerda `name` como el tema elegido: en automático, para el modo en
+    /// que está ahora el sistema; si no, como tema fijo.
+    pub fn choose_theme(&mut self, name: &str, system_dark: Option<bool>) {
+        let slot = match system_dark {
+            Some(true) if self.theme_auto => &mut self.theme_dark,
+            Some(false) if self.theme_auto => &mut self.theme_light,
+            _ => &mut self.theme,
+        };
+        *slot = name.to_string();
+    }
+
+    /// Un tema ha cambiado de nombre: se le sigue la pista.
+    pub fn rename_theme(&mut self, old: &str, new: &str) {
+        for slot in [&mut self.theme, &mut self.theme_light, &mut self.theme_dark] {
+            if slot == old {
+                *slot = new.to_string();
+            }
+        }
+    }
+
+    /// Donde se nombre un tema que ya no existe vuelve el de fábrica.
+    pub fn fix_themes(&mut self, exists: impl Fn(&str) -> bool) {
+        let defaults = [
+            (&mut self.theme, BASE_NAME),
+            (&mut self.theme_light, LIGHT_NAME),
+            (&mut self.theme_dark, BASE_NAME),
+        ];
+        for (slot, default) in defaults {
+            if !exists(slot) {
+                *slot = default.to_string();
+            }
+        }
     }
 }
 
@@ -1478,6 +1552,9 @@ mod tests {
         assert_eq!(Settings::load(&path).theme, BASE_NAME);
         let s = Settings {
             theme: "Nord".into(),
+            theme_auto: false,
+            theme_light: "Solarized Oscuro".into(),
+            theme_dark: "Dracula".into(),
             server_bar: ServerBar {
                 interval: 30,
                 disks: vec!["/".into(), "/home".into()],
@@ -1521,5 +1598,104 @@ mod tests {
         };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);
+    }
+
+    #[test]
+    fn theme_follows_the_system_when_asked_to() {
+        let mut s = Settings::default();
+        // De fábrica: automático, con los dos temas de la casa.
+        assert!(s.theme_auto);
+        assert_eq!(s.active_theme(Some(true)), BASE_NAME);
+        assert_eq!(s.active_theme(Some(false)), LIGHT_NAME);
+        // Si no se sabe cómo está el sistema, el elegido a mano.
+        assert_eq!(s.active_theme(None), BASE_NAME);
+        let builtins = Theme::builtins();
+        let find = |name: &str| builtins.iter().find(|t| t.name == name).unwrap();
+        assert!(find(BASE_NAME).dark && !find(LIGHT_NAME).dark);
+
+        // Elegir un tema lo guarda para el modo en que está el sistema.
+        s.choose_theme("Nord", Some(true));
+        assert_eq!(
+            (
+                s.theme_dark.as_str(),
+                s.theme_light.as_str(),
+                s.theme.as_str()
+            ),
+            ("Nord", LIGHT_NAME, BASE_NAME)
+        );
+        s.choose_theme("Papel", Some(false));
+        assert_eq!(s.active_theme(Some(false)), "Papel");
+        assert_eq!(s.active_theme(Some(true)), "Nord");
+        s.choose_theme("Dracula", None);
+        assert_eq!(s.active_theme(None), "Dracula");
+
+        // Sin el modo automático manda siempre el elegido a mano.
+        s.theme_auto = false;
+        for system in [Some(true), Some(false), None] {
+            assert_eq!(s.active_theme(system), "Dracula");
+        }
+        s.choose_theme("Nord", Some(false));
+        assert_eq!(
+            (s.theme.as_str(), s.theme_light.as_str()),
+            ("Nord", "Papel")
+        );
+
+        // Los cambios de nombre se siguen y lo que desaparece se repone.
+        s.rename_theme("Nord", "Norte");
+        assert_eq!(
+            (s.theme.as_str(), s.theme_dark.as_str()),
+            ("Norte", "Norte")
+        );
+        s.fix_themes(|name| name == "Norte");
+        assert_eq!(
+            (
+                s.theme.as_str(),
+                s.theme_light.as_str(),
+                s.theme_dark.as_str()
+            ),
+            ("Norte", LIGHT_NAME, "Norte")
+        );
+        s.fix_themes(|_| false);
+        assert_eq!(
+            (
+                s.theme.as_str(),
+                s.theme_light.as_str(),
+                s.theme_dark.as_str()
+            ),
+            (BASE_NAME, LIGHT_NAME, BASE_NAME)
+        );
+    }
+
+    #[test]
+    fn settings_from_before_keep_a_chosen_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // Quien eligió un tema antes de que existiera el modo automático lo
+        // conserva…
+        std::fs::write(&path, r#"{"tema": "Dracula", "reconectar": false}"#).unwrap();
+        let chosen = Settings::load(&path);
+        assert!(!chosen.theme_auto && !chosen.reconnect);
+        assert_eq!(chosen.active_theme(Some(false)), "Dracula");
+        // …y quien seguía con el de fábrica pasa a seguir al sistema.
+        for old in [r#"{"tema": "GodRemote Oscuro"}"#, "{}"] {
+            std::fs::write(&path, old).unwrap();
+            let factory = Settings::load(&path);
+            assert!(factory.theme_auto, "{old}");
+            assert_eq!(factory.active_theme(Some(false)), LIGHT_NAME);
+        }
+        // Lo que ya se guardó con la opción se respeta tal cual.
+        for (saved, auto) in [
+            (r#"{"tema": "Dracula", "tema_automatico": true}"#, true),
+            (
+                r#"{"tema": "GodRemote Oscuro", "tema_automatico": false}"#,
+                false,
+            ),
+        ] {
+            std::fs::write(&path, saved).unwrap();
+            assert_eq!(Settings::load(&path).theme_auto, auto, "{saved}");
+        }
+        // Un fichero ilegible no impide arrancar.
+        std::fs::write(&path, "{").unwrap();
+        assert_eq!(Settings::load(&path), Settings::default());
     }
 }

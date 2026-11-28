@@ -23,6 +23,7 @@ pub mod session_log;
 pub mod sftp;
 pub mod shells;
 pub mod ssh;
+pub mod system_theme;
 pub mod telnet;
 pub mod terminal;
 pub mod theme;
@@ -59,10 +60,15 @@ mod tests {
 
     /// Dependencias de un manifiesto: nombre → especificación.
     fn dependencies(manifest: &str) -> BTreeMap<String, String> {
+        section(manifest, "[dependencies]")
+    }
+
+    /// Las dependencias de una sección del manifiesto, con su especificación.
+    fn section(manifest: &str, header: &str) -> BTreeMap<String, String> {
         let section = manifest
-            .split("[dependencies]")
+            .split(header)
             .nth(1)
-            .expect("sección [dependencies]");
+            .unwrap_or_else(|| panic!("sección {header}"));
         section
             .lines()
             .take_while(|l| !l.starts_with('['))
@@ -96,6 +102,15 @@ mod tests {
             expected,
             "reforzado/Cargo.toml no coincide con Cargo.toml"
         );
+
+        // También las que solo se usan en Windows.
+        let windows = "[target.'cfg(windows)'.dependencies]";
+        assert_eq!(
+            section(&hardened, windows),
+            section(&full, windows),
+            "las dependencias de Windows no coinciden"
+        );
+        assert!(!section(&full, windows).is_empty());
 
         // Y su Cargo.lock no arrastra nada del RDP integrado.
         let lock = std::fs::read_to_string(root.join("reforzado/Cargo.lock")).unwrap();

@@ -23,6 +23,7 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 ![Snippets con atajos de teclado](docs/snippets.png)
 ![Escritorio remoto integrado](docs/escritorio.png)
 ![Temas](docs/temas.png)
+![Tema según el sistema](docs/tema-automatico.png)
 ![Ajustes](docs/ajustes.png)
 
 ## Qué hace
@@ -51,7 +52,7 @@ herramientas, temas personalizables y un baúl cifrado para las credenciales.
 | **Snippets** | Textos y órdenes con nombre que se envían al terminal desde el menú o con un atajo de teclado propio (`Ctrl+Alt+D`, `F6`…). Se escriben a mano o se graban tecleando, y admiten variables (`{{host}}`, `{{?Pregunta}}`). |
 | **Difusión** | Lo que escribes en un terminal se envía a la vez a todos los terminales abiertos o solo a los que elijas. |
 | **Barra de información** | Bajo cada terminal SSH: nombre del servidor, sistema, tiempo encendido, CPU, memoria, disco, red… Se elige qué se muestra, en qué orden y cada cuánto se actualiza. |
-| **Temas** | Cinco temas integrados y editor en vivo de colores, tipos y tamaños de letra, interlineados, separaciones y bordes. Importar y exportar en JSON. |
+| **Temas** | Claro u oscuro según el sistema operativo, y cambia con él. Cinco temas integrados y editor en vivo de colores, tipos y tamaños de letra, interlineados, separaciones y bordes. Importar y exportar en JSON. |
 | **Fondo del terminal** | Un texto, un dibujo ASCII o una imagen detrás del texto, con la opacidad que se quiera. Por tema o por equipo. |
 | **Claves** | Lista las claves de `~/.ssh` y las propias, genera pares Ed25519 / ECDSA (con passphrase opcional), importa claves y copia la pública. |
 | **Credenciales** | Baúl cifrado con contraseña maestra (Argon2id + XChaCha20-Poly1305). Las contraseñas solo se guardan tras una autenticación correcta. Se bloquea solo tras un rato sin actividad y tiene un visor para revisar y borrar lo guardado. |
@@ -357,9 +358,17 @@ fondo».
 
 ### Temas
 
-**🎨 Temas** abre el gestor:
+De fábrica GodRemote **sigue al sistema operativo**: usa el tema «GodRemote
+Claro» si el sistema está en modo claro y «GodRemote Oscuro» si está en modo
+oscuro, y cambia solo cuando cambia el sistema (a los pocos segundos; hasta
+unos veinte si la ventana está en reposo). **🎨 Temas** abre el gestor:
 
-- Elige un tema de la lista y se aplica al instante.
+- **Seguir al sistema (claro u oscuro)** activa o desactiva ese modo. Con él
+  activado se elige qué tema va con cada modo —cualquiera de la lista, también
+  los tuyos— y se ve en cuál está el sistema.
+- Elige un tema de la lista y se aplica al instante. Siguiendo al sistema,
+  queda como el tema del modo en que está en ese momento; sin seguirlo, es el
+  tema fijo.
 - **Duplicar y editar** abre el editor, con todo agrupado por secciones. Los
   cambios se ven en vivo:
   - **Colores** de la interfaz y del terminal, incluidos los 16 ANSI.
@@ -374,6 +383,14 @@ fondo».
 - **Descargar tema base** guarda un JSON legible para modificarlo con
   cualquier editor de texto; **Importar un tema** lo carga (también se puede
   soltar el fichero sobre la ventana).
+
+El modo del sistema se lee del registro en Windows («modo de aplicación» de
+*Personalización → Colores*), de las preferencias en macOS y, en Linux, del
+portal de escritorio (`org.freedesktop.appearance`), o en su defecto de la
+configuración de GNOME/GTK o de KDE. Si no se puede averiguar —un gestor de
+ventanas sin escritorio, por ejemplo— se usa el tema fijo. Quien ya había
+elegido un tema en una versión anterior lo conserva: el modo automático solo
+se activa solo si seguía con el de fábrica.
 
 Un tema es un JSON como este; los campos que falten se toman del tema base
 (el fichero que da «Descargar tema base» los trae todos):
@@ -737,6 +754,12 @@ recuperar; el resto de la configuración sigue intacta.
 - Saltos: como máximo ocho encadenados; cada salto se autentica con su
   propia sesión (no hay reenvío del agente SSH entre saltos).
 - Sin Mosh ni FTP.
+- **Tema según el sistema**: comprobado a mano solo en Linux, con el portal
+  de escritorio de GTK/GNOME; en Windows y macOS la lectura del modo está
+  hecha y compila, pero no se ha visto funcionar. En Linux se pregunta con
+  las herramientas del propio escritorio (`gdbus`, `dbus-send` o `busctl`, y
+  `gsettings`): sin ninguna de ellas, o sin sesión de escritorio, no se
+  detecta y queda el tema fijo. Con KDE Plasma no se ha probado.
 - A mano solo se ha usado en Linux (X11). En Windows y macOS se compila y
   pasa sus pruebas automáticas en cada cambio (entre ellas la del terminal
   local), pero la interfaz no se ha manejado allí: quedan sin comprobar a

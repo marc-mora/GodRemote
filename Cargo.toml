@@ -61,6 +61,10 @@ vt100 = "0.18"
 x509-cert = { version = "0.3", default-features = false, features = ["std", "hazmat"], optional = true }
 zeroize = "1"
 
+# Para leer del registro de Windows si el sistema está en modo oscuro.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
 [dev-dependencies]
 # Hash NT para el SAM del servidor RDP de pruebas.
 md4 = "0.11"
