@@ -440,9 +440,20 @@ async fn totp_second_factor() {
     assert_eq!(human.asked().len(), 1);
 
     // --- 5. Dos conexiones seguidas no repiten código ------------------------
-    // (Periodo de dos segundos para no alargar la prueba.)
-    let (session, totp) = start(Mode::Interactive, 2, None).await;
+    // (Periodo corto para no alargar la prueba; se empieza al principio de
+    // uno para que las dos conexiones caigan en el mismo.)
+    const PERIOD: u64 = 4;
+    let (session, totp) = start(Mode::Interactive, PERIOD, None).await;
     let human = Human::new(None, 0);
+    loop {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        if now.as_millis() % (u128::from(PERIOD) * 1000) < 300 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let (first, notes) = connect(&session, creds(true, Some(&totp)), &human).await;
     assert_eq!(first, Ok(vec![]), "{notes}");
     assert!(!notes.contains("esperando"), "{notes}");
