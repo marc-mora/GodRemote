@@ -214,31 +214,45 @@ pub fn run(
         .collect::<Vec<_>>();
     let partial = vec![vec![]; hosts.len()];
     let turns = Arc::new(Semaphore::new(parallel.max(1)));
-    for (index, job) in jobs.into_iter().enumerate() {
-        let emit = emit.clone();
-        let prompter = prompter.clone();
-        let turns = turns.clone();
-        let mut cancelled = cancel_rx.clone();
-        rt.spawn(async move {
-            let work = async {
-                let Ok(_turn) = turns.acquire().await else {
-                    return HostState::Cancelled;
-                };
-                match tokio::time::timeout(timeout, run_host(index, &job, &prompter, &emit)).await {
-                    Ok(Ok(code)) => HostState::Done(code),
-                    Ok(Err(e)) => HostState::Failed(format!("{e:#}")),
-                    Err(_) => {
-                        HostState::Failed(format!("no terminó en {} s", timeout.as_secs().max(1)))
+    let dispatcher = rt.clone();
+    rt.spawn(async move {
+        let mut cancelled_all = cancel_rx.clone();
+        // Los equipos entran por orden de lista: cada uno espera su turno
+        // aquí, y no en su propia tarea, donde el orden sería cosa del azar.
+        for (index, job) in jobs.into_iter().enumerate() {
+            let turn = tokio::select! {
+                turn = turns.clone().acquire_owned() => turn.ok(),
+                _ = cancelled_all.wait_for(|stop| *stop) => None,
+            };
+            let Some(turn) = turn else {
+                emit(Event::State(index, HostState::Cancelled));
+                continue;
+            };
+            let emit = emit.clone();
+            let prompter = prompter.clone();
+            let mut cancelled = cancel_rx.clone();
+            dispatcher.spawn(async move {
+                let _turn = turn;
+                let work = async {
+                    match tokio::time::timeout(timeout, run_host(index, &job, &prompter, &emit))
+                        .await
+                    {
+                        Ok(Ok(code)) => HostState::Done(code),
+                        Ok(Err(e)) => HostState::Failed(format!("{e:#}")),
+                        Err(_) => HostState::Failed(format!(
+                            "no terminó en {} s",
+                            timeout.as_secs().max(1)
+                        )),
                     }
-                }
-            };
-            let state = tokio::select! {
-                state = work => state,
-                _ = cancelled.wait_for(|stop| *stop) => HostState::Cancelled,
-            };
-            emit(Event::State(index, state));
-        });
-    }
+                };
+                let state = tokio::select! {
+                    state = work => state,
+                    _ = cancelled.wait_for(|stop| *stop) => HostState::Cancelled,
+                };
+                emit(Event::State(index, state));
+            });
+        }
+    });
     FleetRun {
         events: event_rx,
         cancel: cancel_tx,

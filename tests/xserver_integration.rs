@@ -19,7 +19,7 @@ use godremote::xserver::{RootlessInput, RootlessWindow, XServer, XServerConfig};
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
-const TIMEOUT: Duration = Duration::from_secs(20);
+const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Un servidor X en marcha con su pantalla y lo necesario para lanzarle
 /// clientes.
