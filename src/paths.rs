@@ -40,6 +40,11 @@ pub fn state_file() -> PathBuf {
     data_dir().join("state.json")
 }
 
+/// Última consulta de versiones publicadas (para el aviso de versión nueva).
+pub fn update_file() -> PathBuf {
+    data_dir().join("version.json")
+}
+
 /// Copias locales de los ficheros remotos que se están editando.
 pub fn edit_dir() -> PathBuf {
     data_dir().join("edit")

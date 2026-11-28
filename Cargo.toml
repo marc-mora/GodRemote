@@ -59,6 +59,9 @@ sha2 = "0.11.2"
 skrifa = "0.44"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "fs", "net", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"], optional = true }
+# Autoridades de certificación para la única conexión HTTPS que hace la
+# aplicación por su cuenta: el aviso de versión nueva.
+webpki-roots = { version = "1", optional = true }
 uuid = { version = "1", features = ["v4", "serde"] }
 vt100 = "0.18"
 x509-cert = { version = "0.3", default-features = false, features = ["std", "hazmat"], optional = true }
@@ -82,7 +85,10 @@ md4 = "0.11"
 tempfile = "3"
 
 [features]
-default = ["rdp-integrado"]
+default = ["rdp-integrado", "aviso-versiones"]
+# Aviso de versión nueva: una consulta HTTPS a github.com al arrancar, como
+# mucho una vez al día y desactivable. La edición «SSH reforzada» no lo lleva.
+aviso-versiones = ["dep:tokio-rustls", "dep:webpki-roots"]
 # Cliente RDP integrado en una pestaña. Sin él, RDP se abre siempre con el
 # cliente externo del sistema.
 rdp-integrado = [

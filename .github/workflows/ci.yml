@@ -75,6 +75,11 @@ jobs:
         run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test --locked
       - name: Pruebas, edición SSH reforzada
         run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test --locked --manifest-path reforzado/Cargo.toml
+      # La consulta real del aviso de versiones. Depende de la red, así que
+      # su fallo no tumba la ejecución (pero queda a la vista).
+      - name: Aviso de versión nueva contra github.com
+        continue-on-error: true
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test --locked --lib live_query -- --ignored --nocapture
       - name: Devolver los ficheros a su dueño
         if: always()
         run: sudo chown -R "$(id -u):$(id -g)" . "$HOME/.cargo" || true

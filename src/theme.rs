@@ -1238,6 +1238,10 @@ pub struct Settings {
     /// conectadas.
     #[serde(rename = "confirmar_cierre")]
     pub confirm_close: bool,
+    /// Avisar cuando haya una versión nueva publicada (una consulta a
+    /// github.com al arrancar, como mucho una al día).
+    #[serde(rename = "avisar_versiones")]
+    pub check_updates: bool,
     /// Panel de estado: refresco, tope de conexiones y umbrales de alerta.
     #[serde(rename = "panel_estado")]
     pub dashboard: crate::dashboard::DashboardSettings,
@@ -1307,6 +1311,7 @@ impl Default for Settings {
             app_shortcuts: true,
             confirm_paste: true,
             confirm_close: true,
+            check_updates: true,
             dashboard: Default::default(),
             agent: Default::default(),
             triggers: Default::default(),
@@ -1609,6 +1614,7 @@ mod tests {
             app_shortcuts: false,
             confirm_paste: false,
             confirm_close: false,
+            check_updates: false,
             dashboard: crate::dashboard::DashboardSettings {
                 interval: 30,
                 max_connections: 8,

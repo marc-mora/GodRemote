@@ -38,6 +38,7 @@ pub mod trust;
 pub mod tunnel_manager;
 pub mod tunnels;
 pub mod ui;
+pub mod update_check;
 pub mod vault;
 pub mod vnc;
 pub mod x11;

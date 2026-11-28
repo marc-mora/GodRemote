@@ -79,9 +79,10 @@ tempfile = "3"
 # Solo para pruebas: permite EFRAME_SCREENSHOT_TO=archivo.png
 screenshot = ["eframe/__screenshot"]
 
-# El código pregunta por `rdp-integrado`, que esta edición no tiene.
+# El código pregunta por `rdp-integrado` y `aviso-versiones`, que esta
+# edición no tiene.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("rdp-integrado"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("rdp-integrado", "aviso-versiones"))'] }
 
 [[test]]
 name = "auth_methods"

@@ -125,6 +125,17 @@ impl SettingsWindow {
                             "También al salir de GodRemote con sesiones conectadas o túneles \
                              en marcha",
                         );
+                        if crate::update_check::AVAILABLE {
+                            ui.checkbox(
+                                &mut settings.check_updates,
+                                "Avisar cuando haya una versión nueva",
+                            )
+                            .on_hover_text(
+                                "Al arrancar, y como mucho una vez al día, pregunta a github.com \
+                                 cuál es la última versión publicada. No envía ningún dato: solo \
+                                 la petición, por el proxy de salida si lo hay",
+                            );
+                        }
                         ui.horizontal(|ui| {
                             let mut auto = settings.vault_autolock > 0;
                             if ui

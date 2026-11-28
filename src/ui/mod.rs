@@ -277,6 +277,8 @@ pub struct App {
     applied_theme: Option<String>,
     /// Prueba de arranque (captura y cierre), si se ha pedido.
     probe: Option<probe::StartupProbe>,
+    /// Aviso de versión nueva.
+    updates: crate::update_check::UpdateCheck,
     themes_window: Option<ThemesWindow>,
     server_bar_window: Option<ServerBarWindow>,
     settings_window: Option<SettingsWindow>,
@@ -446,6 +448,12 @@ impl App {
         // los sistemas (medio segundo) no se pierde si uno tarda en pintarse.
         cc.egui_ctx
             .options_mut(|o| o.input_options.max_double_click_delay = 0.5);
+        // Con la prueba de arranque no se consulta nada fuera.
+        let updates = crate::update_check::UpdateCheck::start(
+            rt.handle(),
+            settings.check_updates && std::env::var_os(probe::ENV).is_none(),
+            waker.clone(),
+        );
         let xhost = crate::xhost::XHost::new(rt.handle().clone(), waker.clone());
         xhost.configure(settings.x_server.embedded, settings.x_server.listen_local);
         crate::xhost::install(xhost.clone());
@@ -510,6 +518,7 @@ impl App {
             system_theme,
             applied_theme: Some(applied_theme),
             probe: probe::StartupProbe::from_env(),
+            updates,
             themes_window: None,
             server_bar_window: None,
             settings_window: None,
@@ -1746,6 +1755,16 @@ impl App {
                 ),
                 None => ui.colored_label(warn_color(), "🔒 Baúl bloqueado"),
             };
+            if self.settings.check_updates
+                && let Some(version) = self.updates.newer()
+                && ui
+                    .link(format!("⬆ Versión {version} disponible"))
+                    .on_hover_text("Abre la página de descargas en el navegador")
+                    .clicked()
+            {
+                // (Si el navegador no se abre, la dirección sigue a la vista.)
+                let _ = crate::paths::open_url(crate::update_check::RELEASES_URL);
+            }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 if let Some((msg, is_error, _)) = &self.toast {
                     let color = if *is_error {
