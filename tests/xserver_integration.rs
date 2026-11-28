@@ -1853,8 +1853,9 @@ fn gtk4_dialogs_draw_and_take_keyboard_and_mouse() {
         let (_, g) = fx.wait_window(&mut question, "Pregunta");
         wait_for("zenity pinta sus botones", || fx.colors_in(g) > 40);
         fx.snapshot("gtk4-pregunta");
-        // Los dos botones van abajo, a medias.
-        let button = (g.x + g.w * side / 4, g.y + g.h - 26);
+        // Los dos botones van abajo, a medias: pegados al borde en zenity
+        // 4.0 y con margen en 4.2. A esta altura se acierta en los dos.
+        let button = (g.x + g.w * side / 4, g.y + g.h - 34);
         // Al pasar por encima el botón se resalta: GTK ve moverse el ratón.
         let zone = Geometry {
             x: button.0 - 30,
