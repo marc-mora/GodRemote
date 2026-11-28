@@ -443,8 +443,9 @@ pasa (con sus saltos y su autenticación, heredada o propia), el tipo (`-L`,
 
 ### Barra de información del servidor
 
-Bajo cada terminal SSH hay una barra con el estado del servidor. **📊 Barra de
-estado** (o el engranaje de la propia barra) abre sus ajustes:
+Bajo cada terminal SSH hay una barra con el estado del servidor. El engranaje
+de la propia barra (o **⚙ Ajustes → Barra de información del servidor**) abre
+sus ajustes:
 
 - **Qué se muestra y en qué orden**: nombre de la sesión, nombre del servidor,
   usuario y dirección, direcciones IP, sistema operativo, kernel, tiempo
@@ -870,7 +871,8 @@ recuperar; el resto de la configuración sigue intacta.
 - El reenvío X11 da a las aplicaciones remotas acceso al servidor X (pueden
   leer el teclado y la pantalla de las demás aplicaciones X): actívalo solo
   con servidores de confianza. Con el servidor integrado ese acceso se queda
-  dentro de su pestaña: no alcanza al resto de tu escritorio.
+  entre las aplicaciones X de esa misma pestaña (también cuando salen en
+  ventanas sueltas): no alcanza al resto de tu escritorio.
 - **Reenvío del agente**: mientras dure la sesión, quien administre el
   equipo remoto puede usar tus claves a través del agente (no copiarlas).
   Actívalo solo en equipos de confianza. Los canales de agente que abra un
