@@ -1,6 +1,6 @@
 [package]
 name = "godremote"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 description = "Gestor de conexiones remotas (SSH, SFTP, RDP) con árbol de equipos y baúl de credenciales"
 license = "MIT"

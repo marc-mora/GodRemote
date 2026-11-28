@@ -886,7 +886,7 @@ impl App {
                                 egui::TextEdit::singleline(&mut window.password)
                                     .password(true)
                                     .hint_text(if sync.keys.is_some() {
-                                        tr("(puesta; escribe otra para cambiarla)")
+                                        tr("(puesta; otra la cambia)")
                                     } else {
                                         tr("contraseña de sincronización")
                                     })

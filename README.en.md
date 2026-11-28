@@ -795,6 +795,8 @@ first, in case you need to go back.
 
 ### Syncing the configuration between your computers
 
+![Configuration sync through a replicated folder](docs/sincronizacion.png)
+
 **⚙ Settings → Sync between my computers…** (also in the palette and, once
 it is active, by clicking the 🔄 indicator in the status bar). Choose a
 folder you already replicate between your computers (Dropbox, OneDrive,
@@ -1303,7 +1305,9 @@ recovered; the rest of the configuration remains intact.
   hand are, for example, shell detection, dragging files from the file
   browser, agent forwarding on Windows and everything about Pageant. Nor
   have the status dashboard, the triggers, session recording and replay, the
-  command history or the new X server features been seen working there.
+  command history, the new X server features, sync, shared folders or the
+  English interface been seen working there (their automated tests do pass
+  on all three systems).
 
 ## Tests
 

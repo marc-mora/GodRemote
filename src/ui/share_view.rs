@@ -1109,7 +1109,7 @@ impl App {
                                     ui.add(
                                         egui::TextEdit::singleline(&mut window.new_password)
                                             .password(true)
-                                            .hint_text(tr("la que darás a tus compañeros"))
+                                            .hint_text(tr("la de tus compañeros"))
                                             .desired_width(200.0),
                                     );
                                     ui.add(

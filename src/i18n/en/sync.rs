@@ -382,10 +382,7 @@ pub(super) const T: super::Table = &[
         "También se sincroniza al arrancar y a los pocos segundos de cambiar algo aquí o en la carpeta",
         "It also syncs at startup and a few seconds after something changes here or in the folder",
     ),
-    (
-        "(puesta; escribe otra para cambiarla)",
-        "(set; type to change it)",
-    ),
+    ("(puesta; otra la cambia)", "(set; type to change it)"),
     ("contraseña de sincronización", "sync password"),
     ("Escribe la contraseña dos veces", "Type the password twice"),
     (
@@ -696,10 +693,7 @@ pub(super) const T: super::Table = &[
         "in a folder your teammates can reach",
     ),
     ("Dónde publicar la carpeta", "Where to publish the folder"),
-    (
-        "la que darás a tus compañeros",
-        "the one for your teammates",
-    ),
+    ("la de tus compañeros", "the one for your teammates"),
     ("Publicar", "Publish"),
     (
         "Elige la carpeta y el fichero, y escribe la contraseña dos veces",

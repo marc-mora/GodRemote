@@ -792,6 +792,8 @@ configuración actual, por si hay que volver atrás.
 
 ### Sincronizar la configuración entre tus equipos
 
+![Sincronización de la configuración a través de una carpeta replicada](docs/sincronizacion.png)
+
 **⚙ Ajustes → Sincronización entre mis equipos…** (también en la paleta y,
 una vez activa, pulsando el indicador 🔄 de la barra de estado). Elige una
 carpeta que ya repliques entre tus equipos (Dropbox, OneDrive, Syncthing, una
@@ -1296,8 +1298,10 @@ recuperar; el resto de la configuración sigue intacta.
   mano, por ejemplo, la detección de shells, arrastrar ficheros desde el
   explorador, el reenvío del agente en Windows y todo lo de Pageant. Tampoco
   se han visto funcionar allí el panel de estado, los disparadores, la
-  grabación y reproducción de sesiones, el historial de órdenes ni lo nuevo
-  del servidor X.
+  grabación y reproducción de sesiones, el historial de órdenes, lo nuevo
+  del servidor X, la sincronización, las carpetas compartidas ni la
+  interfaz en inglés (sus pruebas automáticas sí pasan en los tres
+  sistemas).
 
 ## Pruebas
 
