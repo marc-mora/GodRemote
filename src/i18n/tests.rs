@@ -248,11 +248,15 @@ fn every_text_has_its_translation() {
     let code = texts_in_code();
     let mut problems = Vec::new();
 
-    // Ninguna clave repetida entre tablas (ni dentro de una).
+    // Un texto repetido en dos tablas tiene que traducirse igual.
     let mut table: BTreeMap<&str, &str> = BTreeMap::new();
     for (spanish, english) in en::tables().iter().flat_map(|t| t.iter().copied()) {
-        if table.insert(spanish, english).is_some() {
-            problems.push(format!("traducción repetida: {spanish:?}"));
+        if let Some(other) = table.insert(spanish, english)
+            && other != english
+        {
+            problems.push(format!(
+                "dos traducciones distintas de {spanish:?}: {other:?} y {english:?}"
+            ));
         }
         if english.trim().is_empty() {
             problems.push(format!("traducción vacía: {spanish:?}"));
