@@ -173,6 +173,16 @@ fn agent_forwarding_and_outbound_proxy() {
         .expect("huella en ssh-add -l")
         .to_string();
 
+    // El gestor de claves ve lo mismo que `ssh-add -l`.
+    let listing = godremote::agent::list_blocking().expect("claves del agente");
+    assert_eq!(listing.kind, godremote::agent::AgentKind::OpenSsh);
+    assert_eq!(listing.keys.len(), 1, "{listing:?}");
+    assert_eq!(listing.keys[0].fingerprint, fingerprint);
+    assert_eq!(listing.keys[0].fingerprint, agent_key.fingerprint);
+    assert_eq!(listing.keys[0].algorithm, "ssh-ed25519");
+    assert_eq!(listing.keys[0].public_openssh, agent_key.public_openssh);
+    assert!(listing.keys[0].certificate.is_none());
+
     // --- Servidor al que se entra con OTRA clave (un fichero) ---------------
     let key = keys::generate(dir.path(), "id", KeyAlgorithm::Ed25519, "", None).unwrap();
     let authorized = dir.path().join("authorized_keys");

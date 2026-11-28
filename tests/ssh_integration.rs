@@ -188,8 +188,8 @@ fn ssh_shell_and_sftp_end_to_end() {
     // 3. Shell: host ya conocido (sin pregunta) y passphrase del baúl.
     let a = answers(false, &[]);
     let creds = Credentials {
-        password: None,
         passphrase: Some("frase secreta".into()),
+        ..Default::default()
     };
     let backend = ssh::spawn_shell(
         rt.handle(),

@@ -28,6 +28,7 @@ pub mod system_theme;
 pub mod telnet;
 pub mod terminal;
 pub mod theme;
+pub mod totp;
 pub mod trust;
 pub mod tunnel_manager;
 pub mod tunnels;

@@ -130,7 +130,7 @@ async fn password_and_keyboard_interactive() {
     let a = answers(false, &[]);
     let creds = Credentials {
         password: Some(PASSWORD.into()),
-        passphrase: None,
+        ..Default::default()
     };
     let ok = ssh::connect(&s, creds, &prompter(a.clone()), &quiet)
         .await
@@ -142,7 +142,7 @@ async fn password_and_keyboard_interactive() {
     let a = answers(false, &[PASSWORD]);
     let creds = Credentials {
         password: Some("antigua".into()),
-        passphrase: None,
+        ..Default::default()
     };
     let ok = ssh::connect(&s, creds, &prompter(a.clone()), &quiet)
         .await
@@ -176,7 +176,7 @@ async fn password_and_keyboard_interactive() {
     let a = answers(true, &[OTP]);
     let creds = Credentials {
         password: Some(PASSWORD.into()),
-        passphrase: None,
+        ..Default::default()
     };
     ssh::connect(&s, creds, &prompter(a.clone()), &quiet)
         .await

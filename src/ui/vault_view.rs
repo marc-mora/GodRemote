@@ -39,6 +39,7 @@ fn describe(key: &str, tree: &Tree, paths: &[(Uuid, String)]) -> Entry {
     let kind = match what {
         "password" => "Contraseña",
         "passphrase" => "Passphrase de la clave",
+        "totp" => "Secreto TOTP",
         _ => "Secreto",
     };
     let (owner, orphan) = match Uuid::parse_str(owner_id).ok() {

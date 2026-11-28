@@ -261,6 +261,14 @@ pub struct Session {
     pub auth: AuthMethod,
     /// Ruta a la clave privada (si `auth == Key`).
     pub key_path: String,
+    /// Certificado OpenSSH de la clave. Vacío: el que haya junto a ella
+    /// (`<clave>-cert.pub`), como hace OpenSSH.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cert_path: String,
+    /// Contestar solo, con el secreto TOTP del baúl, cuando el servidor pida
+    /// un código de verificación.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub totp_autofill: bool,
     /// Saltos (bastiones SSH) por los que pasar para llegar a este equipo,
     /// en orden: el primero es el más cercano a nosotros.
     pub jumps: Vec<Uuid>,
@@ -317,6 +325,8 @@ impl Default for Session {
             username: String::new(),
             auth: AuthMethod::Password,
             key_path: String::new(),
+            cert_path: String::new(),
+            totp_autofill: false,
             jumps: vec![],
             legacy_jump: None,
             inherit_auth: false,
@@ -361,6 +371,12 @@ impl Session {
     /// Clave del baúl para la passphrase de la clave privada.
     pub fn passphrase_key(&self) -> String {
         format!("{}/passphrase", self.secret_owner.unwrap_or(self.id))
+    }
+
+    /// Clave del baúl para el secreto TOTP del segundo factor. Es siempre
+    /// del equipo, aunque herede la autenticación de su carpeta.
+    pub fn totp_key(&self) -> String {
+        format!("{}/totp", self.id)
     }
 
     /// Destino legible: `usuario@host:puerto` o el dispositivo serie.
@@ -681,6 +697,8 @@ impl Tree {
             if !auth_done && let Some(auth) = d.auth {
                 out.auth = auth;
                 out.key_path = d.key_path.clone();
+                // El certificado propio era de la clave propia.
+                out.cert_path.clear();
                 // Sus secretos son los de la carpeta, comunes a todos los
                 // equipos que heredan de ella.
                 out.secret_owner = Some(folder.id);
@@ -1341,5 +1359,59 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tree = Tree::load(&dir.path().join("nope.json")).unwrap();
         assert!(tree.nodes.is_empty());
+    }
+
+    #[test]
+    fn certificate_path_belongs_to_the_own_key() {
+        let mut tree = Tree::default();
+        let folder = tree.add_folder(None, "Producción");
+        if let Some(Node::Folder(f)) = tree.find_mut(folder) {
+            f.defaults.auth = Some(AuthMethod::Key);
+            f.defaults.key_path = "~/.ssh/prod".into();
+        }
+        let mut s = Session {
+            host: "web".into(),
+            username: "ana".into(),
+            auth: AuthMethod::Key,
+            key_path: "~/.ssh/mia".into(),
+            cert_path: "~/certs/mia-cert.pub".into(),
+            ..Default::default()
+        };
+        tree.upsert_session(Some(folder), s.clone());
+        // Con su propia clave, su certificado; se guarda y se relee.
+        assert_eq!(
+            tree.resolved_session(s.id).unwrap().cert_path,
+            "~/certs/mia-cert.pub"
+        );
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"cert_path\":\"~/certs/mia-cert.pub\""));
+        assert_eq!(serde_json::from_str::<Session>(&json).unwrap(), s);
+        // Con la clave de la carpeta, el certificado propio no pinta nada.
+        s.inherit_auth = true;
+        tree.upsert_session(Some(folder), s.clone());
+        let r = tree.resolved_session(s.id).unwrap();
+        assert_eq!(
+            (r.key_path.as_str(), r.cert_path.as_str()),
+            ("~/.ssh/prod", "")
+        );
+        // Sin certificado indicado no se escribe nada (ficheros antiguos).
+        let plain = serde_json::to_string(&Session::default()).unwrap();
+        assert!(!plain.contains("cert_path"));
+
+        // El secreto TOTP es siempre del equipo, herede o no de su carpeta,
+        // y la opción de rellenarlo solo se guarda si está activada.
+        assert_eq!(r.totp_key(), format!("{}/totp", s.id));
+        assert_ne!(r.passphrase_key(), format!("{}/passphrase", s.id));
+        assert!(!plain.contains("totp"));
+        s.totp_autofill = true;
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"totp_autofill\":true"));
+        assert!(
+            serde_json::from_str::<Session>(&json)
+                .unwrap()
+                .totp_autofill
+        );
+        tree.upsert_session(Some(folder), s.clone());
+        assert!(tree.resolved_session(s.id).unwrap().totp_autofill);
     }
 }

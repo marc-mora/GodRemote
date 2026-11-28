@@ -1,5 +1,6 @@
 //! Interfaz gráfica: árbol de equipos, pestañas y diálogos.
 
+pub mod auth_extras;
 pub mod backdrop_view;
 pub mod dashboard_view;
 pub mod desktop_view;
@@ -547,6 +548,7 @@ impl App {
             Some(v) => Credentials {
                 password: v.get(&session.password_key()).map(str::to_string),
                 passphrase: v.get(&session.passphrase_key()).map(str::to_string),
+                totp: crate::totp::stored(session, v),
             },
             None => Credentials::default(),
         }
@@ -1364,6 +1366,7 @@ impl App {
                             for (from, to) in [
                                 (original.password_key(), copy.password_key()),
                                 (original.passphrase_key(), copy.passphrase_key()),
+                                (original.totp_key(), copy.totp_key()),
                             ] {
                                 if let Some(secret) = vault.get(&from).map(str::to_string) {
                                     let _ = vault.set(&to, &secret);
@@ -4208,6 +4211,7 @@ impl eframe::App for App {
         self.dispatch_shortcuts(ui.ctx());
         // Antes de abrir ninguna conexión en este fotograma.
         self.sync_proxy();
+        crate::agent::set_choice(self.settings.agent);
         self.sync_theme(ui.ctx());
         if let Some(probe) = &mut self.probe {
             probe.tick(ui.ctx());

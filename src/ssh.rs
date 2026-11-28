@@ -1,5 +1,6 @@
 //! Conexión SSH: verificación de host, autenticación y shell interactiva.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -8,14 +9,16 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use russh::client::{self, AuthResult, KeyboardInteractiveAuthResponse};
 use russh::keys::agent::AgentIdentity;
-use russh::keys::agent::client::AgentClient;
-use russh::keys::ssh_key::{HashAlg, PrivateKey};
+use russh::keys::ssh_key::private::KeypairData;
+use russh::keys::ssh_key::{Certificate, HashAlg, PrivateKey};
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
-use russh::{ChannelMsg, Disconnect, MethodKind};
+use russh::{ChannelMsg, Disconnect, MethodKind, MethodSet};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::keys::{CertInfo, CertValidity};
 use crate::model::{AuthMethod, Session};
 use crate::terminal::{TermBackend, TermCmd, TermEvent};
+use crate::totp::Totp;
 use crate::tunnels::{self, RemoteForwards};
 use crate::x11::X11Forward;
 
@@ -29,9 +32,10 @@ pub struct ConnShared {
     pub remote_forwards: RemoteForwards,
     /// Reenvío X11 activo, si el servidor lo aceptó.
     pub x11: Mutex<Option<Arc<X11Forward>>>,
-    /// El servidor aceptó el reenvío del agente SSH: solo entonces se
-    /// atienden los canales de agente que abra.
-    pub agent_forwarding: std::sync::atomic::AtomicBool,
+    /// Agente SSH local que se reenvía a este equipo. Solo lo hay si el
+    /// servidor aceptó el reenvío: sin él no se atienden los canales de
+    /// agente que abra.
+    pub agent_forward: Mutex<Option<crate::agent::AgentKind>>,
 }
 
 /// Conexión SSH autenticada. Mantiene vivo el salto (bastión) por el que
@@ -152,6 +156,9 @@ impl Prompter {
 pub struct Credentials {
     pub password: Option<String>,
     pub passphrase: Option<String>,
+    /// Generador de códigos TOTP con el que contestar solo cuando el
+    /// servidor pida un código de verificación (segundo factor).
+    pub totp: Option<Totp>,
 }
 
 /// Sesión con todo lo necesario para conectar: sus secretos y, si hace
@@ -465,14 +472,11 @@ impl client::Handler for ClientHandler {
         reply: client::ChannelOpenHandle,
         _session: &mut client::Session,
     ) -> Result<(), Self::Error> {
-        if self
-            .shared
-            .agent_forwarding
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        let forwarded = *self.shared.agent_forward.lock().unwrap();
+        if let Some(kind) = forwarded {
             reply.accept().await;
             tokio::spawn(async move {
-                let _ = crate::agent::bridge(channel.into_stream()).await;
+                let _ = crate::agent::bridge(channel.into_stream(), kind).await;
             });
         }
         Ok(())
@@ -504,12 +508,16 @@ async fn request_agent(
     handle: &SshHandle,
     emit: &Emit,
 ) -> Result<()> {
-    if !crate::agent::available() {
-        emit(TermEvent::Status(
-            "Reenvío del agente no disponible: no hay agente SSH en este equipo".into(),
-        ));
-        return Ok(());
-    }
+    // El mismo agente con el que se autenticaría: el de OpenSSH o Pageant.
+    let kind = match crate::agent::pick().await {
+        Ok(kind) => kind,
+        Err(e) => {
+            emit(TermEvent::Status(format!(
+                "Reenvío del agente no disponible: {e:#}"
+            )));
+            return Ok(());
+        }
+    };
     channel.agent_forward(true).await?;
     let accepted = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
@@ -523,11 +531,14 @@ async fn request_agent(
     .await
     .unwrap_or(false);
     if accepted {
-        handle
-            .shared
-            .agent_forwarding
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        emit(TermEvent::Status("Reenvío del agente SSH activo".into()));
+        *handle.shared.agent_forward.lock().unwrap() = Some(kind);
+        emit(TermEvent::Status(
+            match kind {
+                crate::agent::AgentKind::OpenSsh => "Reenvío del agente SSH activo",
+                crate::agent::AgentKind::Pageant => "Reenvío del agente SSH activo (Pageant)",
+            }
+            .into(),
+        ));
     } else {
         emit(TermEvent::Status(
             "El servidor rechazó el reenvío del agente (¿AllowAgentForwarding yes?)".into(),
@@ -651,23 +662,27 @@ async fn connect_via(
 
     status(format!("Autenticando como {user}…"));
     let mut to_save = vec![];
-    match session.auth {
-        AuthMethod::Password => {
-            auth_password(
-                &mut handle,
-                session,
-                &user,
-                creds,
-                prompter,
-                status,
-                &mut to_save,
-            )
-            .await?
-        }
+    let mut asker = Asker {
+        session,
+        user: &user,
+        prompter,
+        status,
+        password: creds.password,
+        totp: creds.totp,
+        totp_sent: false,
+        code_typed: false,
+        code_rejected: false,
+    };
+    let outcome = match session.auth {
+        AuthMethod::Password => auth_password(&mut handle, &mut asker, &mut to_save).await?,
         AuthMethod::Key => {
-            auth_key(&mut handle, session, &user, creds, prompter, &mut to_save).await?
+            auth_key(&mut handle, &mut asker, creds.passphrase, &mut to_save).await?
         }
-        AuthMethod::Agent => auth_agent(&mut handle, &user).await?,
+        AuthMethod::Agent => auth_agent(&mut handle, &mut asker).await?,
+    };
+    // El servidor dio por bueno el primer paso y exige otro más.
+    if let Outcome::Partial(remaining) = outcome {
+        second_factor(&mut handle, &mut asker, remaining, &mut to_save).await?;
     }
 
     Ok(Connected {
@@ -680,87 +695,347 @@ async fn connect_via(
     })
 }
 
+/// Cómo termina un intento de autenticación con un método.
+enum Outcome {
+    Success,
+    /// Aceptado, pero el servidor exige además otro método (segundo factor).
+    Partial(MethodSet),
+    Rejected(MethodSet),
+}
+
+impl From<AuthResult> for Outcome {
+    fn from(result: AuthResult) -> Self {
+        match result {
+            AuthResult::Success => Outcome::Success,
+            AuthResult::Failure {
+                remaining_methods,
+                partial_success: true,
+            } => Outcome::Partial(remaining_methods),
+            AuthResult::Failure {
+                remaining_methods, ..
+            } => Outcome::Rejected(remaining_methods),
+        }
+    }
+}
+
+/// Lo necesario para contestar a lo que pregunte el servidor al autenticar:
+/// con lo que ya se sabe (contraseña, TOTP) o preguntando al usuario.
+struct Asker<'a> {
+    session: &'a Session,
+    user: &'a str,
+    prompter: &'a Prompter,
+    status: &'a (dyn Fn(String) + Send + Sync),
+    /// Contraseña conocida (del baúl): vale para una sola pregunta.
+    password: Option<String>,
+    /// Generador TOTP del equipo. Contesta una sola vez por conexión: si el
+    /// servidor no acepta su código, el siguiente se le pide al usuario.
+    totp: Option<Totp>,
+    totp_sent: bool,
+    /// El usuario ya ha tecleado algún código en esta conexión.
+    code_typed: bool,
+    /// El servidor acaba de rechazar un código de verificación.
+    code_rejected: bool,
+}
+
+impl Asker<'_> {
+    fn target(&self) -> String {
+        format!("{}@{}", self.user, self.session.host.trim())
+    }
+
+    /// Código TOTP para contestar al servidor, si este equipo tiene generador
+    /// y aún no se ha usado en esta conexión.
+    async fn totp_code(&mut self) -> Option<String> {
+        if self.totp_sent {
+            return None;
+        }
+        let code = fresh_code(self.totp.as_ref()?, self.status).await?;
+        self.totp_sent = true;
+        (self.status)("Código de verificación TOTP enviado".into());
+        Some(code)
+    }
+}
+
+/// Último periodo cuyo código TOTP se ha enviado, por secreto. Muchos
+/// servidores no admiten dos veces el mismo código (`pam_google_authenticator`
+/// lo impide de fábrica): si el de ahora ya se envió —al abrir otra pestaña
+/// del mismo equipo, por ejemplo— se espera al siguiente.
+static TOTP_SENT: Mutex<BTreeMap<[u8; 32], u64>> = Mutex::new(BTreeMap::new());
+
+/// Espera máxima al siguiente código; si hiciera falta más, se pregunta.
+const TOTP_MAX_WAIT: Duration = Duration::from_secs(45);
+
+/// Un código TOTP que no se haya enviado ya desde este programa. `None` si
+/// habría que esperar demasiado al siguiente.
+async fn fresh_code(totp: &Totp, status: &(dyn Fn(String) + Send + Sync)) -> Option<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    // Se reserva el periodo antes de esperar: dos conexiones simultáneas no
+    // deben acabar enviando el mismo código.
+    let (step, wait) = {
+        let mut sent = TOTP_SENT.lock().unwrap();
+        let id = totp.fingerprint();
+        let current = totp.step_at(now.as_secs());
+        let step = match sent.get(&id) {
+            Some(last) if *last >= current => last + 1,
+            _ => current,
+        };
+        let wait = Duration::from_secs(step.saturating_mul(totp.period)).saturating_sub(now);
+        if wait > TOTP_MAX_WAIT {
+            return None;
+        }
+        sent.insert(id, step);
+        (step, wait)
+    };
+    if !wait.is_zero() {
+        status(format!(
+            "El código TOTP de ahora ya se ha usado: esperando al siguiente ({} s)…",
+            wait.as_secs() + 1
+        ));
+        tokio::time::sleep(wait + Duration::from_millis(100)).await;
+    }
+    Some(totp.code_for_step(step))
+}
+
+/// `true` si lo que pregunta el servidor parece un código de verificación de
+/// un solo uso (TOTP) y no una contraseña.
+fn asks_for_code(prompt: &str) -> bool {
+    let prompt = prompt.to_lowercase();
+    // Palabras sueltas, para no ver «otp» dentro de otra.
+    let words: Vec<&str> = prompt
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let has_word = |wanted: &[&str]| words.iter().any(|word| wanted.contains(word));
+    if has_word(&[
+        "otp",
+        "totp",
+        "2fa",
+        "mfa",
+        "token",
+        "passcode",
+        "authenticator",
+        "autenticador",
+    ]) {
+        return true;
+    }
+    let phrases = [
+        "one-time",
+        "one time",
+        "verification",
+        "verificación",
+        "verificacion",
+        "two-factor",
+        "two factor",
+        "segundo factor",
+        "doble factor",
+        "un solo uso",
+    ];
+    if phrases.iter().any(|phrase| prompt.contains(phrase)) {
+        return true;
+    }
+    // «Code» a secas, salvo que hable de una contraseña.
+    has_word(&["code", "código", "codigo"])
+        && !prompt.contains("password")
+        && !prompt.contains("contraseña")
+}
+
 async fn auth_password(
     handle: &mut client::Handle<ClientHandler>,
-    session: &Session,
-    user: &str,
-    creds: Credentials,
-    prompter: &Prompter,
-    status: &(dyn Fn(String) + Send + Sync),
+    asker: &mut Asker<'_>,
     to_save: &mut Vec<(String, String)>,
-) -> Result<()> {
-    let mut stored = creds.password;
-    let target = format!("{user}@{}", session.host.trim());
+) -> Result<Outcome> {
+    let session = asker.session;
+    let mut stored = asker.password.take();
+    let target = asker.target();
+    // En el último intento fallido el servidor pidió también un código: no
+    // se puede saber cuál de las dos cosas estaba mal.
+    let mut code_involved = false;
     for attempt in 0..3 {
-        let (password, save) = match stored.take() {
-            Some(p) => (p, false),
+        let (password, save, from_vault) = match stored.take() {
+            Some(p) => (p, false, true),
             None => {
-                let msg = if attempt == 0 {
+                let msg = if code_involved {
+                    format!(
+                        "Contraseña o código de verificación incorrectos. \
+                         Contraseña para {target}"
+                    )
+                } else if attempt == 0 {
                     format!("Contraseña para {target}")
                 } else {
                     format!("Contraseña incorrecta. Contraseña para {target}")
                 };
-                match prompter
+                match asker
+                    .prompter
                     .secret("Autenticación SSH", &msg, false, true)
                     .await
                 {
-                    Some(a) => (a.value, a.save),
+                    Some(a) => (a.value, a.save, false),
                     None => bail!("Autenticación cancelada"),
                 }
             }
         };
 
-        let result = handle.authenticate_password(user, password.clone()).await?;
-        let remaining = match result {
-            AuthResult::Success => {
-                if save {
-                    to_save.push((session.password_key(), password));
-                }
-                return Ok(());
-            }
-            AuthResult::Failure {
-                remaining_methods, ..
-            } => remaining_methods,
-        };
-
+        let result = handle
+            .authenticate_password(asker.user, password.clone())
+            .await?;
+        let mut outcome = Outcome::from(result);
         // Muchos servidores (PAM) solo aceptan keyboard-interactive.
-        if remaining.contains(&MethodKind::KeyboardInteractive)
-            && keyboard_interactive(handle, user, &password, prompter).await?
-        {
+        if let Outcome::Rejected(remaining) = &outcome {
+            if remaining.contains(&MethodKind::KeyboardInteractive) {
+                let round = keyboard_interactive(handle, asker, Some(&password)).await?;
+                code_involved = round.code_asked;
+                outcome = round.outcome;
+            } else if !remaining.contains(&MethodKind::Password) {
+                bail!("El servidor no admite autenticación por contraseña");
+            }
+        }
+        if !matches!(outcome, Outcome::Rejected(_)) {
+            // La contraseña ha valido (aunque el servidor pida algo más).
             if save {
                 to_save.push((session.password_key(), password));
             }
-            return Ok(());
+            return Ok(outcome);
         }
-        if !remaining.contains(&MethodKind::Password)
-            && !remaining.contains(&MethodKind::KeyboardInteractive)
-        {
-            bail!("El servidor no admite autenticación por contraseña");
+        if from_vault {
+            (asker.status)(
+                if code_involved {
+                    "La contraseña guardada o el código de verificación fueron rechazados"
+                } else {
+                    "La contraseña guardada fue rechazada"
+                }
+                .into(),
+            );
         }
-        if !save && attempt == 0 {
-            status("La contraseña guardada fue rechazada".into());
-        }
+    }
+    if code_involved {
+        bail!("Autenticación fallida: contraseña o código de verificación incorrectos")
     }
     bail!("Autenticación fallida: contraseña incorrecta")
 }
 
-/// Autenticación keyboard-interactive. La contraseña conocida se usa una vez
-/// para el primer campo oculto; el resto se pregunta al usuario.
+/// Segundo factor: el servidor aceptó el primer método y exige otro más
+/// (por ejemplo, `AuthenticationMethods publickey,keyboard-interactive`).
+async fn second_factor(
+    handle: &mut client::Handle<ClientHandler>,
+    asker: &mut Asker<'_>,
+    mut remaining: MethodSet,
+    to_save: &mut Vec<(String, String)>,
+) -> Result<()> {
+    let target = asker.target();
+    let mut failures = 0;
+    // Límite defensivo de pasos encadenados.
+    for _ in 0..8 {
+        let (outcome, what) = if remaining.contains(&MethodKind::KeyboardInteractive) {
+            let password = asker.password.take();
+            let round = keyboard_interactive(handle, asker, password.as_deref()).await?;
+            let what = if round.code_asked {
+                "el código de verificación"
+            } else {
+                "la respuesta"
+            };
+            asker.code_rejected = round.code_asked && matches!(round.outcome, Outcome::Rejected(_));
+            (round.outcome, what)
+        } else if remaining.contains(&MethodKind::Password) {
+            let (password, save) = match asker.password.take() {
+                Some(p) => (p, false),
+                None => {
+                    let msg = if failures == 0 {
+                        format!("Contraseña para {target}")
+                    } else {
+                        format!("Contraseña incorrecta. Contraseña para {target}")
+                    };
+                    match asker
+                        .prompter
+                        .secret("Autenticación SSH", &msg, false, true)
+                        .await
+                    {
+                        Some(a) => (a.value, a.save),
+                        None => bail!("Autenticación cancelada"),
+                    }
+                }
+            };
+            let result = handle
+                .authenticate_password(asker.user, password.clone())
+                .await?;
+            let outcome = Outcome::from(result);
+            if save && !matches!(outcome, Outcome::Rejected(_)) {
+                to_save.push((asker.session.password_key(), password));
+            }
+            (outcome, "la contraseña")
+        } else {
+            let methods: Vec<&str> = remaining.iter().map(<&str>::from).collect();
+            bail!(
+                "Autenticación fallida: el servidor exige además un método que no se puede \
+                 ofrecer aquí ({})",
+                methods.join(", ")
+            );
+        };
+        match outcome {
+            Outcome::Success => return Ok(()),
+            Outcome::Partial(more) => {
+                remaining = more;
+                failures = 0;
+            }
+            Outcome::Rejected(more) => {
+                failures += 1;
+                if failures >= 3 {
+                    bail!("Autenticación fallida: el servidor rechazó {what}");
+                }
+                (asker.status)(format!("El servidor no aceptó {what}"));
+                if !more.is_empty() {
+                    remaining = more;
+                }
+            }
+        }
+    }
+    bail!("Autenticación fallida: el servidor encadena demasiados pasos")
+}
+
+/// Cómo acabó una ronda de preguntas keyboard-interactive.
+struct Interactive {
+    outcome: Outcome,
+    /// Entre las preguntas había un código de verificación.
+    code_asked: bool,
+}
+
+/// Autenticación keyboard-interactive. A cada pregunta se contesta con lo
+/// que se sabe: el código TOTP si pide un código de verificación, y
+/// `password` (una vez) para el primer campo oculto. El resto se pregunta al
+/// usuario.
 async fn keyboard_interactive(
     handle: &mut client::Handle<ClientHandler>,
-    user: &str,
-    password: &str,
-    prompter: &Prompter,
-) -> Result<bool> {
-    let mut password = Some(password.to_string());
+    asker: &mut Asker<'_>,
+    password: Option<&str>,
+) -> Result<Interactive> {
+    let mut password = password.map(str::to_string);
+    let mut code_asked = false;
     let mut response = handle
-        .authenticate_keyboard_interactive_start(user, None::<String>)
+        .authenticate_keyboard_interactive_start(asker.user, None::<String>)
         .await?;
     // Límite defensivo de rondas.
     for _ in 0..10 {
         match response {
-            KeyboardInteractiveAuthResponse::Success => return Ok(true),
-            KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(false),
+            KeyboardInteractiveAuthResponse::Success => {
+                return Ok(Interactive {
+                    outcome: Outcome::Success,
+                    code_asked,
+                });
+            }
+            KeyboardInteractiveAuthResponse::Failure {
+                remaining_methods,
+                partial_success,
+            } => {
+                let outcome = if partial_success {
+                    Outcome::Partial(remaining_methods)
+                } else {
+                    Outcome::Rejected(remaining_methods)
+                };
+                return Ok(Interactive {
+                    outcome,
+                    code_asked,
+                });
+            }
             KeyboardInteractiveAuthResponse::InfoRequest {
                 name,
                 instructions,
@@ -768,7 +1043,29 @@ async fn keyboard_interactive(
             } => {
                 let mut answers = Vec::with_capacity(prompts.len());
                 for p in prompts {
-                    if !p.echo
+                    let wants_code = asks_for_code(&p.prompt);
+                    let mut msg = if instructions.is_empty() {
+                        p.prompt.clone()
+                    } else {
+                        format!("{instructions}\n{}", p.prompt)
+                    };
+                    if wants_code {
+                        code_asked = true;
+                        if let Some(code) = asker.totp_code().await {
+                            answers.push(code);
+                            continue;
+                        }
+                        let rejected = std::mem::take(&mut asker.code_rejected);
+                        if asker.totp_sent && !asker.code_typed {
+                            msg = format!(
+                                "El código TOTP automático ya se envió y no bastó: escribe el \
+                                 siguiente.\n{msg}"
+                            );
+                        } else if rejected {
+                            msg = format!("El servidor no aceptó el código anterior.\n{msg}");
+                        }
+                        asker.code_typed = true;
+                    } else if !p.echo
                         && let Some(pw) = password.take()
                     {
                         answers.push(pw);
@@ -779,12 +1076,7 @@ async fn keyboard_interactive(
                     } else {
                         name.clone()
                     };
-                    let msg = if instructions.is_empty() {
-                        p.prompt.clone()
-                    } else {
-                        format!("{instructions}\n{}", p.prompt)
-                    };
-                    match prompter.secret(&title, &msg, p.echo, false).await {
+                    match asker.prompter.secret(&title, &msg, p.echo, false).await {
                         Some(a) => answers.push(a.value),
                         None => bail!("Autenticación cancelada"),
                     }
@@ -795,7 +1087,10 @@ async fn keyboard_interactive(
             }
         }
     }
-    Ok(false)
+    Ok(Interactive {
+        outcome: Outcome::Rejected(MethodSet::empty()),
+        code_asked,
+    })
 }
 
 fn key_is_encrypted(text: &str) -> bool {
@@ -808,22 +1103,143 @@ fn key_is_encrypted(text: &str) -> bool {
             .any(|l| l.starts_with("Encryption:") && !l.contains("none"))
 }
 
+/// Firma con una clave privada local lo que russh pide firmar al presentar
+/// un certificado. Se usa en lugar de `authenticate_openssh_cert` porque este
+/// no deja elegir el algoritmo de firma de las claves RSA: anuncia `ssh-rsa`
+/// (SHA-1), que los servidores actuales rechazan.
+struct KeySigner(Arc<PrivateKey>);
+
+impl russh::Signer for KeySigner {
+    type Error = anyhow::Error;
+
+    fn auth_sign(
+        &mut self,
+        _identity: &AgentIdentity,
+        hash_alg: Option<HashAlg>,
+        mut to_sign: Vec<u8>,
+    ) -> impl Future<Output = Result<Vec<u8>, Self::Error>> + Send {
+        use russh::keys::signature::Signer as _;
+        use russh::keys::ssh_encoding::Encode as _;
+        let signature = match self.0.key_data() {
+            KeypairData::Rsa(rsa) => (rsa, hash_alg).try_sign(&to_sign),
+            other => other.try_sign(&to_sign),
+        };
+        async move {
+            let signature =
+                signature.map_err(|e| anyhow!("no se pudo firmar con la clave privada: {e}"))?;
+            // La firma va a continuación de lo firmado, como cadena SSH.
+            let blob = signature.encode_vec()?;
+            to_sign.extend_from_slice(&(blob.len() as u32).to_be_bytes());
+            to_sign.extend_from_slice(&blob);
+            Ok(to_sign)
+        }
+    }
+}
+
+/// Busca el certificado con el que acompañar a una clave: el indicado en el
+/// equipo o, si no se indica ninguno, el que haya junto a ella
+/// (`<clave>-cert.pub`), como hace OpenSSH.
+///
+/// Un certificado indicado a mano que no se puede usar con esta clave es un
+/// error. Uno detectado solo, o uno caducado, no impide intentarlo con la
+/// clave sin certificado: `problem` recibe el motivo para contarlo.
+fn find_certificate(
+    session: &Session,
+    key_path: &std::path::Path,
+    key: &PrivateKey,
+    problem: &mut Option<String>,
+) -> Result<Option<(Certificate, CertInfo)>> {
+    let explicit = !session.cert_path.trim().is_empty();
+    let path = if explicit {
+        crate::paths::expand_tilde(&session.cert_path)
+    } else {
+        crate::keys::cert_path_for(key_path)
+    };
+    if !explicit && !path.exists() {
+        return Ok(None);
+    }
+    let (cert, info) = match crate::keys::read_cert(&path) {
+        Ok(found) => found,
+        Err(e) if explicit => return Err(e),
+        Err(e) => {
+            *problem = Some(format!("{e:#}"));
+            return Ok(None);
+        }
+    };
+    // En los mensajes basta el nombre del fichero: la ruta ya se conoce.
+    let name = file_name(&path);
+    let unusable = if cert.public_key() != key.public_key().key_data() {
+        Some(format!(
+            "El certificado {name} no corresponde a la clave {}",
+            file_name(key_path)
+        ))
+    } else if info.host {
+        Some(format!("{name} es un certificado de host, no de usuario"))
+    } else {
+        None
+    };
+    if let Some(unusable) = unusable {
+        if explicit {
+            bail!(unusable);
+        }
+        *problem = Some(unusable);
+        return Ok(None);
+    }
+    if info.validity() != CertValidity::Valid {
+        *problem = Some(format!("El certificado {name} {}", info.validity_text()));
+        return Ok(None);
+    }
+    Ok(Some((cert, info)))
+}
+
+/// Nombre de un fichero, sin su carpeta, para los mensajes.
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Por qué pudo rechazar el servidor un certificado, para el mensaje.
+fn cert_rejection(info: &CertInfo, user: &str) -> String {
+    let mut why = format!(
+        "El servidor no aceptó el certificado {}",
+        file_name(&info.path)
+    );
+    if !info.principals.is_empty() && !info.principals.iter().any(|p| p == user) {
+        why.push_str(&format!(
+            " (vale para {}, no para «{user}»)",
+            info.principals_text()
+        ));
+    } else {
+        why.push_str(" (¿confía el servidor en la autoridad que lo firmó?)");
+    }
+    why
+}
+
 async fn auth_key(
     handle: &mut client::Handle<ClientHandler>,
-    session: &Session,
-    user: &str,
-    creds: Credentials,
-    prompter: &Prompter,
+    asker: &mut Asker<'_>,
+    passphrase: Option<String>,
     to_save: &mut Vec<(String, String)>,
-) -> Result<()> {
+) -> Result<Outcome> {
+    let (session, user, prompter, status) =
+        (asker.session, asker.user, asker.prompter, asker.status);
     let path = crate::paths::expand_tilde(&session.key_path);
-    let target = format!("{user}@{}", session.host.trim());
+    let target = asker.target();
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("No se pudo leer la clave {}", path.display()))?;
 
+    // Una llave de seguridad FIDO2 no se puede usar desde su fichero (ni
+    // hace falta su passphrase): firma la llave, a través del agente.
+    if let Ok(reference) = PrivateKey::from_openssh(&text)
+        && crate::keys::is_security_key(&reference.algorithm())
+    {
+        return auth_security_key(handle, asker, &path, reference.public_key()).await;
+    }
+
     let mut pending_save = None;
     let key = if key_is_encrypted(&text) {
-        let mut stored = creds.passphrase;
+        let mut stored = passphrase;
         let mut found = None;
         for attempt in 0..3 {
             let (pass, save) = match stored.take() {
@@ -856,55 +1272,232 @@ async fn auth_key(
         russh::keys::decode_secret_key(&text, None)
             .map_err(|e| anyhow!("Clave privada no válida ({}): {e}", path.display()))?
     };
+    let key = Arc::new(key);
 
+    let mut cert_problem = None;
+    let cert = find_certificate(session, &path, &key, &mut cert_problem)?;
+    if let Some(problem) = &cert_problem {
+        status(format!("{problem}: se prueba la clave sin certificado"));
+    }
     let hash = handle.best_supported_rsa_hash().await?.flatten();
+
+    // Primero con el certificado; si el servidor no lo quiere, la clave sola.
+    if let Some((cert, info)) = cert {
+        let result = handle
+            .authenticate_certificate_with(user, cert, hash, &mut KeySigner(key.clone()))
+            .await?;
+        let outcome = Outcome::from(result);
+        if !matches!(outcome, Outcome::Rejected(_)) {
+            to_save.extend(pending_save);
+            return Ok(outcome);
+        }
+        let why = cert_rejection(&info, user);
+        status(format!("{why}: se prueba la clave sin certificado"));
+        cert_problem = Some(why);
+    }
     let result = handle
-        .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
+        .authenticate_publickey(user, PrivateKeyWithHashAlg::new(key, hash))
         .await?;
-    if !result.success() {
-        bail!("El servidor rechazó la clave {}", path.display());
-    }
-    to_save.extend(pending_save);
-    Ok(())
-}
-
-async fn auth_agent(handle: &mut client::Handle<ClientHandler>, user: &str) -> Result<()> {
-    #[cfg(unix)]
-    let mut agent = AgentClient::connect_env()
-        .await
-        .context("No se pudo conectar con el agente SSH (¿SSH_AUTH_SOCK?)")?
-        .dynamic();
-    #[cfg(windows)]
-    let mut agent = match AgentClient::connect_named_pipe(r"\\.\pipe\openssh-ssh-agent").await {
-        Ok(a) => a.dynamic(),
-        Err(_) => AgentClient::connect_pageant()
-            .await
-            .context("No se pudo conectar con el agente SSH ni con Pageant")?
-            .dynamic(),
-    };
-
-    let identities = agent
-        .request_identities()
-        .await
-        .context("El agente no devolvió identidades")?;
-    if identities.is_empty() {
-        bail!("El agente SSH no tiene ninguna clave cargada");
-    }
-    let hash = handle.best_supported_rsa_hash().await?.flatten();
-    for identity in identities {
-        let AgentIdentity::PublicKey { key, .. } = identity else {
-            continue;
-        };
-        match handle
-            .authenticate_publickey_with(user, key, hash, &mut agent)
-            .await
-        {
-            Ok(AuthResult::Success) => return Ok(()),
-            Ok(AuthResult::Failure { .. }) => continue,
-            Err(e) => bail!("Error firmando con el agente: {e}"),
+    let outcome = Outcome::from(result);
+    if matches!(outcome, Outcome::Rejected(_)) {
+        match cert_problem {
+            Some(problem) => bail!("El servidor rechazó la clave {}. {problem}", path.display()),
+            None => bail!("El servidor rechazó la clave {}", path.display()),
         }
     }
-    bail!("Ninguna clave del agente fue aceptada por el servidor")
+    to_save.extend(pending_save);
+    Ok(outcome)
+}
+
+/// Firma con el agente SSH y, si la clave es de una llave de seguridad
+/// FIDO2, avisa antes: el agente esperará a que el usuario la toque.
+struct AgentSigner<'a> {
+    agent: &'a mut crate::agent::Client,
+    status: &'a (dyn Fn(String) + Send + Sync),
+    /// Nombre de la identidad con la que se va a firmar (russh no lo pasa).
+    name: String,
+}
+
+impl russh::Signer for AgentSigner<'_> {
+    type Error = russh::AgentAuthError;
+
+    async fn auth_sign(
+        &mut self,
+        identity: &AgentIdentity,
+        hash_alg: Option<HashAlg>,
+        to_sign: Vec<u8>,
+    ) -> Result<Vec<u8>, Self::Error> {
+        if crate::keys::is_security_key(&identity.public_key().algorithm()) {
+            (self.status)(format!(
+                "Toca la llave de seguridad{} para confirmar…",
+                self.name
+            ));
+        }
+        self.agent
+            .sign_request(identity, hash_alg, to_sign)
+            .await
+            .map_err(Into::into)
+    }
+}
+
+/// « «nombre»», o nada si no tiene nombre (para intercalar en una frase).
+fn quoted(name: &str) -> String {
+    if name.is_empty() {
+        String::new()
+    } else {
+        format!(" «{name}»")
+    }
+}
+
+/// Ofrece al servidor, una a una, identidades del agente. Devuelve cómo
+/// acabó la que el servidor aceptó, o `None` si no aceptó ninguna; `notes`
+/// recibe lo que no se pudo ofrecer (certificados caducados, llaves que no
+/// firmaron) para explicarlo.
+async fn offer_agent_identities(
+    handle: &mut client::Handle<ClientHandler>,
+    asker: &Asker<'_>,
+    agent: &mut crate::agent::Client,
+    identities: Vec<AgentIdentity>,
+    notes: &mut Vec<String>,
+) -> Result<Option<Outcome>> {
+    let (user, status) = (asker.user, asker.status);
+    let hash = handle.best_supported_rsa_hash().await?.flatten();
+    for identity in identities {
+        let name = quoted(identity.comment());
+        let security_key = crate::keys::is_security_key(&identity.public_key().algorithm());
+        let mut signer = AgentSigner {
+            agent: &mut *agent,
+            status,
+            name: name.clone(),
+        };
+        let result = match identity {
+            AgentIdentity::PublicKey { key, .. } => {
+                handle
+                    .authenticate_publickey_with(user, key, hash, &mut signer)
+                    .await
+            }
+            // Un certificado cargado en el agente (`ssh-add` lo añade si
+            // está junto a la clave).
+            AgentIdentity::Certificate { certificate, .. } => {
+                let info = CertInfo::from_certificate(std::path::Path::new(""), &certificate);
+                if info.host {
+                    continue;
+                }
+                if info.validity() != CertValidity::Valid {
+                    let note = format!("el certificado «{}» {}", info.key_id, info.validity_text());
+                    status(format!(
+                        "El agente tiene un certificado que no vale: {note}"
+                    ));
+                    notes.push(note);
+                    continue;
+                }
+                handle
+                    .authenticate_certificate_with(user, certificate, hash, &mut signer)
+                    .await
+            }
+        };
+        match result.map(Outcome::from) {
+            Ok(Outcome::Rejected(_)) => continue,
+            Ok(accepted) => return Ok(Some(accepted)),
+            // El agente no firmó (llave sin conectar o sin tocar, clave que
+            // pide confirmación y se denegó…): se sigue con las demás.
+            Err(russh::AgentAuthError::Key(e)) => {
+                let note = if security_key {
+                    format!(
+                        "la llave de seguridad{name} no firmó (¿está conectada y la has tocado?)"
+                    )
+                } else {
+                    format!("el agente no firmó con la clave{name}: {e}")
+                };
+                status(format!("Aviso: {note}"));
+                notes.push(note);
+            }
+            Err(e) => bail!("Se perdió la conexión mientras firmaba el agente: {e}"),
+        }
+    }
+    Ok(None)
+}
+
+async fn auth_agent(
+    handle: &mut client::Handle<ClientHandler>,
+    asker: &mut Asker<'_>,
+) -> Result<Outcome> {
+    // El agente de OpenSSH o, en Windows, Pageant, según el ajuste.
+    let crate::agent::Connected {
+        client: mut agent,
+        kind,
+        identities,
+    } = crate::agent::connect()
+        .await
+        .map_err(|e| anyhow!("No se pudo usar el agente SSH: {e:#}"))?;
+    if identities.is_empty() {
+        match kind {
+            crate::agent::AgentKind::OpenSsh => {
+                bail!("El agente SSH no tiene ninguna clave cargada")
+            }
+            crate::agent::AgentKind::Pageant => bail!("Pageant no tiene ninguna clave cargada"),
+        }
+    }
+    let mut notes = vec![];
+    match offer_agent_identities(handle, asker, &mut agent, identities, &mut notes).await? {
+        Some(outcome) => Ok(outcome),
+        None if notes.is_empty() => {
+            bail!("Ninguna clave del agente fue aceptada por el servidor")
+        }
+        None => bail!(
+            "Ninguna clave del agente fue aceptada por el servidor ({})",
+            notes.join("; ")
+        ),
+    }
+}
+
+/// Autenticación con una llave de seguridad FIDO2 elegida como «clave
+/// privada». Su fichero solo guarda una referencia: quien firma es la llave,
+/// y se llega a ella a través del agente SSH, que debe tenerla cargada.
+async fn auth_security_key(
+    handle: &mut client::Handle<ClientHandler>,
+    asker: &Asker<'_>,
+    path: &std::path::Path,
+    public: &russh::keys::PublicKey,
+) -> Result<Outcome> {
+    let name = file_name(path);
+    let how = format!(
+        "{name} es una llave de seguridad: firma la propia llave, a través del agente SSH. \
+         Cárgala en el agente (ssh-add {}) y vuelve a conectar",
+        path.display()
+    );
+    let crate::agent::Connected {
+        client: mut agent,
+        identities,
+        ..
+    } = crate::agent::connect()
+        .await
+        .map_err(|e| anyhow!("No se pudo usar el agente SSH ({e:#}). {how}"))?;
+    // Solo las identidades de esta llave (la clave y, si lo hay, su
+    // certificado, que va primero).
+    let (mut certs, mut plain): (Vec<_>, Vec<_>) = identities
+        .into_iter()
+        .filter(|identity| identity.public_key().key_data() == public.key_data())
+        .partition(|identity| matches!(identity, AgentIdentity::Certificate { .. }));
+    certs.append(&mut plain);
+    if certs.is_empty() {
+        bail!("El agente SSH no tiene cargada esta clave. {how}");
+    }
+    let mut notes = vec![];
+    match offer_agent_identities(handle, asker, &mut agent, certs, &mut notes).await? {
+        Some(outcome) => Ok(outcome),
+        None if notes.is_empty() => {
+            bail!(
+                "El servidor rechazó la clave {} (llave de seguridad)",
+                path.display()
+            )
+        }
+        None => bail!(
+            "No se pudo entrar con la clave {}: {}",
+            path.display(),
+            notes.join("; ")
+        ),
+    }
 }
 
 /// Abre una conexión y una shell interactiva en segundo plano.
@@ -1080,6 +1673,97 @@ async fn run_shell(
                 "La shell terminó con código {code}"
             )));
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verification_code_prompts_are_recognised() {
+        for prompt in [
+            "Verification code: ",
+            "Código de verificación: ",
+            "Codigo de verificacion:",
+            "One-time password (OATH) for `ana': ",
+            "Enter your OTP:",
+            "TOTP: ",
+            "Código: ",
+            "Authenticator code",
+            "2FA token:",
+            "Duo two-factor login for ana\nPasscode or option (1-3): ",
+            "Segundo factor:",
+        ] {
+            assert!(asks_for_code(prompt), "{prompt:?}");
+        }
+        for prompt in [
+            "Password: ",
+            "Contraseña: ",
+            "ana@servidor's password: ",
+            "(current) UNIX password: ",
+            "Passphrase for key: ",
+            "Password code word: ",
+            "Laptop serial number: ",
+            "Choose an option: ",
+            "",
+        ] {
+            assert!(!asks_for_code(prompt), "{prompt:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn totp_codes_are_never_sent_twice() {
+        // Periodo de un segundo: el segundo código llega enseguida.
+        let totp = Totp::new(
+            b"no-repetir-codigos".to_vec(),
+            crate::totp::TotpAlgorithm::Sha1,
+            6,
+            1,
+        )
+        .unwrap();
+        let notes = Mutex::new(Vec::<String>::new());
+        let status = |s: String| notes.lock().unwrap().push(s);
+        let first_step = totp.step_at(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+        let first = fresh_code(&totp, &status).await.unwrap();
+        assert!(notes.lock().unwrap().is_empty());
+        let second = fresh_code(&totp, &status).await.unwrap();
+        let third = fresh_code(&totp, &status).await.unwrap();
+        // Cada uno es de un periodo posterior al anterior.
+        assert_eq!(first, totp.code_for_step(first_step));
+        assert_eq!(second, totp.code_for_step(first_step + 1));
+        assert_eq!(third, totp.code_for_step(first_step + 2));
+        let last = TOTP_SENT.lock().unwrap()[&totp.fingerprint()];
+        assert!(last >= first_step + 2, "{last} frente a {first_step}");
+        assert!(
+            notes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|n| n.contains("esperando"))
+        );
+
+        // Con un periodo largo no se espera: se pregunta al usuario.
+        let slow = Totp::new(
+            b"periodo-largo".to_vec(),
+            crate::totp::TotpAlgorithm::Sha1,
+            6,
+            3600,
+        )
+        .unwrap();
+        assert!(fresh_code(&slow, &status).await.is_some());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        if slow.seconds_left_at(now) > 60 {
+            assert!(fresh_code(&slow, &status).await.is_none());
         }
     }
 }

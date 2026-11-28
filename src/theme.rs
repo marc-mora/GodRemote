@@ -1241,6 +1241,10 @@ pub struct Settings {
     /// Panel de estado: refresco, tope de conexiones y umbrales de alerta.
     #[serde(rename = "panel_estado")]
     pub dashboard: crate::dashboard::DashboardSettings,
+    /// Agente SSH que se usa en Windows: el de OpenSSH, Pageant o el
+    /// primero de los dos que tenga claves.
+    #[serde(rename = "agente")]
+    pub agent: crate::agent::AgentChoice,
 }
 
 /// Dónde se muestran las aplicaciones gráficas que llegan por X11.
@@ -1292,6 +1296,7 @@ impl Default for Settings {
             confirm_paste: true,
             confirm_close: true,
             dashboard: Default::default(),
+            agent: Default::default(),
         }
     }
 }
@@ -1602,6 +1607,7 @@ mod tests {
                     unreachable: false,
                 },
             },
+            agent: crate::agent::AgentChoice::Pageant,
             x_server: XServerSettings {
                 embedded: !cfg!(windows),
                 listen_local: true,

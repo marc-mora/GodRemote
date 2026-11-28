@@ -90,6 +90,7 @@ impl SettingsWindow {
                             "La pestaña se resalta cuando su terminal recibe algo mientras miras \
                      otra, y lleva una campana si la ha hecho sonar",
                         );
+                        super::auth_extras::agent_choice_ui(ui, &mut settings.agent);
                         ui.separator();
                         proxy_section(ui, settings, vault, &mut self.proxy_password, &mut request);
                         ui.separator();

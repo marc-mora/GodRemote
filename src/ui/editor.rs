@@ -23,6 +23,10 @@ pub struct SessionEditor {
     keys: Vec<KeyInfo>,
     serial_ports: Vec<String>,
     backdrop: super::backdrop_view::BackdropEditor,
+    /// Certificado de la clave privada.
+    cert: super::auth_extras::CertField,
+    /// Secreto TOTP del segundo factor.
+    totp: super::auth_extras::TotpField,
     /// El cliente RDP integrado está disponible (lo incluye la edición y
     /// no está desactivado en los ajustes). Lo fija la aplicación.
     pub embedded_rdp: bool,
@@ -161,6 +165,8 @@ impl SessionEditor {
             keys: crate::keys::list(),
             serial_ports: crate::serial::available_ports(),
             backdrop: Default::default(),
+            cert: Default::default(),
+            totp: Default::default(),
             embedded_rdp: crate::HAS_EMBEDDED_RDP,
         }
     }
@@ -418,6 +424,7 @@ impl SessionEditor {
                                 s.key_path = path.display().to_string();
                             }
                         });
+                        self.cert.ui(ui, &s.key_path, &mut s.cert_path, FIELD_WIDTH);
                         let stored = vault.is_some_and(|v| v.contains(&s.passphrase_key()));
                         let hint = if stored && !self.forget_passphrase {
                             "passphrase guardada en el baúl"
@@ -445,6 +452,14 @@ impl SessionEditor {
                 } else if s.protocol.is_ssh() {
                     ui.label("");
                     ui.weak("Se usarán las claves cargadas en ssh-agent / Pageant.");
+                    ui.end_row();
+                }
+
+                if s.protocol.is_ssh() {
+                    ui.label("Segundo factor");
+                    let key = s.totp_key();
+                    self.totp
+                        .ui(ui, vault, &key, &mut s.totp_autofill, FIELD_WIDTH);
                     ui.end_row();
                 }
 
@@ -846,6 +861,7 @@ impl SessionEditor {
         s.host = s.host.trim().to_string();
         s.username = s.username.trim().to_string();
         s.key_path = s.key_path.trim().to_string();
+        s.cert_path = s.cert_path.trim().to_string();
         s.serial.device = s.serial.device.trim().to_string();
         for t in &mut s.tunnels {
             t.listen_host = t.listen_host.trim().to_string();
@@ -890,6 +906,7 @@ impl SessionEditor {
             })();
             res.map_err(|e| format!("No se pudo actualizar el baúl: {e:#}"))?;
         }
+        self.totp.commit(&mut s, vault.as_mut())?;
 
         let id = s.id;
         tree.upsert_session(self.parent, s.clone());
