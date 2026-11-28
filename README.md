@@ -211,7 +211,7 @@ pestañas abiertas, equipos del árbol (por nombre, carpeta, usuario o
 dirección), snippets, túneles, las últimas órdenes del historial del equipo
 de la pestaña activa y acciones (terminal local, vista dividida, difusión,
 ajustes…). Se escribe parte del nombre —varias palabras, sin
-acentos, o sus iniciales salteadas: «prd» encuentra «producción»—, se elige
+acentos, o algunas de sus letras, salteadas: «prd» encuentra «producción»—, se elige
 con las flechas e Intro lo abre.
 
 | Atajo | Hace |
@@ -467,8 +467,8 @@ escribe nada en tu terminal ni se abre otra conexión. Hace falta que el
 servidor tenga una shell POSIX (`sh`); el uso de CPU, memoria y red sale de
 `/proc`, así que en sistemas que no son Linux solo aparecen el nombre, el
 sistema y el disco. En equipos donde no proceda (routers, conmutadores) se
-desactiva en la ficha de la sesión, en «Terminal: barra de información y
-fondo».
+desactiva en la ficha de la sesión, en «Terminal: color de la pestaña, barra
+y fondo».
 
 ### Panel de estado de una carpeta
 
@@ -586,8 +586,8 @@ imagen se guarda dentro del propio tema, así que al exportarlo viaja con él;
 las muy grandes se reducen al cargarlas.
 
 Cada equipo puede tener además **su propio fondo**, que sustituye al del
-tema: en la ficha de la sesión, «Terminal: barra de información y fondo» →
-«Fondo propio para este equipo». Sirve para distinguir de un vistazo los
+tema: en la ficha de la sesión, «Terminal: color de la pestaña, barra y
+fondo» → «Fondo propio para este equipo». Sirve para distinguir de un vistazo los
 servidores delicados.
 
 ### Vista dividida
@@ -785,7 +785,8 @@ Lo importado queda en una carpeta nueva del árbol. Las contraseñas no se
 importan.
 
 La **copia de seguridad** guarda en un solo fichero los equipos, el baúl
-(cifrado, tal cual), los ajustes, los snippets, los temas y, si se quiere,
+(cifrado, tal cual), los ajustes, los snippets, los túneles del gestor, los
+temas y, si se quiere,
 las claves de la carpeta de GodRemote. Al restaurarla se guarda antes la
 configuración actual, por si hay que volver atrás.
 
