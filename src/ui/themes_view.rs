@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use egui::RichText;
 
 use super::backdrop_view::BackdropEditor;
+use crate::i18n::tr;
 use crate::theme::{self, Rgb, Settings, Theme, ThemeStore};
+use crate::{mark, trf};
 
 /// Tema en edición (copia de trabajo hasta que se guarda).
 struct Editing {
@@ -33,6 +35,7 @@ pub struct ThemesWindow {
 
 /// Fila para elegir un tipo de letra: los instalados (con buscador), el
 /// integrado o un fichero. `mono_only` solo se ofrece para el terminal.
+/// `label` llega sin traducir: identifica además al desplegable.
 fn font_picker(
     ui: &mut egui::Ui,
     label: &str,
@@ -40,12 +43,12 @@ fn font_picker(
     filter: &mut String,
     mut mono_only: Option<&mut bool>,
 ) -> bool {
-    const BUILTIN: &str = "(la integrada)";
+    const BUILTIN: &str = mark!("(la integrada)");
     let mut changed = false;
-    ui.label(label);
+    ui.label(tr(label));
     ui.horizontal(|ui| {
         let shown = if value.is_empty() {
-            BUILTIN.to_string()
+            tr(BUILTIN).to_string()
         } else {
             // De una ruta se muestra solo el nombre del fichero.
             std::path::Path::new(value.as_str())
@@ -65,7 +68,7 @@ fn font_picker(
                 ui.set_min_height(250.0);
                 let search = ui.add(
                     egui::TextEdit::singleline(filter)
-                        .hint_text("🔍 Buscar…")
+                        .hint_text(tr("🔍 Buscar…"))
                         .desired_width(f32::INFINITY),
                 );
                 // Al abrir el desplegable se puede escribir directamente.
@@ -73,9 +76,9 @@ fn font_picker(
                     search.request_focus();
                 }
                 if let Some(mono_only) = mono_only.as_deref_mut() {
-                    ui.checkbox(mono_only, "Solo de ancho fijo");
+                    ui.checkbox(mono_only, tr("Solo de ancho fijo"));
                 }
-                if ui.selectable_label(value.is_empty(), BUILTIN).clicked() {
+                if ui.selectable_label(value.is_empty(), tr(BUILTIN)).clicked() {
                     value.clear();
                     changed = true;
                     ui.close();
@@ -84,7 +87,7 @@ fn font_picker(
                 let Some(fonts) = crate::fonts::system_fonts() else {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.weak("Buscando tipos de letra…");
+                        ui.weak(tr("Buscando tipos de letra…"));
                     });
                     ui.ctx()
                         .request_repaint_after(std::time::Duration::from_millis(200));
@@ -106,16 +109,16 @@ fn font_picker(
                     }
                 }
                 if !any {
-                    ui.weak("Ninguno coincide.");
+                    ui.weak(tr("Ninguno coincide."));
                 }
             });
         if ui
             .button("📂")
-            .on_hover_text("Usar un fichero de fuente (.ttf u .otf)")
+            .on_hover_text(tr("Usar un fichero de fuente (.ttf u .otf)"))
             .clicked()
             && let Some(path) = rfd::FileDialog::new()
-                .set_title("Tipo de letra")
-                .add_filter("Fuentes", &["ttf", "otf", "ttc"])
+                .set_title(tr("Tipo de letra"))
+                .add_filter(tr("Fuentes"), &["ttf", "otf", "ttc"])
                 .pick_file()
         {
             *value = path.display().to_string();
@@ -146,9 +149,10 @@ fn measure(
     changed
 }
 
+/// Fila de un color. `label` llega sin traducir: identifica además al campo.
 fn color_row(ui: &mut egui::Ui, label: &str, color: &mut Rgb) -> bool {
     let mut changed = false;
-    ui.label(label);
+    ui.label(tr(label));
     ui.horizontal(|ui| {
         changed |= ui.color_edit_button_srgb(&mut color.0).changed();
         // Mientras se escribe, el texto se guarda aparte: si no, cada tecla
@@ -229,7 +233,10 @@ impl ThemesWindow {
 
     fn save(&mut self, settings: &Settings) {
         if let Err(e) = settings.save(&crate::paths::settings_file()) {
-            self.fail(format!("No se pudieron guardar las preferencias: {e:#}"));
+            self.fail(trf!(
+                "No se pudieron guardar las preferencias: {error}",
+                error = format!("{e:#}")
+            ));
         }
     }
 
@@ -239,8 +246,8 @@ impl ThemesWindow {
             return Some(crate::paths::expand_tilde(&self.path));
         }
         rfd::FileDialog::new()
-            .set_title("Importar tema")
-            .add_filter("Tema de GodRemote (JSON)", &["json"])
+            .set_title(tr("Importar tema"))
+            .add_filter(tr("Tema de GodRemote (JSON)"), &["json"])
             .pick_file()
     }
 
@@ -255,10 +262,10 @@ impl ThemesWindow {
             return Some(path);
         }
         rfd::FileDialog::new()
-            .set_title("Guardar tema")
+            .set_title(tr("Guardar tema"))
             .set_directory(theme::default_export_dir())
             .set_file_name(suggested)
-            .add_filter("Tema de GodRemote (JSON)", &["json"])
+            .add_filter(tr("Tema de GodRemote (JSON)"), &["json"])
             .save_file()
     }
 
@@ -273,7 +280,7 @@ impl ThemesWindow {
             Ok(name) => {
                 self.editing = None;
                 self.activate(ctx, store, settings, &name);
-                self.ok(format!("Tema «{name}» importado y aplicado"));
+                self.ok(trf!("Tema «{name}» importado y aplicado", name));
             }
             Err(e) => self.fail(format!("{e:#}")),
         }
@@ -284,7 +291,7 @@ impl ThemesWindow {
             return;
         };
         match theme::export(theme, &path) {
-            Ok(()) => self.ok(format!("Tema guardado en {}", path.display())),
+            Ok(()) => self.ok(trf!("Tema guardado en {path}", path = path.display())),
             Err(e) => self.fail(format!("{e:#}")),
         }
     }
@@ -319,7 +326,7 @@ impl ThemesWindow {
         }
 
         let mut open = true;
-        egui::Window::new("Temas")
+        egui::Window::new(tr("Temas"))
             .id(egui::Id::unique("themes_window"))
             .open(&mut open)
             .collapsible(false)
@@ -358,13 +365,14 @@ impl ThemesWindow {
             let mut close = false;
             egui::Modal::new(egui::Id::unique("confirm_delete_theme")).show(ctx, |ui| {
                 ui.set_width(380.0);
-                ui.heading("Eliminar tema");
-                ui.label(format!(
-                    "Se eliminará el tema «{name}». No se puede deshacer."
+                ui.heading(tr("Eliminar tema"));
+                ui.label(trf!(
+                    "Se eliminará el tema «{name}». No se puede deshacer.",
+                    name
                 ));
                 ui.horizontal(|ui| {
                     if ui
-                        .button(RichText::new("Eliminar").color(ui.visuals().error_fg_color))
+                        .button(RichText::new(tr("Eliminar")).color(ui.visuals().error_fg_color))
                         .clicked()
                     {
                         match store.delete_user(&name) {
@@ -374,13 +382,13 @@ impl ThemesWindow {
                                 settings.fix_themes(|theme| store.exists(theme));
                                 self.apply_active(ctx, store, settings);
                                 self.save(settings);
-                                self.ok(format!("Tema «{name}» eliminado"));
+                                self.ok(trf!("Tema «{name}» eliminado", name));
                             }
                             Err(e) => self.fail(format!("{e:#}")),
                         }
                         close = true;
                     }
-                    if ui.button("Cancelar").clicked() {
+                    if ui.button(tr("Cancelar")).clicked() {
                         close = true;
                     }
                 });
@@ -411,29 +419,33 @@ impl ThemesWindow {
         let mut changed = ui
             .checkbox(
                 &mut settings.theme_auto,
-                "Seguir al sistema (claro u oscuro)",
+                tr("Seguir al sistema (claro u oscuro)"),
             )
-            .on_hover_text(
+            .on_hover_text(tr(
                 "Usa un tema u otro según el sistema operativo esté en modo claro o en \
                  modo oscuro, y cambia con él",
-            )
+            ))
             .changed();
         if settings.theme_auto {
             ui.weak(match self.system_dark {
-                Some(true) => "El sistema está ahora en modo oscuro.",
-                Some(false) => "El sistema está ahora en modo claro.",
-                None => {
+                Some(true) => tr("El sistema está ahora en modo oscuro."),
+                Some(false) => tr("El sistema está ahora en modo claro."),
+                None => tr(
                     "No se ha podido saber cómo está el sistema: se usa el tema \
-                     elegido en la lista."
-                }
+                     elegido en la lista.",
+                ),
             });
             let names = store.names();
             egui::Grid::new("themes_by_mode")
                 .num_columns(2)
                 .show(ui, |ui| {
                     for (label, salt, slot) in [
-                        ("En claro:", "theme_for_light", &mut settings.theme_light),
-                        ("En oscuro:", "theme_for_dark", &mut settings.theme_dark),
+                        (
+                            tr("En claro:"),
+                            "theme_for_light",
+                            &mut settings.theme_light,
+                        ),
+                        (tr("En oscuro:"), "theme_for_dark", &mut settings.theme_dark),
                     ] {
                         ui.label(label);
                         egui::ComboBox::from_id_salt(salt)
@@ -467,7 +479,7 @@ impl ThemesWindow {
     ) {
         self.follow_system(ui, ctx, store, settings);
         ui.add_space(6.0);
-        ui.strong("Temas disponibles");
+        ui.strong(tr("Temas disponibles"));
         let mut activate = None;
         egui::ScrollArea::vertical()
             .id_salt("theme_list")
@@ -476,7 +488,7 @@ impl ThemesWindow {
             .show(ui, |ui| {
                 for (name, builtin) in store.names() {
                     let label = if builtin {
-                        format!("{name}  ·  integrado")
+                        trf!("{name}  ·  integrado", name)
                     } else {
                         name.clone()
                     };
@@ -495,20 +507,20 @@ impl ThemesWindow {
         let builtin = store.is_builtin(&self.selected);
         ui.horizontal(|ui| {
             if ui
-                .button("Duplicar y editar")
-                .on_hover_text("Crea una copia personalizable del tema seleccionado")
+                .button(tr("Duplicar y editar"))
+                .on_hover_text(tr("Crea una copia personalizable del tema seleccionado"))
                 .clicked()
                 && let Some(base) = store.get(&self.selected)
             {
                 let mut copy = base.clone();
-                copy.name = store.free_name(&format!("{} (mío)", base.name));
+                copy.name = store.free_name(&trf!("{name} (mío)", name = base.name));
                 self.editing = Some(Editing {
                     theme: copy,
                     original: None,
                 });
             }
             if ui
-                .add_enabled(!builtin, egui::Button::new("Editar"))
+                .add_enabled(!builtin, egui::Button::new(tr("Editar")))
                 .clicked()
                 && let Some(theme) = store.get(&self.selected)
             {
@@ -519,7 +531,7 @@ impl ThemesWindow {
             }
             if ui
                 .add_enabled(!builtin, egui::Button::new("🗑"))
-                .on_hover_text("Eliminar el tema seleccionado")
+                .on_hover_text(tr("Eliminar el tema seleccionado"))
                 .clicked()
             {
                 self.confirm_delete = Some(self.selected.clone());
@@ -527,15 +539,17 @@ impl ThemesWindow {
         });
 
         ui.add_space(8.0);
-        ui.strong("Compartir");
+        ui.strong(tr("Compartir"));
         if ui
-            .button("⬇ Descargar tema base")
-            .on_hover_text("Guarda el tema base en un fichero JSON para modificarlo a tu gusto")
+            .button(tr("⬇ Descargar tema base"))
+            .on_hover_text(tr(
+                "Guarda el tema base en un fichero JSON para modificarlo a tu gusto",
+            ))
             .clicked()
         {
             self.export(&Theme::base(), "godremote-tema-base.json");
         }
-        if ui.button("⬇ Exportar el tema seleccionado").clicked()
+        if ui.button(tr("⬇ Exportar el tema seleccionado")).clicked()
             && let Some(theme) = store.get(&self.selected).cloned()
         {
             let file = format!(
@@ -548,8 +562,10 @@ impl ThemesWindow {
             self.export(&theme, &file);
         }
         if ui
-            .button("⬆ Importar un tema…")
-            .on_hover_text("Carga un fichero de tema (también puedes soltarlo sobre la ventana)")
+            .button(tr("⬆ Importar un tema…"))
+            .on_hover_text(tr(
+                "Carga un fichero de tema (también puedes soltarlo sobre la ventana)",
+            ))
             .clicked()
             && let Some(path) = self.import_path()
         {
@@ -557,13 +573,13 @@ impl ThemesWindow {
         }
         ui.add(
             egui::TextEdit::singleline(&mut self.path)
-                .hint_text("Ruta del fichero (opcional)")
+                .hint_text(tr("Ruta del fichero (opcional)"))
                 .desired_width(f32::INFINITY),
         )
-        .on_hover_text(
+        .on_hover_text(tr(
             "Déjalo vacío para elegir con el explorador de archivos; \
              si escribes una ruta se usa esa al importar o exportar",
-        );
+        ));
         for error in &store.load_errors {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
@@ -577,17 +593,17 @@ impl ThemesWindow {
         settings: &mut Settings,
     ) {
         let Some(editing) = &mut self.editing else {
-            ui.strong("Personalizar");
-            ui.label(
+            ui.strong(tr("Personalizar"));
+            ui.label(tr(
                 "Elige un tema de la lista para aplicarlo. Para cambiar colores, tamaños, \
                  separaciones o el fondo del terminal pulsa «Duplicar y editar»: todo se \
                  puede ajustar y los cambios se ven al instante.",
-            );
+            ));
             ui.add_space(6.0);
-            ui.label(
+            ui.label(tr(
                 "También puedes descargar el tema base, modificarlo con cualquier editor \
                  de texto y volver a importarlo.",
-            );
+            ));
             ui.add_space(10.0);
             preview(ui);
             return;
@@ -595,11 +611,13 @@ impl ThemesWindow {
 
         let mut changed = false;
         ui.horizontal(|ui| {
-            ui.strong("Nombre");
+            ui.strong(tr("Nombre"));
             ui.add(egui::TextEdit::singleline(&mut editing.theme.name).desired_width(220.0));
             changed |= ui
-                .checkbox(&mut editing.theme.dark, "Fondo oscuro")
-                .on_hover_text("Ajusta sombras y contrastes para fondos oscuros o claros")
+                .checkbox(&mut editing.theme.dark, tr("Fondo oscuro"))
+                .on_hover_text(tr(
+                    "Ajusta sombras y contrastes para fondos oscuros o claros",
+                ))
                 .changed();
         });
         egui::ScrollArea::vertical()
@@ -607,195 +625,219 @@ impl ThemesWindow {
             .max_height(420.0)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                egui::CollapsingHeader::new("Colores de la interfaz").show(ui, |ui| {
-                    egui::Grid::new("theme_ui").num_columns(2).show(ui, |ui| {
-                        for (label, color) in editing.theme.ui.fields_mut() {
-                            changed |= color_row(ui, label, color);
-                        }
-                    });
-                });
-                egui::CollapsingHeader::new("Colores del terminal").show(ui, |ui| {
-                    egui::Grid::new("theme_term").num_columns(2).show(ui, |ui| {
-                        for (label, color) in editing.theme.terminal.fields_mut() {
-                            changed |= color_row(ui, label, color);
-                        }
-                    });
-                });
-                egui::CollapsingHeader::new("Colores ANSI del terminal").show(ui, |ui| {
-                    egui::Grid::new("theme_ansi").num_columns(2).show(ui, |ui| {
-                        for (label, color) in editing.theme.terminal.ansi.fields_mut() {
-                            changed |= color_row(ui, label, color);
-                        }
-                    });
-                });
-                egui::CollapsingHeader::new("Letra e interlineado").show(ui, |ui| {
-                    egui::Grid::new("theme_font_families")
-                        .num_columns(2)
-                        .show(ui, |ui| {
-                            let f = &mut editing.theme.fonts;
-                            changed |= font_picker(
-                                ui,
-                                "Tipo de letra de la interfaz",
-                                &mut f.ui_family,
-                                &mut self.font_filter,
-                                None,
-                            );
-                            changed |= font_picker(
-                                ui,
-                                "Tipo de letra del terminal",
-                                &mut f.terminal_family,
-                                &mut self.font_filter,
-                                Some(&mut self.mono_only),
-                            );
+                egui::CollapsingHeader::new(tr("Colores de la interfaz"))
+                    .id_salt("theme_ui_colors")
+                    .show(ui, |ui| {
+                        egui::Grid::new("theme_ui").num_columns(2).show(ui, |ui| {
+                            for (label, color) in editing.theme.ui.fields_mut() {
+                                changed |= color_row(ui, label, color);
+                            }
                         });
-                    for warning in theme::font_warnings() {
-                        ui.colored_label(theme::warn_color(), warning);
-                    }
-                    egui::Grid::new("theme_fonts")
-                        .num_columns(2)
-                        .show(ui, |ui| {
-                            let f = &mut editing.theme.fonts;
-                            changed |=
-                                measure(ui, "Letra de la interfaz", &mut f.ui, 8.0..=32.0, " pt");
-                            changed |= measure(ui, "Títulos", &mut f.heading, 8.0..=48.0, " pt");
-                            changed |=
-                                measure(ui, "Texto pequeño", &mut f.small, 6.0..=32.0, " pt");
-                            changed |= measure(ui, "Botones", &mut f.button, 8.0..=32.0, " pt");
-                            changed |= measure(
-                                ui,
-                                "Interlineado de la interfaz",
-                                &mut f.ui_line_spacing,
-                                0.0..=12.0,
-                                " px",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Letra del terminal",
-                                &mut f.terminal,
-                                6.0..=48.0,
-                                " pt",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Interlineado del terminal",
-                                &mut f.terminal_line_height,
-                                0.8..=2.5,
-                                "×",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Separación entre letras del terminal",
-                                &mut f.terminal_letter_spacing,
-                                -1.0..=8.0,
-                                " px",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Barra de información del servidor",
-                                &mut f.server_bar,
-                                7.0..=28.0,
-                                " pt",
-                            );
+                    });
+                egui::CollapsingHeader::new(tr("Colores del terminal"))
+                    .id_salt("theme_terminal_colors")
+                    .show(ui, |ui| {
+                        egui::Grid::new("theme_term").num_columns(2).show(ui, |ui| {
+                            for (label, color) in editing.theme.terminal.fields_mut() {
+                                changed |= color_row(ui, label, color);
+                            }
                         });
-                });
-                egui::CollapsingHeader::new("Separaciones y forma").show(ui, |ui| {
-                    egui::Grid::new("theme_shape")
-                        .num_columns(2)
-                        .show(ui, |ui| {
-                            let f = &mut editing.theme.shape;
-                            changed |= measure(
-                                ui,
-                                "Separación horizontal entre elementos",
-                                &mut f.spacing,
-                                0.0..=30.0,
-                                " px",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Separación vertical entre elementos",
-                                &mut f.spacing_y,
-                                0.0..=30.0,
-                                " px",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Relleno horizontal de los botones",
-                                &mut f.button_padding_x,
-                                0.0..=40.0,
-                                " px",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Relleno vertical de los botones",
-                                &mut f.button_padding_y,
-                                0.0..=24.0,
-                                " px",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Alto mínimo de filas y botones",
-                                &mut f.row_height,
-                                10.0..=48.0,
-                                " px",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Redondeo de esquinas",
-                                &mut f.rounding,
-                                0.0..=16.0,
-                                " px",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Grosor de los bordes",
-                                &mut f.border,
-                                0.0..=4.0,
-                                " px",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Margen interior de las ventanas",
-                                &mut f.window_margin,
-                                0.0..=32.0,
-                                " px",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Margen interior de los menús",
-                                &mut f.menu_margin,
-                                0.0..=32.0,
-                                " px",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Sangría del árbol y las secciones",
-                                &mut f.indent,
-                                4.0..=48.0,
-                                " px",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Ancho de las barras de desplazamiento",
-                                &mut f.scroll_bar,
-                                2.0..=24.0,
-                                " px",
-                            );
-                            changed |= measure(
-                                ui,
-                                "Margen interior del terminal",
-                                &mut f.terminal_padding,
-                                0.0..=48.0,
-                                " px",
-                            );
+                    });
+                egui::CollapsingHeader::new(tr("Colores ANSI del terminal"))
+                    .id_salt("theme_ansi_colors")
+                    .show(ui, |ui| {
+                        egui::Grid::new("theme_ansi").num_columns(2).show(ui, |ui| {
+                            for (label, color) in editing.theme.terminal.ansi.fields_mut() {
+                                changed |= color_row(ui, label, color);
+                            }
                         });
-                });
-                egui::CollapsingHeader::new("Fondo del terminal").show(ui, |ui| {
-                    ui.weak(
-                        "Un texto, un dibujo ASCII o una imagen detrás del texto del terminal. \
+                    });
+                egui::CollapsingHeader::new(tr("Letra e interlineado"))
+                    .id_salt("theme_fonts_section")
+                    .show(ui, |ui| {
+                        egui::Grid::new("theme_font_families")
+                            .num_columns(2)
+                            .show(ui, |ui| {
+                                let f = &mut editing.theme.fonts;
+                                changed |= font_picker(
+                                    ui,
+                                    mark!("Tipo de letra de la interfaz"),
+                                    &mut f.ui_family,
+                                    &mut self.font_filter,
+                                    None,
+                                );
+                                changed |= font_picker(
+                                    ui,
+                                    mark!("Tipo de letra del terminal"),
+                                    &mut f.terminal_family,
+                                    &mut self.font_filter,
+                                    Some(&mut self.mono_only),
+                                );
+                            });
+                        for warning in theme::font_warnings() {
+                            ui.colored_label(theme::warn_color(), warning);
+                        }
+                        egui::Grid::new("theme_fonts")
+                            .num_columns(2)
+                            .show(ui, |ui| {
+                                let f = &mut editing.theme.fonts;
+                                changed |= measure(
+                                    ui,
+                                    tr("Letra de la interfaz"),
+                                    &mut f.ui,
+                                    8.0..=32.0,
+                                    " pt",
+                                );
+                                changed |=
+                                    measure(ui, tr("Títulos"), &mut f.heading, 8.0..=48.0, " pt");
+                                changed |= measure(
+                                    ui,
+                                    tr("Texto pequeño"),
+                                    &mut f.small,
+                                    6.0..=32.0,
+                                    " pt",
+                                );
+                                changed |=
+                                    measure(ui, tr("Botones"), &mut f.button, 8.0..=32.0, " pt");
+                                changed |= measure(
+                                    ui,
+                                    tr("Interlineado de la interfaz"),
+                                    &mut f.ui_line_spacing,
+                                    0.0..=12.0,
+                                    " px",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Letra del terminal"),
+                                    &mut f.terminal,
+                                    6.0..=48.0,
+                                    " pt",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Interlineado del terminal"),
+                                    &mut f.terminal_line_height,
+                                    0.8..=2.5,
+                                    "×",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Separación entre letras del terminal"),
+                                    &mut f.terminal_letter_spacing,
+                                    -1.0..=8.0,
+                                    " px",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Barra de información del servidor"),
+                                    &mut f.server_bar,
+                                    7.0..=28.0,
+                                    " pt",
+                                );
+                            });
+                    });
+                egui::CollapsingHeader::new(tr("Separaciones y forma"))
+                    .id_salt("theme_shape_section")
+                    .show(ui, |ui| {
+                        egui::Grid::new("theme_shape")
+                            .num_columns(2)
+                            .show(ui, |ui| {
+                                let f = &mut editing.theme.shape;
+                                changed |= measure(
+                                    ui,
+                                    tr("Separación horizontal entre elementos"),
+                                    &mut f.spacing,
+                                    0.0..=30.0,
+                                    " px",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Separación vertical entre elementos"),
+                                    &mut f.spacing_y,
+                                    0.0..=30.0,
+                                    " px",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Relleno horizontal de los botones"),
+                                    &mut f.button_padding_x,
+                                    0.0..=40.0,
+                                    " px",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Relleno vertical de los botones"),
+                                    &mut f.button_padding_y,
+                                    0.0..=24.0,
+                                    " px",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Alto mínimo de filas y botones"),
+                                    &mut f.row_height,
+                                    10.0..=48.0,
+                                    " px",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Redondeo de esquinas"),
+                                    &mut f.rounding,
+                                    0.0..=16.0,
+                                    " px",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Grosor de los bordes"),
+                                    &mut f.border,
+                                    0.0..=4.0,
+                                    " px",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Margen interior de las ventanas"),
+                                    &mut f.window_margin,
+                                    0.0..=32.0,
+                                    " px",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Margen interior de los menús"),
+                                    &mut f.menu_margin,
+                                    0.0..=32.0,
+                                    " px",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Sangría del árbol y las secciones"),
+                                    &mut f.indent,
+                                    4.0..=48.0,
+                                    " px",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Ancho de las barras de desplazamiento"),
+                                    &mut f.scroll_bar,
+                                    2.0..=24.0,
+                                    " px",
+                                );
+                                changed |= measure(
+                                    ui,
+                                    tr("Margen interior del terminal"),
+                                    &mut f.terminal_padding,
+                                    0.0..=48.0,
+                                    " px",
+                                );
+                            });
+                    });
+                egui::CollapsingHeader::new(tr("Fondo del terminal"))
+                    .id_salt("theme_backdrop_section")
+                    .show(ui, |ui| {
+                        ui.weak(tr(
+                            "Un texto, un dibujo ASCII o una imagen detrás del texto del terminal. \
                          Cada equipo puede tener además el suyo propio.",
-                    );
-                    changed |= self.backdrop.show(ui, &mut editing.theme.backdrop, "theme");
-                });
+                        ));
+                        changed |= self.backdrop.show(ui, &mut editing.theme.backdrop, "theme");
+                    });
             });
         if changed {
             // Vista previa en vivo sobre toda la aplicación.
@@ -806,8 +848,8 @@ impl ThemesWindow {
         let mut save = false;
         let mut cancel = false;
         ui.horizontal(|ui| {
-            save = ui.button("Guardar tema").clicked();
-            cancel = ui.button("Descartar cambios").clicked();
+            save = ui.button(tr("Guardar tema")).clicked();
+            cancel = ui.button(tr("Descartar cambios")).clicked();
         });
         if save {
             let theme = editing.theme.clone();
@@ -823,7 +865,7 @@ impl ThemesWindow {
                         original: Some(name.clone()),
                     });
                     self.activate(ctx, store, settings, &name);
-                    self.ok(format!("Tema «{name}» guardado"));
+                    self.ok(trf!("Tema «{name}» guardado", name));
                 }
                 Err(e) => self.fail(format!("{e:#}")),
             }
@@ -836,18 +878,18 @@ impl ThemesWindow {
 
 /// Muestra de cómo queda el tema activo.
 fn preview(ui: &mut egui::Ui) {
-    ui.strong("Vista previa");
+    ui.strong(tr("Vista previa"));
     ui.horizontal(|ui| {
-        let _ = ui.button("Botón");
-        let _ = ui.selectable_label(true, "Seleccionado");
-        ui.label("Texto");
-        ui.weak("tenue");
-        ui.hyperlink_to("enlace", "https://example.org");
+        let _ = ui.button(tr("Botón"));
+        let _ = ui.selectable_label(true, tr("Seleccionado"));
+        ui.label(tr("Texto"));
+        ui.weak(tr("tenue"));
+        ui.hyperlink_to(tr("enlace"), "https://example.org");
     });
     ui.horizontal(|ui| {
-        ui.colored_label(theme::ok_color(), "Correcto");
-        ui.colored_label(theme::warn_color(), "Aviso");
-        ui.colored_label(ui.visuals().error_fg_color, "Error");
+        ui.colored_label(theme::ok_color(), tr("Correcto"));
+        ui.colored_label(theme::warn_color(), tr("Aviso"));
+        ui.colored_label(ui.visuals().error_fg_color, tr("Error"));
     });
     // Muestra del terminal con la paleta ANSI.
     let palette = theme::terminal_palette();
@@ -858,7 +900,7 @@ fn preview(ui: &mut egui::Ui) {
     painter.text(
         rect.min + egui::vec2(8.0, 6.0),
         egui::Align2::LEFT_TOP,
-        "usuario@equipo:~$ ls --color",
+        tr("usuario@equipo:~$ ls --color"),
         font.clone(),
         palette.foreground,
     );
@@ -880,7 +922,7 @@ fn preview(ui: &mut egui::Ui) {
     painter.text(
         rect.min + egui::vec2(244.0, 30.0),
         egui::Align2::LEFT_TOP,
-        "selección",
+        tr("selección"),
         font,
         palette.selection_fg,
     );

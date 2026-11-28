@@ -5,9 +5,11 @@ use std::collections::BTreeSet;
 
 use uuid::Uuid;
 
+use crate::i18n::tr;
 use crate::model::{Node, Tree};
 use crate::theme::{error_color, ok_color, warn_color};
 use crate::vault::Vault;
+use crate::{mark, trf};
 
 #[derive(Default)]
 pub struct VaultWindow {
@@ -31,16 +33,17 @@ struct Entry {
     owner: String,
     /// El equipo o la carpeta ya no existe.
     orphan: bool,
+    /// Qué es, sin traducir (también ordena la lista): se traduce al pintar.
     kind: &'static str,
 }
 
 fn describe(key: &str, tree: &Tree, paths: &[(Uuid, String)]) -> Entry {
     let (owner_id, what) = key.split_once('/').unwrap_or((key, ""));
     let kind = match what {
-        "password" => "Contraseña",
-        "passphrase" => "Passphrase de la clave",
-        "totp" => "Secreto TOTP",
-        _ => "Secreto",
+        "password" => mark!("Contraseña"),
+        "passphrase" => mark!("Passphrase de la clave"),
+        "totp" => mark!("Secreto TOTP"),
+        _ => mark!("Secreto"),
     };
     let (owner, orphan) = match Uuid::parse_str(owner_id).ok() {
         Some(id) => match tree.find(id) {
@@ -52,13 +55,13 @@ fn describe(key: &str, tree: &Tree, paths: &[(Uuid, String)]) -> Entry {
                     .unwrap_or_else(|| id.to_string()),
                 false,
             ),
-            Some(Node::Folder(folder)) => (format!("Carpeta «{}»", folder.name), false),
-            None => ("(equipo o carpeta eliminados)".to_string(), true),
+            Some(Node::Folder(folder)) => (trf!("Carpeta «{name}»", name = folder.name), false),
+            None => (tr("(equipo o carpeta eliminados)").to_string(), true),
         },
         // Secretos que no son de un equipo (el proxy de salida…).
         None => (
             match owner_id {
-                "proxy" => "Proxy de salida".to_string(),
+                "proxy" => tr("Proxy de salida").to_string(),
                 other => other.to_string(),
             },
             false,
@@ -84,7 +87,7 @@ impl VaultWindow {
         entries.sort_by(|a, b| (a.orphan, &a.owner, a.kind).cmp(&(b.orphan, &b.owner, b.kind)));
         let orphans = entries.iter().filter(|e| e.orphan).count();
         let mut remove: Vec<String> = vec![];
-        egui::Window::new("Baúl: lo guardado")
+        egui::Window::new(tr("Baúl: lo guardado"))
             .id(egui::Id::unique("vault_window"))
             .open(&mut open)
             .collapsible(false)
@@ -94,17 +97,17 @@ impl VaultWindow {
                 ui.set_width(640.0);
                 ui.horizontal(|ui| {
                     ui.strong(match entries.len() {
-                        0 => "El baúl está vacío".to_string(),
-                        1 => "1 secreto guardado".to_string(),
-                        n => format!("{n} secretos guardados"),
+                        0 => tr("El baúl está vacío").to_string(),
+                        1 => tr("1 secreto guardado").to_string(),
+                        n => trf!("{n} secretos guardados", n),
                     });
                     if self.verified {
-                        ui.colored_label(ok_color(), "Se pueden ver y copiar");
+                        ui.colored_label(ok_color(), tr("Se pueden ver y copiar"));
                     } else if !entries.is_empty()
                         && !self.asking
                         && ui
-                            .button("Ver o copiar las contraseñas…")
-                            .on_hover_text("Hay que repetir la contraseña maestra")
+                            .button(tr("Ver o copiar las contraseñas…"))
+                            .on_hover_text(tr("Hay que repetir la contraseña maestra"))
                             .clicked()
                     {
                         self.asking = true;
@@ -113,7 +116,7 @@ impl VaultWindow {
                 });
                 if self.asking {
                     ui.horizontal(|ui| {
-                        ui.label("Contraseña maestra");
+                        ui.label(tr("Contraseña maestra"));
                         let field = ui.add(
                             egui::TextEdit::singleline(&mut self.master)
                                 .password(true)
@@ -125,7 +128,7 @@ impl VaultWindow {
                         }
                         let enter =
                             field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if ui.button("Comprobar").clicked() || enter {
+                        if ui.button(tr("Comprobar")).clicked() || enter {
                             // La misma comprobación que al desbloquear.
                             let ok =
                                 Vault::unlock(&crate::paths::vault_file(), &self.master).is_ok();
@@ -133,9 +136,9 @@ impl VaultWindow {
                             self.asking = false;
                             self.verified = ok;
                             self.message = (!ok)
-                                .then(|| ("La contraseña maestra no es correcta".into(), true));
+                                .then(|| (tr("La contraseña maestra no es correcta").into(), true));
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button(tr("Cancelar")).clicked() {
                             self.master.clear();
                             self.asking = false;
                         }
@@ -157,7 +160,7 @@ impl VaultWindow {
                                     } else {
                                         ui.label(&entry.owner);
                                     }
-                                    ui.weak(entry.kind);
+                                    ui.weak(tr(entry.kind));
                                     let shown = self.revealed.contains(&entry.key);
                                     match (shown, vault.get(&entry.key)) {
                                         (true, Some(value)) => {
@@ -171,7 +174,8 @@ impl VaultWindow {
                                     }
                                     ui.horizontal(|ui| {
                                         ui.add_enabled_ui(self.verified, |ui| {
-                                            let label = if shown { "Ocultar" } else { "Mostrar" };
+                                            let label =
+                                                if shown { tr("Ocultar") } else { tr("Mostrar") };
                                             if ui.small_button(label).clicked() {
                                                 if shown {
                                                     self.revealed.remove(&entry.key);
@@ -179,31 +183,29 @@ impl VaultWindow {
                                                     self.revealed.insert(entry.key.clone());
                                                 }
                                             }
-                                            if ui.small_button("Copiar").clicked()
+                                            if ui.small_button(tr("Copiar")).clicked()
                                                 && let Some(value) = vault.get(&entry.key)
                                             {
                                                 ui.ctx().copy_text(value.to_string());
-                                                self.message = Some((
-                                                    "Copiado al portapapeles: bórralo de él \
-                                                     cuando termines"
-                                                        .into(),
-                                                    false,
-                                                ));
+                                                let message =
+                                                    tr("Copiado al portapapeles: bórralo de él \
+                                                     cuando termines");
+                                                self.message = Some((message.into(), false));
                                             }
                                         });
                                         if self.deleting.as_deref() == Some(&entry.key) {
-                                            if ui.small_button("Sí, borrar").clicked() {
+                                            if ui.small_button(tr("Sí, borrar")).clicked() {
                                                 remove.push(entry.key.clone());
                                                 self.deleting = None;
                                             }
-                                            if ui.small_button("No").clicked() {
+                                            if ui.small_button(tr("No")).clicked() {
                                                 self.deleting = None;
                                             }
                                         } else if ui
                                             .small_button("🗑")
-                                            .on_hover_text(
+                                            .on_hover_text(tr(
                                                 "Borrarlo del baúl: se volverá a pedir al conectar",
-                                            )
+                                            ))
                                             .clicked()
                                         {
                                             self.deleting = Some(entry.key.clone());
@@ -218,12 +220,13 @@ impl VaultWindow {
                     ui.horizontal(|ui| {
                         ui.colored_label(
                             warn_color(),
-                            format!(
+                            trf!(
                                 "{orphans} de equipos o carpetas que ya no existen (por ejemplo, \
-                                 de otra configuración)"
+                                 de otra configuración)",
+                                orphans
                             ),
                         );
-                        if ui.button("Borrarlos").clicked() {
+                        if ui.button(tr("Borrarlos")).clicked() {
                             remove
                                 .extend(entries.iter().filter(|e| e.orphan).map(|e| e.key.clone()));
                         }
@@ -237,8 +240,11 @@ impl VaultWindow {
         for key in remove {
             self.revealed.remove(&key);
             match vault.remove(&key) {
-                Ok(()) => self.message = Some(("Borrado del baúl".into(), false)),
-                Err(e) => self.message = Some((format!("No se pudo borrar: {e:#}"), true)),
+                Ok(()) => self.message = Some((tr("Borrado del baúl").into(), false)),
+                Err(e) => {
+                    let message = trf!("No se pudo borrar: {error}", error = format!("{e:#}"));
+                    self.message = Some((message, true));
+                }
             }
         }
         open

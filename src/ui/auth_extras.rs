@@ -5,9 +5,11 @@ use std::time::{Duration, Instant};
 
 use egui::RichText;
 
+use crate::i18n::tr;
 use crate::keys::{self, CertInfo, CertValidity};
 use crate::theme::{error_color, ok_color, warn_color};
 use crate::totp::Totp;
+use crate::trf;
 use crate::vault::Vault;
 
 /// Texto y color con los que se resume la validez de un certificado.
@@ -24,26 +26,37 @@ pub fn validity_label(info: &CertInfo) -> (String, egui::Color32) {
 fn validity_sentence(info: &CertInfo) -> (String, egui::Color32) {
     let text = info.validity_text();
     match info.validity() {
-        CertValidity::Valid => (format!("Certificado {text}"), ok_color()),
-        CertValidity::NotYetValid => (format!("⚠ El certificado {text}"), warn_color()),
-        CertValidity::Expired => (format!("⚠ El certificado {text}"), error_color()),
+        CertValidity::Valid => (trf!("Certificado {validity}", validity = text), ok_color()),
+        CertValidity::NotYetValid => (
+            trf!("⚠ El certificado {validity}", validity = text),
+            warn_color(),
+        ),
+        CertValidity::Expired => (
+            trf!("⚠ El certificado {validity}", validity = text),
+            error_color(),
+        ),
     }
 }
 
 /// Todos los datos de un certificado, uno por línea (para el texto de ayuda).
 pub fn cert_details(info: &CertInfo) -> String {
-    format!(
-        "Fichero: {}\nIdentidad: {}\nNúmero de serie: {}\nTipo: {}\nPrincipales: {}\n\
-         Validez: {}\nAutoridad (CA): {} {}\nClave certificada: {}",
-        info.path.display(),
-        info.key_id,
-        info.serial,
-        if info.host { "de host" } else { "de usuario" },
-        info.principals_text(),
-        info.validity_text(),
-        info.ca_algorithm,
-        info.ca_fingerprint,
-        info.key_fingerprint,
+    trf!(
+        "Fichero: {file}\nIdentidad: {identity}\nNúmero de serie: {serial}\nTipo: {kind}\n\
+         Principales: {principals}\nValidez: {validity}\n\
+         Autoridad (CA): {ca_algorithm} {ca_fingerprint}\nClave certificada: {key}",
+        file = info.path.display(),
+        identity = info.key_id,
+        serial = info.serial,
+        kind = if info.host {
+            tr("de host")
+        } else {
+            tr("de usuario")
+        },
+        principals = info.principals_text(),
+        validity = info.validity_text(),
+        ca_algorithm = info.ca_algorithm,
+        ca_fingerprint = info.ca_fingerprint,
+        key = info.key_fingerprint,
     )
 }
 
@@ -52,11 +65,12 @@ pub fn cert_details(info: &CertInfo) -> String {
 pub fn algorithm_label(ui: &mut egui::Ui, algorithm: &str, security_key: bool) {
     match keys::security_key_label(algorithm).filter(|_| security_key) {
         Some(short) => {
-            ui.label(RichText::new("🔐 llave de seguridad").color(ok_color()))
-                .on_hover_text(format!(
+            ui.label(RichText::new(tr("🔐 llave de seguridad")).color(ok_color()))
+                .on_hover_text(trf!(
                     "Clave de una llave de seguridad FIDO2 ({algorithm}). Quien firma es la \
                      propia llave: tiene que estar conectada y cargada en el agente SSH \
-                     (ssh-add), y habrá que tocarla al conectar"
+                     (ssh-add), y habrá que tocarla al conectar",
+                    algorithm
                 ));
             ui.label(short);
         }
@@ -127,10 +141,10 @@ impl CertField {
         // Si la clave se puede leer, se comprueba que el certificado es suyo.
         let key_fingerprint = key_info.map(|k| k.fingerprint.as_str());
         if key_fingerprint.is_some_and(|f| !f.is_empty() && f != info.key_fingerprint) {
-            return CertState::Problem("Ese certificado no corresponde a esta clave".into());
+            return CertState::Problem(tr("Ese certificado no corresponde a esta clave").into());
         }
         if info.host {
-            return CertState::Problem("Es un certificado de host, no de usuario".into());
+            return CertState::Problem(tr("Es un certificado de host, no de usuario").into());
         }
         CertState::Found(info)
     }
@@ -141,19 +155,19 @@ impl CertField {
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(cert_path)
-                    .hint_text("certificado: <clave>-cert.pub si lo hay")
+                    .hint_text(tr("certificado: <clave>-cert.pub si lo hay"))
                     .desired_width(width - 44.0),
             )
-            .on_hover_text(
+            .on_hover_text(tr(
                 "Certificado OpenSSH de la clave, firmado por una autoridad en la que confía \
                  el servidor. Vacío, se usa el fichero «<clave>-cert.pub» si existe",
-            );
+            ));
             if ui
                 .button("📂")
-                .on_hover_text("Elegir el fichero del certificado")
+                .on_hover_text(tr("Elegir el fichero del certificado"))
                 .clicked()
                 && let Some(path) = rfd::FileDialog::new()
-                    .set_title("Certificado OpenSSH (…-cert.pub)")
+                    .set_title(tr("Certificado OpenSSH (…-cert.pub)"))
                     .pick_file()
             {
                 *cert_path = path.display().to_string();
@@ -163,10 +177,10 @@ impl CertField {
         if self.security_key {
             ui.scope(|ui| {
                 ui.set_max_width(width);
-                ui.weak(
+                ui.weak(tr(
                     "🔐 Llave de seguridad: firma la propia llave a través del agente SSH, \
                      donde tiene que estar cargada (ssh-add).",
-                );
+                ));
             });
         }
         match &self.state {
@@ -180,10 +194,10 @@ impl CertField {
                     ui.set_max_width(width);
                     ui.add(
                         egui::Label::new(
-                            RichText::new(format!(
-                                "📜 Certificado «{}» para {}",
-                                info.key_id,
-                                info.principals_text()
+                            RichText::new(trf!(
+                                "📜 Certificado «{id}» para {principals}",
+                                id = info.key_id,
+                                principals = info.principals_text()
                             ))
                             .weak(),
                         )
@@ -238,8 +252,8 @@ fn code_line(ui: &mut egui::Ui, label: &str, totp: &Totp) {
             text.weak()
         });
         if ui
-            .small_button("Copiar")
-            .on_hover_text("Copia el código al portapapeles")
+            .small_button(tr("Copiar"))
+            .on_hover_text(tr("Copia el código al portapapeles"))
             .clicked()
         {
             ui.ctx().copy_text(code);
@@ -265,9 +279,9 @@ impl TotpField {
                 .and_then(|uri| Totp::parse(uri).ok());
             let keeps_stored = stored.is_some() && !self.forget;
             let hint = if keeps_stored {
-                "guardado en el baúl (escribe para cambiarlo)"
+                tr("guardado en el baúl (escribe para cambiarlo)")
             } else {
-                "secreto TOTP: base32 u otpauth://… (opcional)"
+                tr("secreto TOTP: base32 u otpauth://… (opcional)")
             };
             ui.add(
                 egui::TextEdit::singleline(&mut self.input)
@@ -275,11 +289,11 @@ impl TotpField {
                     .hint_text(hint)
                     .desired_width(width),
             )
-            .on_hover_text(
+            .on_hover_text(tr(
                 "El secreto que da el servidor al activar la verificación en dos pasos: el \
                  texto que acompaña al código QR, o la dirección otpauth:// que este contiene. \
                  Se guarda cifrado en el baúl, nunca en claro",
-            );
+            ));
             let typed = (!self.input.trim().is_empty()).then(|| Totp::parse(&self.input));
             let valid = matches!(typed, Some(Ok(_)));
             // Al escribir un secreto válido se activa el relleno automático
@@ -293,27 +307,29 @@ impl TotpField {
                     ui.colored_label(error_color(), format!("{e:#}"));
                 }
                 Some(Ok(totp)) => {
-                    code_line(ui, "Código actual:", totp);
+                    code_line(ui, tr("Código actual:"), totp);
                     ui.weak(totp.describe());
                 }
                 None => {
                     if let Some(totp) = stored.as_ref().filter(|_| keeps_stored) {
-                        code_line(ui, "Código actual:", totp);
+                        code_line(ui, tr("Código actual:"), totp);
                     }
                 }
             }
             if vault.is_none() {
-                ui.weak("Baúl bloqueado: el secreto TOTP no se puede guardar ni usar.");
+                ui.weak(tr(
+                    "Baúl bloqueado: el secreto TOTP no se puede guardar ni usar.",
+                ));
             } else if valid || keeps_stored {
-                ui.checkbox(autofill, "Rellenar el código solo al conectar")
-                    .on_hover_text(
+                ui.checkbox(autofill, tr("Rellenar el código solo al conectar"))
+                    .on_hover_text(tr(
                         "Cuando el servidor pida un código de verificación (por \
                          teclado-interactivo), se contesta con el de este secreto. Con el baúl \
                          bloqueado, o si el servidor no acepta el código, se pregunta como siempre",
-                    );
+                    ));
             }
             if stored.is_some() {
-                ui.checkbox(&mut self.forget, "Olvidar el secreto TOTP guardado");
+                ui.checkbox(&mut self.forget, tr("Olvidar el secreto TOTP guardado"));
             }
         });
     }
@@ -327,7 +343,12 @@ impl TotpField {
         mut vault: Option<&mut Vault>,
     ) -> Result<(), String> {
         let key = session.totp_key();
-        let failed = |e: anyhow::Error| format!("No se pudo actualizar el baúl: {e:#}");
+        let failed = |e: anyhow::Error| {
+            trf!(
+                "No se pudo actualizar el baúl: {error}",
+                error = format!("{e:#}")
+            )
+        };
         if !session.protocol.is_ssh() {
             // El segundo factor solo existe en las conexiones SSH.
             session.totp_autofill = false;
@@ -339,9 +360,10 @@ impl TotpField {
         if !self.input.trim().is_empty() {
             let totp = Totp::parse(&self.input).map_err(|e| format!("{e:#}"))?;
             let Some(vault) = vault.as_deref_mut() else {
-                return Err(
-                    "Desbloquea el baúl para guardar el secreto TOTP: no se guarda en claro".into(),
-                );
+                return Err(tr(
+                    "Desbloquea el baúl para guardar el secreto TOTP: no se guarda en claro",
+                )
+                .into());
             };
             vault.set(&key, &totp.to_uri()).map_err(failed)?;
             self.input.clear();
@@ -367,23 +389,23 @@ pub fn agent_choice_ui(ui: &mut egui::Ui, choice: &mut crate::agent::AgentChoice
         return;
     }
     ui.horizontal(|ui| {
-        ui.label("Agente SSH");
+        ui.label(tr("Agente SSH"));
         egui::ComboBox::from_id_salt("agent_choice")
-            .selected_text(choice.label())
+            .selected_text(tr(choice.label()))
             .width(290.0)
             .show_ui(ui, |ui| {
                 for option in crate::agent::AgentChoice::ALL {
-                    ui.selectable_value(choice, option, option.label());
+                    ui.selectable_value(choice, option, tr(option.label()));
                 }
             });
     })
     .response
-    .on_hover_text(
+    .on_hover_text(tr(
         "Con qué agente se autentican los equipos con «Agente SSH» y cuál se reenvía con \
          «Reenviar el agente SSH»: el servicio ssh-agent de Windows (OpenSSH) o Pageant, el de \
          PuTTY. En automático se usa el de OpenSSH y, si no está en marcha o no tiene claves, \
          Pageant",
-    );
+    ));
 }
 
 #[cfg(test)]

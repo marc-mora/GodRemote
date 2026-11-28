@@ -4,9 +4,11 @@
 use std::path::PathBuf;
 
 use crate::backup::{self, Backup};
+use crate::i18n::tr;
 use crate::import::{self, Source};
 use crate::model::Folder;
 use crate::theme;
+use crate::trf;
 
 /// Lo que la ventana pide a la aplicación.
 pub enum TransferRequest {
@@ -64,9 +66,9 @@ impl TransferWindow {
                 return Some(config);
             }
         }
-        let mut dialog = rfd::FileDialog::new().set_title("Importar equipos");
+        let mut dialog = rfd::FileDialog::new().set_title(tr("Importar equipos"));
         if !self.source.extensions().is_empty() {
-            dialog = dialog.add_filter(self.source.label(), self.source.extensions());
+            dialog = dialog.add_filter(tr(self.source.label()), self.source.extensions());
         }
         dialog.pick_file()
     }
@@ -76,10 +78,11 @@ impl TransferWindow {
             Ok(imported) => {
                 let count = imported.count();
                 self.warnings = imported.warnings.clone();
-                let folder = imported.into_folder(self.source.folder_name());
-                self.ok(format!(
-                    "{count} equipo(s) importados en la carpeta «{}»",
-                    folder.name
+                let folder = imported.into_folder(tr(self.source.folder_name()));
+                self.ok(trf!(
+                    "{count} equipo(s) importados en la carpeta «{folder}»",
+                    count,
+                    folder = folder.name
                 ));
                 TransferRequest::Imported(Box::new(folder))
             }
@@ -95,7 +98,7 @@ impl TransferWindow {
     pub fn show(&mut self, ctx: &egui::Context) -> (bool, TransferRequest) {
         let mut open = true;
         let mut request = TransferRequest::None;
-        egui::Window::new("Importar y copias de seguridad")
+        egui::Window::new(tr("Importar y copias de seguridad"))
             .id(egui::Id::unique("transfer_window"))
             .open(&mut open)
             .collapsible(false)
@@ -103,21 +106,21 @@ impl TransferWindow {
             .default_pos([300.0, 70.0])
             .show(ctx, |ui| {
                 ui.set_width(540.0);
-                ui.strong("Importar equipos de otra herramienta");
+                ui.strong(tr("Importar equipos de otra herramienta"));
                 for source in Source::ALL {
-                    ui.radio_value(&mut self.source, source, source.label());
+                    ui.radio_value(&mut self.source, source, tr(source.label()));
                 }
                 ui.horizontal(|ui| {
                     let hint = match self.source {
-                        Source::OpenSsh => "vacío = ~/.ssh/config",
-                        _ => "ruta del fichero (vacío = elegirlo)",
+                        Source::OpenSsh => tr("vacío = ~/.ssh/config"),
+                        _ => tr("ruta del fichero (vacío = elegirlo)"),
                     };
                     ui.add(
                         egui::TextEdit::singleline(&mut self.import_path)
                             .hint_text(hint)
                             .desired_width(330.0),
                     );
-                    if ui.button("Importar").clicked()
+                    if ui.button(tr("Importar")).clicked()
                         && let Some(path) = self.pick_import()
                     {
                         request = self.finish_import(import::import_file(self.source, &path));
@@ -125,53 +128,55 @@ impl TransferWindow {
                     if cfg!(windows)
                         && self.source == Source::Putty
                         && ui
-                            .button("Las de este equipo")
-                            .on_hover_text("Lee las sesiones de PuTTY guardadas en este Windows")
+                            .button(tr("Las de este equipo"))
+                            .on_hover_text(tr(
+                                "Lee las sesiones de PuTTY guardadas en este Windows",
+                            ))
                             .clicked()
                     {
                         request = self.finish_import(import::putty_from_registry());
                     }
                 });
                 ui.weak(match self.source {
-                    Source::OpenSsh => {
+                    Source::OpenSsh => tr(
                         "Se crea un equipo por cada «Host» con su HostName, User, Port, \
-                         IdentityFile y ProxyJump (como saltos)."
-                    }
-                    Source::Putty => {
+                         IdentityFile y ProxyJump (como saltos).",
+                    ),
+                    Source::Putty => tr(
                         "En PuTTY las sesiones están en el registro de Windows: expórtalas con \
-                         «reg export HKCU\\Software\\SimonTatham\\PuTTY\\Sessions putty.reg»."
-                    }
-                    Source::MobaXterm => {
-                        "En MobaXterm: clic derecho sobre «User sessions» → «Export all \
+                         «reg export HKCU\\Software\\SimonTatham\\PuTTY\\Sessions putty.reg».",
+                    ),
+                    Source::MobaXterm => tr(
+                        "En MobaXterm: clic derecho sobre «User sessions» ➡ «Export all \
                          sessions to file». Se importan SSH, SFTP, Telnet, RDP y VNC, con sus \
-                         carpetas."
-                    }
+                         carpetas.",
+                    ),
                 });
-                ui.weak("Las contraseñas no se importan: se piden al conectar.");
+                ui.weak(tr("Las contraseñas no se importan: se piden al conectar."));
 
                 ui.separator();
-                ui.strong("Copia de seguridad");
-                ui.weak(
+                ui.strong(tr("Copia de seguridad"));
+                ui.weak(tr(
                     "Un solo fichero con los equipos, el baúl (cifrado, tal cual), los ajustes, \
                      los snippets y los temas.",
-                );
+                ));
                 ui.checkbox(
                     &mut self.include_keys,
-                    "Incluir las claves privadas guardadas en la carpeta de GodRemote",
+                    tr("Incluir las claves privadas guardadas en la carpeta de GodRemote"),
                 )
-                .on_hover_text(
+                .on_hover_text(tr(
                     "Las que generaste o importaste desde «Claves». Las de ~/.ssh no se copian",
-                );
+                ));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.backup_path)
-                        .hint_text("ruta del fichero (vacío = elegirlo)")
+                        .hint_text(tr("ruta del fichero (vacío = elegirlo)"))
                         .desired_width(f32::INFINITY),
                 );
                 ui.horizontal(|ui| {
-                    if ui.button("⬇ Guardar copia…").clicked() {
+                    if ui.button(tr("⬇ Guardar copia…")).clicked() {
                         self.save_backup();
                     }
-                    if ui.button("⬆ Restaurar copia…").clicked() {
+                    if ui.button(tr("⬆ Restaurar copia…")).clicked() {
                         self.load_backup();
                     }
                 });
@@ -202,22 +207,22 @@ impl TransferWindow {
             let mut cancel = false;
             egui::Modal::new(egui::Id::unique("confirm_restore")).show(ctx, |ui| {
                 ui.set_width(460.0);
-                ui.heading("Restaurar copia de seguridad");
+                ui.heading(tr("Restaurar copia de seguridad"));
                 ui.label(backup.summary());
-                ui.label(
+                ui.label(tr(
                     "Se sustituirá la configuración actual por la de la copia. Antes se guarda \
                      la actual en la carpeta de GodRemote, por si hay que volver atrás. Las \
                      pestañas abiertas siguen como están.",
-                );
+                ));
                 if backup.has_keys() {
-                    ui.weak("La copia incluye claves privadas.");
+                    ui.weak(tr("La copia incluye claves privadas."));
                 }
                 ui.weak(path.display().to_string());
                 ui.horizontal(|ui| {
-                    if ui.button("Restaurar").clicked() {
+                    if ui.button(tr("Restaurar")).clicked() {
                         restore = true;
                     }
-                    if ui.button("Cancelar").clicked() {
+                    if ui.button(tr("Cancelar")).clicked() {
                         cancel = true;
                     }
                 });
@@ -225,10 +230,11 @@ impl TransferWindow {
             if restore && let Some((backup, _)) = self.confirm.take() {
                 match restore_with_safety_copy(&backup) {
                     Ok((written, safety)) => {
-                        self.ok(format!(
+                        self.ok(trf!(
                             "Copia restaurada ({written} ficheros). La configuración anterior \
-                             está en {}",
-                            safety.display()
+                             está en {path}",
+                            written,
+                            path = safety.display()
                         ));
                         request = TransferRequest::Restored;
                     }
@@ -244,10 +250,10 @@ impl TransferWindow {
     fn save_backup(&mut self) {
         let path = if self.backup_path.trim().is_empty() {
             rfd::FileDialog::new()
-                .set_title("Guardar copia de seguridad")
+                .set_title(tr("Guardar copia de seguridad"))
                 .set_directory(theme::default_export_dir())
                 .set_file_name(backup::suggested_name())
-                .add_filter("Copia de GodRemote (JSON)", &["json"])
+                .add_filter(tr("Copia de GodRemote (JSON)"), &["json"])
                 .save_file()
         } else {
             let mut path = crate::paths::expand_tilde(&self.backup_path);
@@ -263,10 +269,10 @@ impl TransferWindow {
             .and_then(|backup| backup.write(&path).map(|()| backup));
         self.warnings.clear();
         match result {
-            Ok(backup) => self.ok(format!(
-                "{} — guardada en {}",
-                backup.summary(),
-                path.display()
+            Ok(backup) => self.ok(trf!(
+                "{summary} — guardada en {path}",
+                summary = backup.summary(),
+                path = path.display()
             )),
             Err(e) => self.fail(format!("{e:#}")),
         }
@@ -275,8 +281,8 @@ impl TransferWindow {
     fn load_backup(&mut self) {
         let path = if self.backup_path.trim().is_empty() {
             rfd::FileDialog::new()
-                .set_title("Restaurar copia de seguridad")
-                .add_filter("Copia de GodRemote (JSON)", &["json"])
+                .set_title(tr("Restaurar copia de seguridad"))
+                .add_filter(tr("Copia de GodRemote (JSON)"), &["json"])
                 .pick_file()
         } else {
             Some(crate::paths::expand_tilde(&self.backup_path))

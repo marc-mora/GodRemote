@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 use egui::RichText;
 
 use super::util::{format_size, format_time};
+use crate::i18n::tr;
 use crate::sftp::{
     Conflict, ConflictAnswer, ConflictChoice, ConflictMemory, OnConflict, RemoteEntry, SftpClient,
     SftpCmd, SftpEvent, SyncItem, SyncMode, SyncOp, SyncScan, SyncState, SyncSummary,
     TransferStats, join_remote, mode_octal, mode_text, parent_remote, parse_mode, plan_sync,
 };
+use crate::{mark, trf};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SftpState {
@@ -375,23 +377,23 @@ fn file_list(
                         }
                     };
                     if remote {
-                        item(ui, "⬅ Descargar", MenuCmd::Transfer);
+                        item(ui, tr("⬅ Descargar"), MenuCmd::Transfer);
                         if !row.is_dir {
-                            item(ui, "📝 Editar", MenuCmd::Edit);
+                            item(ui, tr("📝 Editar"), MenuCmd::Edit);
                         }
-                        item(ui, "✏ Renombrar…", MenuCmd::Rename);
-                        item(ui, "🔒 Permisos…", MenuCmd::Permissions);
+                        item(ui, tr("✏ Renombrar…"), MenuCmd::Rename);
+                        item(ui, tr("🔒 Permisos…"), MenuCmd::Permissions);
                         ui.separator();
-                        item(ui, "🗑 Eliminar…", MenuCmd::Delete);
+                        item(ui, tr("🗑 Eliminar…"), MenuCmd::Delete);
                     } else {
-                        item(ui, "Subir ➡", MenuCmd::Transfer);
+                        item(ui, tr("Subir ➡"), MenuCmd::Transfer);
                     }
                 });
                 if let Some(mode) = row.mode {
-                    response.on_hover_text(format!(
-                        "Permisos: {} ({})",
-                        mode_text(mode),
-                        mode_octal(mode)
+                    response.on_hover_text(trf!(
+                        "Permisos: {text} ({octal})",
+                        text = mode_text(mode),
+                        octal = mode_octal(mode)
                     ));
                 }
             }
@@ -404,7 +406,7 @@ impl SftpView {
         let local_path = crate::paths::home_dir();
         let mut view = Self {
             client,
-            state: SftpState::Connecting("Conectando…".into()),
+            state: SftpState::Connecting(tr("Conectando…").into()),
             remote_path: String::new(),
             remote_edit: String::new(),
             remote_entries: vec![],
@@ -472,7 +474,12 @@ impl SftpView {
             safe
         };
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.message = Some((format!("No se pudo crear {}: {e}", dir.display()), true));
+            let msg = trf!(
+                "No se pudo crear {path}: {error}",
+                path = dir.display(),
+                error = e
+            );
+            self.message = Some((msg, true));
             return;
         }
         let local = dir.join(safe);
@@ -490,7 +497,7 @@ impl SftpView {
             seen: None,
             download: Some(id),
             upload: None,
-            status: "Descargando…".into(),
+            status: tr("Descargando…").into(),
             failed: false,
         });
     }
@@ -513,17 +520,17 @@ impl SftpView {
                     edited.seen = file_stamp(&edited.local);
                     match crate::paths::open_in_editor(&editor, &edited.local) {
                         Ok(()) => {
-                            edited.status = "Abierto en el editor: se sube al guardar".into();
+                            edited.status = tr("Abierto en el editor: se sube al guardar").into();
                             edited.failed = false;
                         }
                         Err(e) => {
-                            edited.status = format!("No se pudo abrir el editor: {e}");
+                            edited.status = trf!("No se pudo abrir el editor: {error}", error = e);
                             edited.failed = true;
                         }
                     }
                 }
                 Some(e) => {
-                    edited.status = format!("No se pudo descargar: {e}");
+                    edited.status = trf!("No se pudo descargar: {error}", error = e);
                     edited.failed = true;
                 }
             }
@@ -531,11 +538,11 @@ impl SftpView {
             edited.upload = None;
             match error {
                 None => {
-                    edited.status = format!("Subido a las {now}");
+                    edited.status = trf!("Subido a las {time}", time = now);
                     edited.failed = false;
                 }
                 Some(e) => {
-                    edited.status = format!("No se pudo subir: {e}");
+                    edited.status = trf!("No se pudo subir: {error}", error = e);
                     edited.failed = true;
                     // Se reintenta la próxima vez que se guarde.
                 }
@@ -576,7 +583,7 @@ impl SftpView {
                 on_conflict: OnConflict::Replace,
             });
             edited.upload = Some(id);
-            edited.status = "Subiendo los cambios…".into();
+            edited.status = tr("Subiendo los cambios…").into();
         }
     }
 
@@ -635,7 +642,12 @@ impl SftpView {
             }
             Err(e) => {
                 self.local_edit = self.local_path.display().to_string();
-                self.message = Some((format!("No se puede abrir {}: {e}", path.display()), true));
+                let msg = trf!(
+                    "No se puede abrir {path}: {error}",
+                    path = path.display(),
+                    error = e
+                );
+                self.message = Some((msg, true));
             }
         }
     }
@@ -827,7 +839,10 @@ impl SftpView {
                     items.push((path, join_remote(&self.remote_path, &name), name));
                 }
                 None => {
-                    let msg = format!("No se puede subir {}: no tiene nombre", path.display());
+                    let msg = trf!(
+                        "No se puede subir {path}: no tiene nombre",
+                        path = path.display()
+                    );
                     self.message = Some((msg, true));
                 }
             }
@@ -883,7 +898,7 @@ impl SftpView {
         // Una ruta larga se parte en varias líneas en vez de salirse.
         let color = visuals.strong_text_color();
         let galley = painter.layout(
-            format!("⬆ Suelta para subir a {}", self.remote_path),
+            trf!("⬆ Suelta para subir a {path}", path = self.remote_path),
             egui::FontId::proportional(20.0),
             color,
             rect.width() - 60.0,
@@ -975,7 +990,7 @@ impl SftpView {
         self.transfers.push(TransferRow {
             id,
             kind: TransferKind::Sync,
-            label: format!("Sincronizar {remote}"),
+            label: trf!("Sincronizar {remote}", remote),
             done: 0,
             total: 0,
             current: String::new(),
@@ -1037,11 +1052,11 @@ impl SftpView {
                     Some(e) => {
                         ui.colored_label(
                             ui.visuals().error_fg_color,
-                            format!("Conexión cerrada: {e}"),
+                            trf!("Conexión cerrada: {error}", error = e),
                         );
                     }
                     None => {
-                        ui.label("Conexión SFTP cerrada.");
+                        ui.label(tr("Conexión SFTP cerrada."));
                     }
                 });
                 return;
@@ -1100,22 +1115,22 @@ impl SftpView {
 
     fn local_pane(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.strong("Equipo local");
+            ui.strong(tr("Equipo local"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let names: Vec<String> = self.local_sel.iter().cloned().collect();
                 if ui
-                    .add_enabled(!names.is_empty(), egui::Button::new("Subir ➡"))
-                    .on_hover_text("Subir la selección a la carpeta remota")
+                    .add_enabled(!names.is_empty(), egui::Button::new(tr("Subir ➡")))
+                    .on_hover_text(tr("Subir la selección a la carpeta remota"))
                     .clicked()
                 {
                     self.request_transfer(true, names);
                 }
                 if ui
-                    .button("Sincronizar…")
-                    .on_hover_text(
+                    .button(tr("Sincronizar…"))
+                    .on_hover_text(tr(
                         "Comparar esta carpeta con la del servidor y ver qué habría que \
                          copiar en cada sentido; no se toca nada hasta confirmarlo",
-                    )
+                    ))
                     .clicked()
                 {
                     self.open_sync();
@@ -1123,15 +1138,22 @@ impl SftpView {
             });
         });
         ui.horizontal(|ui| {
-            if ui.button("⬆").on_hover_text("Carpeta superior").clicked()
+            if ui
+                .button("⬆")
+                .on_hover_text(tr("Carpeta superior"))
+                .clicked()
                 && let Some(parent) = self.local_path.parent()
             {
                 self.go_local(parent.to_path_buf());
             }
-            if ui.button("⟳").on_hover_text("Actualizar").clicked() {
+            if ui.button("⟳").on_hover_text(tr("Actualizar")).clicked() {
                 self.refresh_local();
             }
-            if ui.button("➕📁").on_hover_text("Nueva carpeta").clicked() {
+            if ui
+                .button("➕📁")
+                .on_hover_text(tr("Nueva carpeta"))
+                .clicked()
+            {
                 self.dialog = Some(Dialog::Mkdir {
                     remote: false,
                     name: String::new(),
@@ -1178,37 +1200,45 @@ impl SftpView {
 
     fn remote_pane(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.strong("Servidor remoto");
+            ui.strong(tr("Servidor remoto"));
             if self.remote_loading {
                 ui.spinner();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let names: Vec<String> = self.remote_sel.iter().cloned().collect();
                 if ui
-                    .add_enabled(!names.is_empty(), egui::Button::new("⬅ Descargar"))
-                    .on_hover_text("Descargar la selección a la carpeta local")
+                    .add_enabled(!names.is_empty(), egui::Button::new(tr("⬅ Descargar")))
+                    .on_hover_text(tr("Descargar la selección a la carpeta local"))
                     .clicked()
                 {
                     self.request_transfer(false, names);
                 }
-                ui.checkbox(&mut self.show_hidden, "Ocultos");
+                ui.checkbox(&mut self.show_hidden, tr("Ocultos"));
                 if self.linked {
-                    ui.checkbox(&mut self.follow, "Seguir al terminal")
-                        .on_hover_text(
+                    ui.checkbox(&mut self.follow, tr("Seguir al terminal"))
+                        .on_hover_text(tr(
                             "Al cambiar de carpeta en el terminal del que procede esta \
                              pestaña, el panel va a esa carpeta",
-                        );
+                        ));
                 }
             });
         });
         ui.horizontal(|ui| {
-            if ui.button("⬆").on_hover_text("Carpeta superior").clicked() {
+            if ui
+                .button("⬆")
+                .on_hover_text(tr("Carpeta superior"))
+                .clicked()
+            {
                 self.list_remote(parent_remote(&self.remote_path));
             }
-            if ui.button("⟳").on_hover_text("Actualizar").clicked() {
+            if ui.button("⟳").on_hover_text(tr("Actualizar")).clicked() {
                 self.refresh_remote();
             }
-            if ui.button("➕📁").on_hover_text("Nueva carpeta").clicked() {
+            if ui
+                .button("➕📁")
+                .on_hover_text(tr("Nueva carpeta"))
+                .clicked()
+            {
                 self.dialog = Some(Dialog::Mkdir {
                     remote: true,
                     name: String::new(),
@@ -1220,7 +1250,7 @@ impl SftpView {
                 .flatten();
             if ui
                 .add_enabled(one.is_some(), egui::Button::new("✏"))
-                .on_hover_text("Renombrar")
+                .on_hover_text(tr("Renombrar"))
                 .clicked()
                 && let Some(old) = one.clone()
             {
@@ -1237,10 +1267,10 @@ impl SftpView {
             });
             if ui
                 .add_enabled(one_file.is_some(), egui::Button::new("📝"))
-                .on_hover_text(
+                .on_hover_text(tr(
                     "Editar con el editor de este equipo: se descarga, se abre y se sube solo \
                      cada vez que lo guardes",
-                )
+                ))
                 .clicked()
                 && let Some(name) = one_file.cloned()
             {
@@ -1248,7 +1278,7 @@ impl SftpView {
             }
             if ui
                 .add_enabled(one.is_some(), egui::Button::new("🔒"))
-                .on_hover_text("Permisos")
+                .on_hover_text(tr("Permisos"))
                 .clicked()
                 && let Some(name) = one.clone()
             {
@@ -1256,7 +1286,7 @@ impl SftpView {
             }
             if ui
                 .add_enabled(!self.remote_sel.is_empty(), egui::Button::new("🗑"))
-                .on_hover_text("Eliminar")
+                .on_hover_text(tr("Eliminar"))
                 .clicked()
             {
                 self.confirm_delete();
@@ -1317,7 +1347,7 @@ impl SftpView {
         // Mientras haya ficheros en edición se vigila si cambian.
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(800));
-        ui.strong("En edición");
+        ui.strong(tr("En edición"));
         let mut close = None;
         let mut reopen = None;
         for (i, edited) in self.edited.iter().enumerate() {
@@ -1330,12 +1360,12 @@ impl SftpView {
                     ui.visuals().weak_text_color()
                 };
                 ui.colored_label(color, &edited.status);
-                if edited.download.is_none() && ui.small_button("Abrir").clicked() {
+                if edited.download.is_none() && ui.small_button(tr("Abrir")).clicked() {
                     reopen = Some(i);
                 }
                 if ui
                     .small_button("×")
-                    .on_hover_text("Dejar de vigilarlo y borrar la copia local")
+                    .on_hover_text(tr("Dejar de vigilarlo y borrar la copia local"))
                     .clicked()
                 {
                     close = Some(i);
@@ -1353,9 +1383,9 @@ impl SftpView {
 
     fn transfers_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.strong("Transferencias");
+            ui.strong(tr("Transferencias"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Limpiar terminadas").clicked() {
+                if ui.small_button(tr("Limpiar terminadas")).clicked() {
                     self.transfers
                         .retain(|t| matches!(t.state, TransferState::Running));
                 }
@@ -1391,7 +1421,7 @@ impl SftpView {
                                 ui.add(egui::ProgressBar::new(frac).desired_width(220.0).text(
                                     format!("{} / {}", format_size(t.done), format_size(t.total)),
                                 ));
-                                if ui.small_button("Cancelar").clicked() {
+                                if ui.small_button(tr("Cancelar")).clicked() {
                                     cancel = Some(t.id);
                                 }
                                 ui.add(
@@ -1407,7 +1437,7 @@ impl SftpView {
                             TransferState::Failed(e) => {
                                 ui.colored_label(
                                     ui.visuals().error_fg_color,
-                                    format!("Error: {e}"),
+                                    trf!("Error: {error}", error = e),
                                 );
                             }
                         }
@@ -1438,47 +1468,47 @@ impl SftpView {
         let mut answer: Option<Option<ConflictChoice>> = None;
         egui::Modal::new(egui::Id::unique("sftp_conflict")).show(ctx, |ui| {
             ui.set_width(430.0);
-            ui.heading("El fichero ya existe");
+            ui.heading(tr("El fichero ya existe"));
             ui.label(if conflict.upload {
-                "En el servidor:"
+                tr("En el servidor:")
             } else {
-                "En el equipo local:"
+                tr("En el equipo local:")
             });
             ui.add(egui::Label::new(RichText::new(&conflict.path).monospace()).wrap());
-            ui.label(format!(
-                "Origen: {}   ·   Destino: {}",
-                format_size(conflict.source_size),
-                format_size(conflict.dest_size)
+            ui.label(trf!(
+                "Origen: {source}   ·   Destino: {dest}",
+                source = format_size(conflict.source_size),
+                dest = format_size(conflict.dest_size)
             ));
             if conflict.can_resume() {
                 ui.label(
-                    RichText::new(
+                    RichText::new(tr(
                         "El destino es más pequeño: puede ser una transferencia que se quedó a \
                          medias. «Reanudar» da por bueno lo que ya hay y envía solo lo que falta.",
-                    )
+                    ))
                     .weak(),
                 );
             }
             if multiple {
                 ui.checkbox(
                     &mut all,
-                    "Hacer lo mismo con los demás de esta transferencia",
+                    tr("Hacer lo mismo con los demás de esta transferencia"),
                 );
             }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if conflict.can_resume() && ui.button("Reanudar").clicked() {
+                if conflict.can_resume() && ui.button(tr("Reanudar")).clicked() {
                     answer = Some(Some(ConflictChoice::Resume));
                 }
-                if ui.button("Sustituir").clicked() {
+                if ui.button(tr("Sustituir")).clicked() {
                     answer = Some(Some(ConflictChoice::Replace));
                 }
-                if ui.button("Omitir").clicked() {
+                if ui.button(tr("Omitir")).clicked() {
                     answer = Some(Some(ConflictChoice::Skip));
                 }
                 if ui
-                    .button("Cancelar")
-                    .on_hover_text("Cancela la transferencia")
+                    .button(tr("Cancelar"))
+                    .on_hover_text(tr("Cancela la transferencia"))
                     .clicked()
                 {
                     answer = Some(None);
@@ -1513,11 +1543,11 @@ impl SftpView {
                     name,
                     focused,
                 } => {
-                    ui.heading("Nueva carpeta");
+                    ui.heading(tr("Nueva carpeta"));
                     ui.label(if *remote {
-                        "En el servidor remoto:"
+                        tr("En el servidor remoto:")
                     } else {
-                        "En el equipo local:"
+                        tr("En el equipo local:")
                     });
                     let resp = ui.text_edit_singleline(name);
                     if !*focused {
@@ -1527,7 +1557,9 @@ impl SftpView {
                     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
                     ui.horizontal(|ui| {
                         let valid = !name.trim().is_empty() && !name.contains(['/', '\\']);
-                        if ui.add_enabled(valid, egui::Button::new("Crear")).clicked()
+                        if ui
+                            .add_enabled(valid, egui::Button::new(tr("Crear")))
+                            .clicked()
                             || (enter && valid)
                         {
                             let (remote, name) = (*remote, name.trim().to_string());
@@ -1539,22 +1571,22 @@ impl SftpView {
                                     match std::fs::create_dir(this.local_path.join(&name)) {
                                         Ok(()) => this.refresh_local(),
                                         Err(e) => {
-                                            this.message =
-                                                Some((format!("No se pudo crear: {e}"), true))
+                                            let msg = trf!("No se pudo crear: {error}", error = e);
+                                            this.message = Some((msg, true))
                                         }
                                     }
                                 }
                             }));
                             close = true;
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button(tr("Cancelar")).clicked() {
                             close = true;
                         }
                     });
                 }
                 Dialog::Rename { old, name, focused } => {
-                    ui.heading("Renombrar");
-                    ui.label(format!("Nuevo nombre para «{old}»:"));
+                    ui.heading(tr("Renombrar"));
+                    ui.label(trf!("Nuevo nombre para «{old}»:", old));
                     let resp = ui.text_edit_singleline(name);
                     if !*focused {
                         resp.request_focus();
@@ -1566,7 +1598,7 @@ impl SftpView {
                             && !name.contains('/')
                             && name.trim() != old.as_str();
                         if ui
-                            .add_enabled(valid, egui::Button::new("Renombrar"))
+                            .add_enabled(valid, egui::Button::new(tr("Renombrar")))
                             .clicked()
                             || (enter && valid)
                         {
@@ -1579,35 +1611,33 @@ impl SftpView {
                             }));
                             close = true;
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button(tr("Cancelar")).clicked() {
                             close = true;
                         }
                     });
                 }
                 Dialog::ConfirmDelete { names } => {
-                    ui.heading("Eliminar del servidor");
-                    ui.label(format!(
-                        "Se eliminarán definitivamente {} elemento(s) del servidor remoto:",
-                        names.len()
+                    ui.heading(tr("Eliminar del servidor"));
+                    ui.label(trf!(
+                        "Se eliminarán definitivamente {count} elemento(s) del servidor remoto:",
+                        count = names.len()
                     ));
                     egui::ScrollArea::vertical()
                         .max_height(140.0)
                         .show(ui, |ui| {
                             for (name, is_dir) in names.iter() {
-                                ui.label(format!(
-                                    "{} {name}{}",
-                                    if *is_dir { "📁" } else { "📄" },
-                                    if *is_dir {
-                                        "  (con todo su contenido)"
-                                    } else {
-                                        ""
-                                    }
-                                ));
+                                ui.label(if *is_dir {
+                                    trf!("📁 {name}  (con todo su contenido)", name)
+                                } else {
+                                    format!("📄 {name}")
+                                });
                             }
                         });
                     ui.horizontal(|ui| {
                         if ui
-                            .button(RichText::new("Eliminar").color(ui.visuals().error_fg_color))
+                            .button(
+                                RichText::new(tr("Eliminar")).color(ui.visuals().error_fg_color),
+                            )
                             .clicked()
                         {
                             let names = names.clone();
@@ -1622,7 +1652,7 @@ impl SftpView {
                             }));
                             close = true;
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button(tr("Cancelar")).clicked() {
                             close = true;
                         }
                     });
@@ -1635,14 +1665,14 @@ impl SftpView {
                     text,
                     recursive,
                 } => {
-                    ui.heading("Permisos");
-                    ui.label(format!("«{name}»"));
+                    ui.heading(tr("Permisos"));
+                    ui.label(trf!("«{name}»", name));
                     if !*known {
                         ui.label(
-                            RichText::new(
+                            RichText::new(tr(
                                 "No se conocen sus permisos actuales (si es un enlace, se \
                                  cambian los de su destino).",
-                            )
+                            ))
                             .weak(),
                         );
                     }
@@ -1651,11 +1681,13 @@ impl SftpView {
                         .spacing([18.0, 6.0])
                         .show(ui, |ui| {
                             ui.label("");
-                            ui.label("Lectura");
-                            ui.label("Escritura");
-                            ui.label("Ejecución");
+                            ui.label(tr("Lectura"));
+                            ui.label(tr("Escritura"));
+                            ui.label(tr("Ejecución"));
                             ui.end_row();
-                            for (who, shift) in [("Dueño", 6), ("Grupo", 3), ("Otros", 0)] {
+                            for (who, shift) in
+                                [(tr("Dueño"), 6), (tr("Grupo"), 3), (tr("Otros"), 0)]
+                            {
                                 ui.label(who);
                                 for bit in [4, 2, 1] {
                                     let mask = bit << shift;
@@ -1670,7 +1702,7 @@ impl SftpView {
                         });
                     let mut valid = true;
                     ui.horizontal(|ui| {
-                        ui.label("Octal:");
+                        ui.label(tr("Octal:"));
                         let resp = ui.add(egui::TextEdit::singleline(text).desired_width(70.0));
                         match parse_mode(text) {
                             Some(parsed) => {
@@ -1681,17 +1713,17 @@ impl SftpView {
                             }
                             None => {
                                 valid = false;
-                                ui.colored_label(ui.visuals().error_fg_color, "no es válido");
+                                ui.colored_label(ui.visuals().error_fg_color, tr("no es válido"));
                             }
                         }
                     });
                     if *is_dir {
-                        ui.checkbox(recursive, "Aplicar también a todo su contenido");
+                        ui.checkbox(recursive, tr("Aplicar también a todo su contenido"));
                     }
                     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
                     ui.horizontal(|ui| {
                         if ui
-                            .add_enabled(valid, egui::Button::new("Aplicar"))
+                            .add_enabled(valid, egui::Button::new(tr("Aplicar")))
                             .clicked()
                             || (enter && valid)
                         {
@@ -1706,21 +1738,21 @@ impl SftpView {
                             }));
                             close = true;
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button(tr("Cancelar")).clicked() {
                             close = true;
                         }
                     });
                 }
                 Dialog::Sync(sync) => {
-                    ui.heading("Sincronizar carpetas");
+                    ui.heading(tr("Sincronizar carpetas"));
                     egui::Grid::new("sftp_sync_roots")
                         .num_columns(2)
                         .show(ui, |ui| {
-                            ui.label("Local:");
+                            ui.label(tr("Local:"));
                             let local = sync.local.display().to_string();
                             ui.add(egui::Label::new(RichText::new(local).monospace()).truncate());
                             ui.end_row();
-                            ui.label("Remoto:");
+                            ui.label(tr("Remoto:"));
                             ui.add(
                                 egui::Label::new(RichText::new(&sync.remote).monospace())
                                     .truncate(),
@@ -1731,18 +1763,18 @@ impl SftpView {
                     if let Some(error) = &sync.error {
                         ui.colored_label(
                             ui.visuals().error_fg_color,
-                            format!("No se pudieron comparar las carpetas: {error}"),
+                            trf!("No se pudieron comparar las carpetas: {error}", error),
                         );
-                        if ui.button("Cerrar").clicked() {
+                        if ui.button(tr("Cerrar")).clicked() {
                             close = true;
                         }
                     } else if sync.scan.is_none() {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Comparando las dos carpetas…");
+                            ui.label(tr("Comparando las dos carpetas…"));
                         });
                         ui.add(egui::Label::new(RichText::new(&sync.current).weak()).truncate());
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button(tr("Cancelar")).clicked() {
                             close = true;
                         }
                     } else if let Some(confirmed) = sync_plan_ui(ui, sync) {
@@ -1781,41 +1813,62 @@ impl SftpView {
     }
 }
 
-/// Texto de una transferencia terminada.
+/// Texto de una transferencia terminada: lo principal y, separado por
+/// comas, lo que haya que añadir.
 fn finished_text(kind: TransferKind, done: u64, stats: &TransferStats) -> String {
-    let mut text = match kind {
-        TransferKind::Sync => format!(
-            "Completada: {} ({})",
-            counted(stats.copied, "copiado"),
-            format_size(stats.bytes)
+    let mut parts = vec![match kind {
+        TransferKind::Sync => trf!(
+            "Completada: {copied} ({size})",
+            copied = counted(stats.copied, mark!("{n} copiado"), mark!("{n} copiados")),
+            size = format_size(stats.bytes)
         ),
-        _ if stats.copied == 0 && stats.skipped > 0 => "Omitida".to_string(),
-        _ => format!("Completada ({})", format_size(done)),
-    };
+        _ if stats.copied == 0 && stats.skipped > 0 => tr("Omitida").to_string(),
+        _ => trf!("Completada ({size})", size = format_size(done)),
+    }];
     if stats.resumed > 0 {
         // Al reanudar solo viaja lo que faltaba.
-        text += &format!(", reanudada: faltaban {}", format_size(stats.bytes));
+        parts.push(trf!(
+            "reanudada: faltaban {size}",
+            size = format_size(stats.bytes)
+        ));
     }
     if stats.skipped > 0 && stats.copied > 0 {
-        text += &format!(", {}", counted(stats.skipped, "omitido"));
+        parts.push(counted(
+            stats.skipped,
+            mark!("{n} omitido"),
+            mark!("{n} omitidos"),
+        ));
     }
     if stats.deleted > 0 {
-        text += &format!(", {}", counted(stats.deleted, "borrado"));
+        parts.push(counted(
+            stats.deleted,
+            mark!("{n} borrado"),
+            mark!("{n} borrados"),
+        ));
     }
-    text
+    parts.join(", ")
 }
 
-/// «1 fichero», «3 ficheros».
-fn counted(n: u32, noun: &str) -> String {
-    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+/// «1 fichero», «3 ficheros»: la frase del singular o la del plural (sin
+/// traducir), con el número en su hueco `{n}`.
+fn counted(n: u32, one: &str, many: &str) -> String {
+    crate::i18n::render(tr(if n == 1 { one } else { many }), &[("n", &n)])
+}
+
+fn files_text(n: u32) -> String {
+    counted(n, mark!("{n} fichero"), mark!("{n} ficheros"))
+}
+
+fn dirs_text(n: u32) -> String {
+    counted(n, mark!("{n} carpeta"), mark!("{n} carpetas"))
 }
 
 /// «3 ficheros y 1 carpeta».
 fn count_text(files: u32, dirs: u32) -> String {
-    let files = counted(files, "fichero");
+    let files = files_text(files);
     match dirs {
         0 => files,
-        _ => format!("{files} y {}", counted(dirs, "carpeta")),
+        _ => trf!("{files} y {dirs}", files, dirs = dirs_text(dirs)),
     }
 }
 
@@ -1824,20 +1877,20 @@ fn sync_reason(item: &SyncItem) -> &'static str {
     use SyncOp::*;
     use SyncState::*;
     match (item.state, item.op) {
-        (OnlyLocal, Upload) | (OnlyRemote, Download) => "nuevo",
-        (OnlyLocal, DeleteLocal) | (OnlyRemote, DeleteRemote) => "sobra: se borra",
-        (OnlyLocal, _) => "solo en local",
-        (OnlyRemote, _) => "solo en el servidor",
-        (LocalNewer, Upload) => "más reciente en local",
-        (LocalNewer, _) => "más reciente en local: no se toca",
-        (RemoteNewer, Download) => "más reciente en el servidor",
-        (RemoteNewer, _) => "más reciente en el servidor: no se toca",
-        (Differ, None) => "misma fecha y distinto tamaño: no se toca",
-        (Differ, _) => "distinto tamaño",
-        (TypeConflict, _) => "fichero en un lado y carpeta en el otro: no se toca",
-        (Ignored, _) if item.is_dir => "contiene algo que no se sincroniza: no se borra",
-        (Ignored, _) => "enlace o fichero especial: no se sincroniza",
-        (Equal, _) => "igual",
+        (OnlyLocal, Upload) | (OnlyRemote, Download) => tr("nuevo"),
+        (OnlyLocal, DeleteLocal) | (OnlyRemote, DeleteRemote) => tr("sobra: se borra"),
+        (OnlyLocal, _) => tr("solo en local"),
+        (OnlyRemote, _) => tr("solo en el servidor"),
+        (LocalNewer, Upload) => tr("más reciente en local"),
+        (LocalNewer, _) => tr("más reciente en local: no se toca"),
+        (RemoteNewer, Download) => tr("más reciente en el servidor"),
+        (RemoteNewer, _) => tr("más reciente en el servidor: no se toca"),
+        (Differ, None) => tr("misma fecha y distinto tamaño: no se toca"),
+        (Differ, _) => tr("distinto tamaño"),
+        (TypeConflict, _) => tr("fichero en un lado y carpeta en el otro: no se toca"),
+        (Ignored, _) if item.is_dir => tr("contiene algo que no se sincroniza: no se borra"),
+        (Ignored, _) => tr("enlace o fichero especial: no se sincroniza"),
+        (Equal, _) => tr("igual"),
     }
 }
 
@@ -1849,9 +1902,9 @@ fn sync_plan_ui(ui: &mut egui::Ui, sync: &mut SyncDialog) -> Option<bool> {
     let mut mode_changed = false;
     ui.horizontal(|ui| {
         for (mode, label) in [
-            (SyncMode::Upload, "Local ➡ remoto"),
-            (SyncMode::Download, "Remoto ➡ local"),
-            (SyncMode::Both, "En los dos sentidos"),
+            (SyncMode::Upload, tr("Local ➡ remoto")),
+            (SyncMode::Download, tr("Remoto ➡ local")),
+            (SyncMode::Both, tr("En los dos sentidos")),
         ] {
             mode_changed |= ui.radio_value(&mut sync.mode, mode, label).changed();
         }
@@ -1864,31 +1917,41 @@ fn sync_plan_ui(ui: &mut egui::Ui, sync: &mut SyncDialog) -> Option<bool> {
     }
     ui.label(
         RichText::new(match sync.mode {
-            SyncMode::Upload => "Sube lo que solo está en local y lo que en local es más reciente.",
-            SyncMode::Download => {
-                "Descarga lo que solo está en el servidor y lo que allí es más reciente."
+            SyncMode::Upload => {
+                tr("Sube lo que solo está en local y lo que en local es más reciente.")
             }
-            SyncMode::Both => "Copia cada fichero hacia el lado donde falta o es más antiguo.",
+            SyncMode::Download => {
+                tr("Descarga lo que solo está en el servidor y lo que allí es más reciente.")
+            }
+            SyncMode::Both => tr("Copia cada fichero hacia el lado donde falta o es más antiguo."),
         })
         .weak(),
     );
 
     let (files, dirs) = sync.extra;
-    let side = match sync.mode {
-        SyncMode::Upload => "del servidor",
-        _ => "del equipo local",
-    };
+    // De dónde se borra lo que sobra: del lado que recibe.
+    let from_server = sync.mode == SyncMode::Upload;
     if sync.mode == SyncMode::Both {
         ui.add_enabled(
             false,
-            egui::Checkbox::new(&mut false, "Borrar lo que sobra en el destino"),
+            egui::Checkbox::new(&mut false, tr("Borrar lo que sobra en el destino")),
         )
-        .on_disabled_hover_text("Solo en los modos de un sentido: en los dos no sobra nada");
+        .on_disabled_hover_text(tr(
+            "Solo en los modos de un sentido: en los dos no sobra nada",
+        ));
     } else {
-        let label = format!(
-            "Borrar {side} lo que no está en el origen: {}",
-            count_text(files, dirs)
-        );
+        let count = count_text(files, dirs);
+        let label = if from_server {
+            trf!(
+                "Borrar del servidor lo que no está en el origen: {count}",
+                count
+            )
+        } else {
+            trf!(
+                "Borrar del equipo local lo que no está en el origen: {count}",
+                count
+            )
+        };
         let checkbox = egui::Checkbox::new(&mut sync.delete, label);
         if ui.add_enabled(files + dirs > 0, checkbox).changed() {
             sync.replan();
@@ -1896,14 +1959,19 @@ fn sync_plan_ui(ui: &mut egui::Ui, sync: &mut SyncDialog) -> Option<bool> {
     }
     let summary = sync.summary;
     if sync.delete {
-        ui.label(
-            RichText::new(format!(
-                "Se BORRARÁN {side} {}. No se puede deshacer.",
-                count_text(summary.delete_files, summary.delete_dirs)
-            ))
-            .color(error_color)
-            .strong(),
-        );
+        let count = count_text(summary.delete_files, summary.delete_dirs);
+        let warning = if from_server {
+            trf!(
+                "Se BORRARÁN del servidor {count}. No se puede deshacer.",
+                count
+            )
+        } else {
+            trf!(
+                "Se BORRARÁN del equipo local {count}. No se puede deshacer.",
+                count
+            )
+        };
+        ui.label(RichText::new(warning).color(error_color).strong());
     }
     ui.separator();
 
@@ -1912,48 +1980,49 @@ fn sync_plan_ui(ui: &mut egui::Ui, sync: &mut SyncDialog) -> Option<bool> {
         .spacing([18.0, 4.0])
         .show(ui, |ui| {
             let files = |n: u32, bytes: u64| match n {
-                0 => "nada".to_string(),
+                0 => tr("nada").to_string(),
                 _ => format!("{} ({})", count_text(n, 0), format_size(bytes)),
             };
-            ui.label("⬆ Subir");
+            ui.label(tr("⬆ Subir"));
             ui.label(files(summary.upload, summary.upload_bytes));
             ui.end_row();
-            ui.label("⬇ Descargar");
+            ui.label(tr("⬇ Descargar"));
             ui.label(files(summary.download, summary.download_bytes));
             ui.end_row();
             if summary.make_dirs > 0 {
-                ui.label("📁 Crear");
-                ui.label(counted(summary.make_dirs, "carpeta"));
+                ui.label(tr("📁 Crear"));
+                ui.label(dirs_text(summary.make_dirs));
                 ui.end_row();
             }
-            ui.label("🗑 Borrar");
+            ui.label(tr("🗑 Borrar"));
             if sync.delete {
                 let text = count_text(summary.delete_files, summary.delete_dirs);
                 ui.label(RichText::new(text).color(error_color).strong());
             } else {
-                ui.label("nada");
+                ui.label(tr("nada"));
             }
             ui.end_row();
-            ui.label("Iguales");
+            ui.label(tr("Iguales"));
             ui.label(count_text(summary.equal, 0));
             ui.end_row();
-            ui.label("Solo en un lado");
-            ui.label(format!(
-                "{} en local, {} en el servidor",
-                summary.only_local, summary.only_remote
+            ui.label(tr("Solo en un lado"));
+            ui.label(trf!(
+                "{local} en local, {remote} en el servidor",
+                local = summary.only_local,
+                remote = summary.only_remote
             ));
             ui.end_row();
             if summary.untouched > 0 {
-                ui.label("Distintos sin tocar");
+                ui.label(tr("Distintos sin tocar"));
                 ui.label(count_text(summary.untouched, 0))
-                    .on_hover_text("Más abajo se indica el motivo de cada uno");
+                    .on_hover_text(tr("Más abajo se indica el motivo de cada uno"));
                 ui.end_row();
             }
             if summary.ignored > 0 {
-                ui.label("No se sincronizan");
-                ui.label(format!(
-                    "{} (enlaces, ficheros especiales o lo que cuelga de ellos)",
-                    summary.ignored
+                ui.label(tr("No se sincronizan"));
+                ui.label(trf!(
+                    "{count} (enlaces, ficheros especiales o lo que cuelga de ellos)",
+                    count = summary.ignored
                 ));
                 ui.end_row();
             }
@@ -2005,7 +2074,7 @@ fn sync_plan_ui(ui: &mut egui::Ui, sync: &mut SyncDialog) -> Option<bool> {
             }
         });
     if sync.listed.is_empty() {
-        ui.label(RichText::new("Las dos carpetas tienen lo mismo.").weak());
+        ui.label(RichText::new(tr("Las dos carpetas tienen lo mismo.")).weak());
     }
     ui.separator();
 
@@ -2013,18 +2082,18 @@ fn sync_plan_ui(ui: &mut egui::Ui, sync: &mut SyncDialog) -> Option<bool> {
     let nothing = summary.nothing_to_do();
     ui.horizontal(|ui| {
         let label = if sync.delete {
-            RichText::new("Sincronizar y borrar").color(error_color)
+            RichText::new(tr("Sincronizar y borrar")).color(error_color)
         } else {
-            RichText::new("Sincronizar")
+            RichText::new(tr("Sincronizar"))
         };
         if ui.add_enabled(!nothing, egui::Button::new(label)).clicked() {
             outcome = Some(true);
         }
-        if ui.button("Cancelar").clicked() {
+        if ui.button(tr("Cancelar")).clicked() {
             outcome = Some(false);
         }
         if nothing {
-            ui.label(RichText::new("No hay nada que copiar ni borrar.").weak());
+            ui.label(RichText::new(tr("No hay nada que copiar ni borrar.")).weak());
         }
     });
     outcome

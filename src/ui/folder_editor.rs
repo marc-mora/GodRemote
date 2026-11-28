@@ -5,8 +5,10 @@ use uuid::Uuid;
 
 use super::backdrop_view::BackdropEditor;
 use crate::backdrop::Backdrop;
+use crate::i18n::tr;
 use crate::keys::KeyInfo;
 use crate::model::{AuthMethod, Folder, FolderDefaults, Node, Tree};
+use crate::trf;
 use crate::vault::Vault;
 
 const FIELD_WIDTH: f32 = 320.0;
@@ -107,9 +109,9 @@ impl FolderEditor {
         let mut result = FolderResult::Open;
         let mut open = true;
         let title = if self.id.is_some() {
-            "Editar carpeta"
+            tr("Editar carpeta")
         } else {
-            "Nueva carpeta"
+            tr("Nueva carpeta")
         };
         let max_height = (ctx.content_rect().height() - 150.0).max(240.0);
         egui::Window::new(title)
@@ -131,13 +133,13 @@ impl FolderEditor {
                 let enter = ui.input(|i| i.key_pressed(egui::Key::Enter))
                     && ui.memory(|m| m.focused().is_none());
                 ui.horizontal(|ui| {
-                    if ui.button("Guardar").clicked() || enter {
+                    if ui.button(tr("Guardar")).clicked() || enter {
                         match self.commit(tree, vault) {
                             Ok(id) => result = FolderResult::Saved(id),
                             Err(e) => self.error = Some(e),
                         }
                     }
-                    if ui.button("Cancelar").clicked() {
+                    if ui.button(tr("Cancelar")).clicked() {
                         result = FolderResult::Cancelled;
                     }
                 });
@@ -152,7 +154,7 @@ impl FolderEditor {
         egui::Grid::new("folder_grid")
             .num_columns(2)
             .show(ui, |ui| {
-                ui.label("Nombre");
+                ui.label(tr("Nombre"));
                 let name =
                     ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(FIELD_WIDTH));
                 if !self.focused {
@@ -163,52 +165,55 @@ impl FolderEditor {
             });
         ui.add_space(4.0);
         let defined = !self.defaults().is_empty();
-        egui::CollapsingHeader::new("Valores para los equipos de esta carpeta")
+        egui::CollapsingHeader::new(tr("Valores para los equipos de esta carpeta"))
             .id_salt("folder_defaults")
             .default_open(defined)
             .show(ui, |ui| {
-                ui.weak(
+                ui.weak(tr(
                     "Lo que definas aquí lo usan los equipos de la carpeta y de sus \
                      subcarpetas. El usuario y el fondo se aplican a los que no tengan el \
                      suyo; la autenticación y los saltos, a los que marquen que los heredan \
                      (los equipos nuevos lo marcan solos).",
-                );
+                ));
                 ui.add_space(4.0);
                 egui::Grid::new("folder_defaults_grid")
                     .num_columns(2)
                     .show(ui, |ui| {
-                        ui.label("Usuario");
+                        ui.label(tr("Usuario"));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.username)
-                                .hint_text("sin definir")
+                                .hint_text(tr("sin definir"))
                                 .desired_width(FIELD_WIDTH),
                         );
                         ui.end_row();
                     });
                 self.auth_ui(ui, vault);
-                ui.checkbox(&mut self.define_jumps, "Definir los saltos (bastiones SSH)");
+                ui.checkbox(
+                    &mut self.define_jumps,
+                    tr("Definir los saltos (bastiones SSH)"),
+                );
                 if self.define_jumps {
                     ui.indent("folder_jumps", |ui| {
                         if self.jumps.is_empty() {
-                            ui.weak("Sin saltos: conexión directa.");
+                            ui.weak(tr("Sin saltos: conexión directa."));
                         }
                         super::editor::jump_list_ui(ui, tree, &mut self.jumps, None, "folder");
                     });
                 }
                 ui.checkbox(
                     &mut self.hide_bar,
-                    "Sin barra de información del servidor en estos equipos",
+                    tr("Sin barra de información del servidor en estos equipos"),
                 );
                 super::util::tab_color_ui(
                     ui,
-                    "Marcar con un color las pestañas de estos equipos",
+                    tr("Marcar con un color las pestañas de estos equipos"),
                     &mut self.color,
                 );
                 ui.checkbox(
                     &mut self.define_backdrop,
-                    "Fondo del terminal para estos equipos",
+                    tr("Fondo del terminal para estos equipos"),
                 )
-                .on_hover_text("Lo usan los equipos que no tengan un fondo propio");
+                .on_hover_text(tr("Lo usan los equipos que no tengan un fondo propio"));
                 if self.define_backdrop {
                     ui.indent("folder_backdrop", |ui| {
                         ui.set_max_width(430.0);
@@ -219,14 +224,14 @@ impl FolderEditor {
     }
 
     fn auth_ui(&mut self, ui: &mut egui::Ui, vault: Option<&Vault>) {
-        ui.checkbox(&mut self.define_auth, "Definir la autenticación SSH");
+        ui.checkbox(&mut self.define_auth, tr("Definir la autenticación SSH"));
         if !self.define_auth {
             return;
         }
         ui.indent("folder_auth", |ui| {
             ui.horizontal(|ui| {
                 for method in AuthMethod::ALL {
-                    ui.selectable_value(&mut self.auth, method, method.label());
+                    ui.selectable_value(&mut self.auth, method, tr(method.label()));
                 }
             });
             let stored = |suffix: &str| {
@@ -236,9 +241,9 @@ impl FolderEditor {
             match self.auth {
                 AuthMethod::Password => {
                     let hint = if stored("password") {
-                        "guardada en el baúl (escribe para cambiarla)"
+                        tr("guardada en el baúl (escribe para cambiarla)")
                     } else {
-                        "se pedirá al conectar si se deja vacía"
+                        tr("se pedirá al conectar si se deja vacía")
                     };
                     ui.add(
                         egui::TextEdit::singleline(&mut self.password)
@@ -247,7 +252,7 @@ impl FolderEditor {
                             .desired_width(FIELD_WIDTH),
                     );
                     if vault.is_none() {
-                        ui.weak("Baúl bloqueado: la contraseña no se guardará.");
+                        ui.weak(tr("Baúl bloqueado: la contraseña no se guardará."));
                     }
                 }
                 AuthMethod::Key => {
@@ -262,15 +267,10 @@ impl FolderEditor {
                             .width(24.0)
                             .show_ui(ui, |ui| {
                                 if self.keys.is_empty() {
-                                    ui.weak("No se han encontrado claves");
+                                    ui.weak(tr("No se han encontrado claves"));
                                 }
                                 for k in &self.keys {
-                                    let label = format!(
-                                        "{}  ({}{})",
-                                        k.path.display(),
-                                        k.algorithm,
-                                        if k.encrypted { ", cifrada" } else { "" }
-                                    );
+                                    let label = super::editor::key_label(k);
                                     if ui.selectable_label(false, label).clicked() {
                                         self.key_path = k.path.display().to_string();
                                     }
@@ -278,19 +278,19 @@ impl FolderEditor {
                             });
                         if ui
                             .button("📂")
-                            .on_hover_text("Elegir el fichero de la clave")
+                            .on_hover_text(tr("Elegir el fichero de la clave"))
                             .clicked()
                             && let Some(path) = rfd::FileDialog::new()
-                                .set_title("Clave privada SSH")
+                                .set_title(tr("Clave privada SSH"))
                                 .pick_file()
                         {
                             self.key_path = path.display().to_string();
                         }
                     });
                     let hint = if stored("passphrase") {
-                        "passphrase guardada en el baúl"
+                        tr("passphrase guardada en el baúl")
                     } else {
-                        "passphrase (si la clave está cifrada)"
+                        tr("passphrase (si la clave está cifrada)")
                     };
                     ui.add(
                         egui::TextEdit::singleline(&mut self.passphrase)
@@ -299,11 +299,11 @@ impl FolderEditor {
                             .desired_width(FIELD_WIDTH),
                     );
                     if vault.is_none() {
-                        ui.weak("Baúl bloqueado: la passphrase no se guardará.");
+                        ui.weak(tr("Baúl bloqueado: la passphrase no se guardará."));
                     }
                 }
                 AuthMethod::Agent => {
-                    ui.weak("Se usarán las claves cargadas en ssh-agent / Pageant.");
+                    ui.weak(tr("Se usarán las claves cargadas en ssh-agent / Pageant."));
                 }
             }
         });
@@ -313,23 +313,23 @@ impl FolderEditor {
     fn commit(&mut self, tree: &mut Tree, vault: &mut Option<Vault>) -> Result<Uuid, String> {
         let name = self.name.trim().to_string();
         if name.is_empty() {
-            return Err("La carpeta necesita un nombre".into());
+            return Err(tr("La carpeta necesita un nombre").into());
         }
         let defaults = self.defaults();
         if defaults.auth == Some(AuthMethod::Key) && defaults.key_path.is_empty() {
-            return Err("Indica la ruta de la clave privada".into());
+            return Err(tr("Indica la ruta de la clave privada").into());
         }
         if let Some(jumps) = &defaults.jumps {
             for id in jumps {
                 match tree.session(*id) {
                     Some(hop) if hop.protocol.is_ssh() => {}
                     Some(hop) => {
-                        return Err(format!(
-                            "El salto «{}» no es una sesión SSH",
-                            hop.display_name()
+                        return Err(trf!(
+                            "El salto «{name}» no es una sesión SSH",
+                            name = hop.display_name()
                         ));
                     }
-                    None => return Err("Uno de los saltos ya no existe".into()),
+                    None => return Err(tr("Uno de los saltos ya no existe").into()),
                 }
             }
         }
@@ -338,7 +338,7 @@ impl FolderEditor {
             None => tree.add_folder(self.parent, &name),
         };
         let Some(Node::Folder(folder)) = tree.find_mut(id) else {
-            return Err("La carpeta ya no existe".into());
+            return Err(tr("La carpeta ya no existe").into());
         };
         folder.name = name;
         folder.defaults = defaults.clone();
@@ -368,7 +368,12 @@ impl FolderEditor {
                 }
                 Ok(())
             })();
-            result.map_err(|e| format!("No se pudo actualizar el baúl: {e:#}"))?;
+            result.map_err(|e| {
+                trf!(
+                    "No se pudo actualizar el baúl: {error}",
+                    error = format!("{e:#}")
+                )
+            })?;
         }
         Ok(id)
     }

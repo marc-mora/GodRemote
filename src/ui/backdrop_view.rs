@@ -4,7 +4,9 @@
 use std::path::PathBuf;
 
 use crate::backdrop::{self, Anchor, Backdrop, BackdropKind, Fit, MAX_TEXT_CHARS};
+use crate::i18n::tr;
 use crate::theme::{self, Rgb};
+use crate::trf;
 
 /// Un dibujo de muestra para empezar con el arte ASCII.
 const SAMPLE_ASCII: &str = r"        .--.
@@ -94,7 +96,11 @@ impl BackdropEditor {
         let mut changed = false;
         ui.horizontal(|ui| {
             for kind in BackdropKind::ALL {
-                if ui.selectable_label(b.kind == kind, kind.label()).clicked() && b.kind != kind {
+                if ui
+                    .selectable_label(b.kind == kind, tr(kind.label()))
+                    .clicked()
+                    && b.kind != kind
+                {
                     b.kind = kind;
                     // Cada tipo empieza con un tamaño de letra razonable.
                     match kind {
@@ -109,7 +115,9 @@ impl BackdropEditor {
             }
         });
         if b.kind == BackdropKind::None {
-            ui.weak("El terminal se ve con su color de fondo, sin nada detrás del texto.");
+            ui.weak(tr(
+                "El terminal se ve con su color de fondo, sin nada detrás del texto.",
+            ));
             return changed;
         }
 
@@ -135,9 +143,9 @@ impl BackdropEditor {
                 .desired_width(width)
                 .desired_rows(if ascii { 6 } else { 2 })
                 .hint_text(if ascii {
-                    "Pega aquí tu dibujo ASCII"
+                    tr("Pega aquí tu dibujo ASCII")
                 } else {
-                    "Por ejemplo: PRODUCCIÓN"
+                    tr("Por ejemplo: PRODUCCIÓN")
                 });
             let (edit, scroll) = if ascii {
                 (edit.layouter(&mut no_wrap), egui::ScrollArea::both())
@@ -149,10 +157,12 @@ impl BackdropEditor {
                 .max_height(140.0)
                 .show(ui, |ui| changed |= ui.add(edit).changed());
         } else if b.image.is_empty() {
-            ui.weak("Aún no hay imagen: elige un fichero PNG, JPEG, GIF, BMP o WebP.");
+            ui.weak(tr(
+                "Aún no hay imagen: elige un fichero PNG, JPEG, GIF, BMP o WebP.",
+            ));
         } else {
             match self.image_info(b) {
-                Ok(info) => ui.label(format!("Imagen cargada: {info}")),
+                Ok(info) => ui.label(trf!("Imagen cargada: {info}", info)),
                 Err(e) => ui.colored_label(theme::error_color(), e),
             };
         }
@@ -160,42 +170,47 @@ impl BackdropEditor {
         ui.horizontal(|ui| {
             if is_text {
                 if ui
-                    .button("📂 Cargar de un fichero…")
-                    .on_hover_text("Lee el texto o el dibujo ASCII de un fichero de texto")
+                    .button(tr("📂 Cargar de un fichero…"))
+                    .on_hover_text(tr("Lee el texto o el dibujo ASCII de un fichero de texto"))
                     .clicked()
                     && let Some(path) =
-                        self.pick("Texto de fondo", ("Texto", &["txt", "asc", "ans"]))
+                        self.pick(tr("Texto de fondo"), (tr("Texto"), &["txt", "asc", "ans"]))
                 {
                     match backdrop::read_text_file(&path) {
                         Ok(text) => {
                             b.text = text;
-                            self.message = Some((format!("Cargado {}", path.display()), false));
+                            let message = trf!("Cargado {path}", path = path.display());
+                            self.message = Some((message, false));
                             changed = true;
                         }
                         Err(e) => self.message = Some((format!("{e:#}"), true)),
                     }
                 }
-                if b.kind == BackdropKind::Ascii && ui.button("Poner un ejemplo").clicked() {
+                if b.kind == BackdropKind::Ascii && ui.button(tr("Poner un ejemplo")).clicked() {
                     b.text = SAMPLE_ASCII.to_string();
                     changed = true;
                 }
             } else {
-                if ui.button("📂 Elegir imagen…").clicked()
+                if ui.button(tr("📂 Elegir imagen…")).clicked()
                     && let Some(path) = self.pick(
-                        "Imagen de fondo",
-                        ("Imágenes", &["png", "jpg", "jpeg", "gif", "bmp", "webp"]),
+                        tr("Imagen de fondo"),
+                        (
+                            tr("Imágenes"),
+                            &["png", "jpg", "jpeg", "gif", "bmp", "webp"],
+                        ),
                     )
                 {
                     match backdrop::encode_image_file(&path) {
                         Ok(image) => {
                             b.image = image;
-                            self.message = Some((format!("Cargada {}", path.display()), false));
+                            let message = trf!("Cargada {path}", path = path.display());
+                            self.message = Some((message, false));
                             changed = true;
                         }
                         Err(e) => self.message = Some((format!("{e:#}"), true)),
                     }
                 }
-                if !b.image.is_empty() && ui.button("Quitar").clicked() {
+                if !b.image.is_empty() && ui.button(tr("Quitar")).clicked() {
                     b.image.clear();
                     self.message = None;
                     changed = true;
@@ -205,13 +220,13 @@ impl BackdropEditor {
         ui.add(
             egui::TextEdit::singleline(&mut self.path)
                 .id_salt((salt, "backdrop_path"))
-                .hint_text("Ruta del fichero (opcional)")
+                .hint_text(tr("Ruta del fichero (opcional)"))
                 .desired_width(f32::INFINITY),
         )
-        .on_hover_text(
+        .on_hover_text(tr(
             "Déjalo vacío para elegir con el explorador de archivos; \
              si escribes una ruta se carga esa",
-        );
+        ));
         if let Some((message, is_error)) = &self.message {
             let color = if *is_error {
                 theme::error_color()
@@ -224,15 +239,21 @@ impl BackdropEditor {
         egui::Grid::new((salt, "backdrop_grid"))
             .num_columns(2)
             .show(ui, |ui| {
-                changed |= slider(ui, "Opacidad", &mut b.opacity, 0.0..=100.0, " %");
+                changed |= slider(ui, tr("Opacidad"), &mut b.opacity, 0.0..=100.0, " %");
                 if is_text {
-                    changed |= slider(ui, "Tamaño de la letra", &mut b.size, 6.0..=300.0, " pt");
-                    ui.label("Color");
+                    changed |= slider(
+                        ui,
+                        tr("Tamaño de la letra"),
+                        &mut b.size,
+                        6.0..=300.0,
+                        " pt",
+                    );
+                    ui.label(tr("Color"));
                     ui.horizontal(|ui| {
                         let mut own = b.color.is_some();
                         if ui
-                            .checkbox(&mut own, "Propio")
-                            .on_hover_text("Sin marcar se usa el color del texto del terminal")
+                            .checkbox(&mut own, tr("Propio"))
+                            .on_hover_text(tr("Sin marcar se usa el color del texto del terminal"))
                             .changed()
                         {
                             b.color = own.then_some(Rgb::hex(0xff5c5c));
@@ -243,24 +264,27 @@ impl BackdropEditor {
                         }
                     });
                     ui.end_row();
-                    changed |= slider(ui, "Giro", &mut b.angle, -90.0..=90.0, "°");
-                    ui.label("Repetir");
-                    changed |= ui.checkbox(&mut b.repeat, "Por todo el terminal").changed();
+                    changed |= slider(ui, tr("Giro"), &mut b.angle, -90.0..=90.0, "°");
+                    ui.label(tr("Repetir"));
+                    changed |= ui
+                        .checkbox(&mut b.repeat, tr("Por todo el terminal"))
+                        .changed();
                     ui.end_row();
                 } else {
-                    ui.label("Ajuste");
+                    ui.label(tr("Ajuste"));
                     egui::ComboBox::from_id_salt((salt, "backdrop_fit"))
-                        .selected_text(b.fit.label())
+                        .selected_text(tr(b.fit.label()))
                         .width(190.0)
                         .show_ui(ui, |ui| {
                             for fit in Fit::ALL {
-                                changed |=
-                                    ui.selectable_value(&mut b.fit, fit, fit.label()).changed();
+                                changed |= ui
+                                    .selectable_value(&mut b.fit, fit, tr(fit.label()))
+                                    .changed();
                             }
                         });
                     ui.end_row();
                     if matches!(b.fit, Fit::Original | Fit::Tile) {
-                        ui.label("Escala");
+                        ui.label(tr("Escala"));
                         changed |= ui
                             .add(
                                 egui::Slider::new(&mut b.scale, 0.05..=8.0)
@@ -278,21 +302,21 @@ impl BackdropEditor {
                     !matches!(b.fit, Fit::Stretch | Fit::Tile)
                 };
                 if positioned {
-                    ui.label("Posición");
+                    ui.label(tr("Posición"));
                     egui::ComboBox::from_id_salt((salt, "backdrop_anchor"))
-                        .selected_text(b.anchor.label())
+                        .selected_text(tr(b.anchor.label()))
                         .width(190.0)
                         .show_ui(ui, |ui| {
                             for anchor in Anchor::ALL {
                                 changed |= ui
-                                    .selectable_value(&mut b.anchor, anchor, anchor.label())
+                                    .selectable_value(&mut b.anchor, anchor, tr(anchor.label()))
                                     .changed();
                             }
                         });
                     ui.end_row();
                 }
                 if is_text || matches!(b.fit, Fit::Original | Fit::Contain) {
-                    changed |= slider(ui, "Margen", &mut b.margin, 0.0..=300.0, " px");
+                    changed |= slider(ui, tr("Margen"), &mut b.margin, 0.0..=300.0, " px");
                 }
             });
         changed
