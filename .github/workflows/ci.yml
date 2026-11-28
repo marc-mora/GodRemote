@@ -184,8 +184,10 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  # Publica la versión con sus ejecutables. Si existe docs/versiones/vX.Y.Z.md,
-  # encabeza las notas. Una versión ya publicada no se sustituye: el paso falla.
+  # Publica la versión con sus ejecutables. Si la Release ya existe (creada a
+  # mano en GitHub junto con la etiqueta) se le añaden; si no, se crea. Las
+  # notas salen de docs/versiones/vX.Y.Z.md, si existe. Un ejecutable ya
+  # publicado no se sustituye: el paso falla.
   release:
     name: Publicar la versión
     if: startsWith(github.ref, 'refs/tags/v')
@@ -199,17 +201,27 @@ jobs:
         with:
           path: publicar
           merge-multiple: true
-      - name: Crea la Release
+      - name: Publica los ejecutables
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
+          etiqueta="$GITHUB_REF_NAME"
+          notas="docs/versiones/$etiqueta.md"
           ls -l publicar
-          notas=()
-          if [ -f "docs/versiones/$GITHUB_REF_NAME.md" ]; then
-            notas=(--notes-file "docs/versiones/$GITHUB_REF_NAME.md")
+          if gh release view "$etiqueta" > /dev/null 2>&1; then
+            gh release upload "$etiqueta" publicar/*
+            # Si se creó sin descripción, se le ponen las notas.
+            if [ -f "$notas" ] && [ -z "$(gh release view "$etiqueta" --json body --jq .body)" ]; then
+              gh release edit "$etiqueta" --notes-file "$notas"
+            fi
+          else
+            opciones=()
+            if [ -f "$notas" ]; then
+              opciones=(--notes-file "$notas")
+            fi
+            gh release create "$etiqueta" publicar/* \
+              --verify-tag \
+              --title "GodRemote ${etiqueta#v}" \
+              --generate-notes "${opciones[@]}"
           fi
-          gh release create "$GITHUB_REF_NAME" publicar/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --title "GodRemote ${GITHUB_REF_NAME#v}" \
-            --generate-notes "${notas[@]}"

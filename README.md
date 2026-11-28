@@ -83,10 +83,13 @@ Cada cambio que se sube pasa por GitHub Actions (`.github/workflows/ci.yml`):
 - **Windows y macOS**: compilación nativa y las pruebas que no dependen de
   servidores de Unix.
 
-Al empujar una etiqueta `vX.Y.Z` se compilan además los ejecutables nativos
+Al crear una etiqueta `vX.Y.Z` se compilan además los ejecutables nativos
 de las dos ediciones para Windows, Linux y macOS, y se publican como
-**Release** en GitHub (si existe `docs/versiones/vX.Y.Z.md`, encabeza sus
-notas). Los mismos ejecutables se pueden pedir sin publicar
+**Release** en GitHub. La etiqueta se puede empujar con `git` o crear desde
+la web (*Releases → Draft a new release*, escribiendo la etiqueta nueva y
+publicando): en ese caso los ejecutables se añaden a la versión recién
+creada. Si existe `docs/versiones/vX.Y.Z.md`, hace de notas de la versión.
+Los mismos ejecutables se pueden pedir sin publicar
 una versión —se descargan como artefactos de la ejecución, en la pestaña
 *Actions*—: a mano desde esa pestaña, o poniendo `[ejecutables]` en el
 mensaje de un commit.
