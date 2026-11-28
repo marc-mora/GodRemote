@@ -6,6 +6,7 @@
 
 mod backend;
 mod base;
+mod sync;
 mod ui_main;
 mod ui_tools;
 mod ui_views;
@@ -14,5 +15,12 @@ mod ui_views;
 pub(super) type Table = &'static [(&'static str, &'static str)];
 
 pub(super) fn tables() -> &'static [Table] {
-    &[base::T, backend::T, ui_main::T, ui_tools::T, ui_views::T]
+    &[
+        base::T,
+        backend::T,
+        sync::T,
+        ui_main::T,
+        ui_tools::T,
+        ui_views::T,
+    ]
 }
