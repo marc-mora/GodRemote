@@ -243,9 +243,187 @@ impl Vault {
     }
 }
 
+// --- Para la sincronización entre equipos (`crate::sync`) ---------------
+
+/// Costes máximos que se admiten en un baúl que llega de fuera: derivar su
+/// clave no debe poder agotar la memoria.
+const MAX_FOREIGN_M_COST: u32 = 1024 * 1024;
+const MAX_FOREIGN_T_COST: u32 = 16;
+const MAX_FOREIGN_P_COST: u32 = 8;
+
+/// Las piezas de un fichero de baúl, comprobadas: sal, nonce, texto cifrado
+/// y costes.
+type Parts = ([u8; 16], [u8; 24], Vec<u8>, (u32, u32, u32));
+
+fn parts(raw: &[u8]) -> Option<Parts> {
+    let file: VaultFile = serde_json::from_slice(raw).ok()?;
+    let costs_ok = (8..=MAX_FOREIGN_M_COST).contains(&file.m_cost)
+        && (1..=MAX_FOREIGN_T_COST).contains(&file.t_cost)
+        && (1..=MAX_FOREIGN_P_COST).contains(&file.p_cost);
+    if file.version != 1 || !costs_ok {
+        return None;
+    }
+    let salt: [u8; 16] = B64.decode(&file.salt).ok()?.try_into().ok()?;
+    let nonce: [u8; 24] = B64.decode(&file.nonce).ok()?.try_into().ok()?;
+    let ciphertext = B64.decode(&file.ciphertext).ok()?;
+    (ciphertext.len() >= 16).then_some((
+        salt,
+        nonce,
+        ciphertext,
+        (file.m_cost, file.t_cost, file.p_cost),
+    ))
+}
+
+/// Secretos sacados de un baúl; se borran de la memoria al soltarlos.
+pub struct Secrets(BTreeMap<String, String>);
+
+impl std::ops::Deref for Secrets {
+    type Target = BTreeMap<String, String>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for Secrets {
+    fn drop(&mut self) {
+        for value in self.0.values_mut() {
+            value.zeroize();
+        }
+    }
+}
+
+/// `true` si `raw` tiene la forma de un fichero de baúl con costes
+/// razonables. No dice nada de su contraseña ni de su contenido.
+pub fn looks_valid(raw: &[u8]) -> bool {
+    parts(raw).is_some()
+}
+
+impl Vault {
+    /// Todos los secretos, para combinarlos con los de otro baúl.
+    pub fn entries(&self) -> &BTreeMap<String, String> {
+        &self.secrets
+    }
+
+    /// Secretos de otro fichero de baúl (el de otro equipo del usuario, que
+    /// llega por la sincronización). Se abre con la clave de este si viene
+    /// del mismo baúl o, si no, con `master`.
+    pub fn read_other(&self, raw: &[u8], master: Option<&str>) -> Result<Secrets> {
+        let (salt, nonce, ciphertext, params) =
+            parts(raw).ok_or_else(|| anyhow!("El otro baúl no es válido"))?;
+        let key = if salt == self.salt && params == self.params {
+            self.key.clone()
+        } else if let Some(master) = master.filter(|m| !m.is_empty()) {
+            derive_key(master, &salt, params)?
+        } else {
+            bail!("El otro baúl tiene otra contraseña maestra");
+        };
+        let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
+            .map_err(|_| anyhow!("clave no válida"))?;
+        let plain = Zeroizing::new(
+            cipher
+                .decrypt(
+                    &XNonce::from(nonce),
+                    Payload {
+                        msg: &ciphertext,
+                        aad: AAD,
+                    },
+                )
+                .map_err(|_| anyhow!("La contraseña maestra del otro baúl no es esa"))?,
+        );
+        Ok(Secrets(
+            serde_json::from_slice(&plain).context("el otro baúl está dañado")?,
+        ))
+    }
+
+    /// Guarda y quita varios secretos de una vez.
+    pub fn apply(&mut self, set: &BTreeMap<String, String>, remove: &[String]) -> Result<()> {
+        for (key, value) in set {
+            if let Some(mut old) = self.secrets.insert(key.clone(), value.clone()) {
+                old.zeroize();
+            }
+        }
+        for key in remove {
+            if let Some(mut old) = self.secrets.remove(key) {
+                old.zeroize();
+            }
+        }
+        self.persist()
+    }
+
+    /// Vuelve a leer el fichero, que ha cambiado por fuera (lo ha traído la
+    /// sincronización), con la clave que ya se tiene. Falla si ahora es
+    /// otro baúl (otra contraseña maestra): hay que volver a abrirlo.
+    pub fn reload(&mut self) -> Result<()> {
+        let raw = std::fs::read(&self.path)
+            .with_context(|| format!("leyendo {}", self.path.display()))?;
+        let fresh = self.read_other(&raw, None)?;
+        for value in self.secrets.values_mut() {
+            value.zeroize();
+        }
+        self.secrets = fresh.0.clone();
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn other_vaults_are_read_merged_and_reloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.json");
+        let mut mine = Vault::create(&path, "maestra").unwrap();
+        mine.set("a/password", "uno").unwrap();
+        let copy = std::fs::read(&path).unwrap();
+        assert!(looks_valid(&copy));
+        assert!(!looks_valid(b"{}") && !looks_valid(b"no es json"));
+        // Costes desmedidos: no se intenta siquiera derivar la clave.
+        let huge = String::from_utf8(copy.clone())
+            .unwrap()
+            .replace("\"m_cost\": 65536", "\"m_cost\": 4000000000");
+        assert!(!looks_valid(huge.as_bytes()));
+
+        // Una copia del mismo baúl (misma sal) se lee con la clave en uso.
+        mine.set("b/password", "dos").unwrap();
+        let old = mine.read_other(&copy, None).unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!(old.get("a/password").map(String::as_str), Some("uno"));
+
+        // Otro baúl, con otra contraseña maestra, necesita la suya.
+        let other_path = dir.path().join("otro.json");
+        let mut other = Vault::create(&other_path, "distinta").unwrap();
+        other.set("c/password", "tres").unwrap();
+        let other_raw = std::fs::read(&other_path).unwrap();
+        // (`Secrets` no se puede imprimir: no hay `unwrap_err`.)
+        let e = mine.read_other(&other_raw, None).err().unwrap();
+        assert!(
+            format!("{e:#}").contains("otra contraseña maestra"),
+            "{e:#}"
+        );
+        assert!(mine.read_other(&other_raw, Some("mala")).is_err());
+        let theirs = mine.read_other(&other_raw, Some("distinta")).unwrap();
+        assert_eq!(theirs.get("c/password").map(String::as_str), Some("tres"));
+
+        // Varios cambios de una vez, y quedan en disco.
+        mine.apply(&theirs, &["a/password".to_string()]).unwrap();
+        let reopened = Vault::unlock(&path, "maestra").unwrap();
+        assert_eq!(reopened.get("c/password"), Some("tres"));
+        assert_eq!(reopened.get("b/password"), Some("dos"));
+        assert!(!reopened.contains("a/password"));
+        assert_eq!(mine.entries().len(), 2);
+
+        // El fichero cambia por fuera: con la misma clave se relee; si es
+        // otro baúl, no.
+        std::fs::write(&path, &copy).unwrap();
+        mine.reload().unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine.get("a/password"), Some("uno"));
+        std::fs::write(&path, &other_raw).unwrap();
+        assert!(mine.reload().is_err());
+        assert_eq!(mine.get("a/password"), Some("uno"));
+    }
 
     #[test]
     fn roundtrip_and_wrong_password() {

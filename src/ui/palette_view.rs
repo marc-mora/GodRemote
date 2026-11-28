@@ -33,6 +33,8 @@ pub enum Command {
     ToggleCast,
     PlayCast,
     History,
+    Sync,
+    Shares,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

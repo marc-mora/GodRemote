@@ -16,6 +16,8 @@ pub mod probe;
 pub mod server_bar;
 pub mod settings_view;
 pub mod sftp_view;
+mod share_view;
+mod sync_view;
 mod term_tools;
 pub mod themes_view;
 pub mod transfer_view;
@@ -324,6 +326,10 @@ pub struct App {
     x_resize: Option<((u32, u32), Instant)>,
     /// Disparadores y demás herramientas de los terminales.
     term_tools: term_tools::TermTools,
+    /// Sincronización de la configuración con los demás equipos.
+    sync: sync_view::SyncUi,
+    /// Carpetas de equipos publicadas para compañeros y las que se siguen.
+    shares: share_view::ShareUi,
 }
 
 /// Vista dividida: varios terminales a la vez, en mosaico.
@@ -540,6 +546,8 @@ impl App {
             xhost,
             x_windows: Default::default(),
             x_resize: None,
+            sync: sync_view::SyncUi::new(),
+            shares: share_view::ShareUi::new(),
         }
     }
 
@@ -1352,6 +1360,10 @@ impl App {
 
     fn apply_tree_actions(&mut self, actions: Vec<TreeAction>) {
         for action in actions {
+            // Las carpetas compartidas son de solo lectura.
+            let Some(action) = self.share_guard(action) else {
+                continue;
+            };
             match action {
                 TreeAction::Select(id) => self.selected = Some(id),
                 TreeAction::Connect(id) => {
@@ -1438,6 +1450,8 @@ impl App {
             Node::Folder(f) => Some(f.id),
             Node::Session(_) => self.tree.parent_of(id),
         }
+        // (En una carpeta compartida no se crea nada.)
+        .filter(|folder| !crate::share::is_shared(*folder))
     }
 
     // ------------------------------------------------------------------
@@ -1753,6 +1767,7 @@ impl App {
                 // (Si el navegador no se abre, la dirección sigue a la vista.)
                 let _ = crate::paths::open_url(crate::update_check::RELEASES_URL);
             }
+            self.sync_status(ui);
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 if let Some((msg, is_error, _)) = &self.toast {
                     let color = if *is_error {
@@ -2322,6 +2337,16 @@ impl App {
             "",
             Command::Transfer,
         );
+        command(
+            "Sincronización entre mis equipos",
+            "carpeta cifrada, conflictos",
+            Command::Sync,
+        );
+        command(
+            "Carpetas compartidas con compañeros",
+            "publicar una carpeta de equipos o seguir la de otro",
+            Command::Shares,
+        );
         if self.settings.x_server.embedded {
             command(
                 "Servidor X: abrir su pestaña",
@@ -2453,6 +2478,8 @@ impl App {
             }
             Command::Settings => self.settings_window = Some(SettingsWindow::default()),
             Command::Transfer => self.transfer_window = Some(TransferWindow::default()),
+            Command::Sync => self.open_sync_window(),
+            Command::Shares => self.open_share_window(),
             Command::VaultLock => self.vault = None,
             Command::VaultUnlock => {
                 self.vault_dialog = Some(VaultDialog::Unlock {
@@ -4225,9 +4252,9 @@ fn tree_ui(
         match node {
             Node::Folder(f) => {
                 let title = if selected == Some(f.id) {
-                    RichText::new(format!("📁 {}", f.name)).strong()
+                    RichText::new(crate::share::folder_label(f.id, &f.name)).strong()
                 } else {
-                    RichText::new(format!("📁 {}", f.name))
+                    RichText::new(crate::share::folder_label(f.id, &f.name))
                 };
                 let header = egui::CollapsingHeader::new(title)
                     .id_salt(f.id)
@@ -4291,6 +4318,12 @@ fn tree_ui(
 }
 
 impl eframe::App for App {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // También con la ventana minimizada u oculta, que no se pinta.
+        self.sync_tick(ctx);
+        self.share_tick(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Los atajos de los snippets se miran antes de que el terminal vea
         // las teclas.
@@ -4566,6 +4599,12 @@ impl eframe::App for App {
             if request.open_transfer {
                 self.transfer_window = Some(TransferWindow::default());
             }
+            if request.open_sync {
+                self.open_sync_window();
+            }
+            if request.open_shares {
+                self.open_share_window();
+            }
             if let Some(folder) = request.open_folder {
                 let _ = std::fs::create_dir_all(&folder);
                 if let Err(e) = crate::paths::open_with_system(&folder) {
@@ -4629,6 +4668,8 @@ impl eframe::App for App {
         self.vault_guard(&ctx);
         self.fleet_window_ui(&ctx);
         self.dashboard_ui(&ctx);
+        self.sync_window_ui(&ctx);
+        self.share_window_ui(&ctx);
         self.palette_ui(&ctx);
         self.close_confirm_ui(&ctx);
         self.quit_guard(&ctx);

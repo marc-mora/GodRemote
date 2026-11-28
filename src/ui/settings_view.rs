@@ -14,6 +14,10 @@ pub struct SettingsRequest {
     pub open_folder: Option<std::path::PathBuf>,
     /// Abrir la ventana de importación y copias de seguridad.
     pub open_transfer: bool,
+    /// Abrir la ventana de sincronización entre equipos.
+    pub open_sync: bool,
+    /// Abrir la ventana de carpetas compartidas con compañeros.
+    pub open_shares: bool,
     /// Arrancar el servidor X integrado y mostrar su pestaña.
     pub open_x_server: bool,
     /// Guardar en el baúl esta contraseña del proxy (vacía: borrarla).
@@ -190,6 +194,26 @@ impl SettingsWindow {
                 {
                     request.open_transfer = true;
                 }
+                        if ui
+                            .button("Sincronización entre mis equipos…")
+                            .on_hover_text(
+                                "Mantener la configuración al día en todos tus equipos a través \
+                                 de una carpeta que ya repliques (Dropbox, Syncthing…), cifrada",
+                            )
+                            .clicked()
+                        {
+                            request.open_sync = true;
+                        }
+                        if ui
+                            .button("Carpetas compartidas con compañeros…")
+                            .on_hover_text(
+                                "Publicar una carpeta de equipos (sin secretos) para tus \
+                                 compañeros, o seguir las que publiquen ellos",
+                            )
+                            .clicked()
+                        {
+                            request.open_shares = true;
+                        }
                         ui.separator();
                         ui.strong(tr("Barra de información del servidor"));
                         ui.horizontal(|ui| {
