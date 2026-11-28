@@ -41,8 +41,10 @@ use tokio::sync::mpsc;
 use tokio_rustls::client::TlsStream;
 
 use crate::desktop::{DesktopBackend, DesktopEvent, DesktopInput, Framebuffer, SharedFrame};
+use crate::i18n::tr;
 use crate::model::Session;
 use crate::ssh::{Endpoint, NetStream, Prompter, Route};
+use crate::trf;
 use crate::trust::{self, TrustStatus};
 
 mod clipboard;
@@ -139,7 +141,7 @@ pub fn spawn_via(
         let error = match inner.await {
             Ok(Ok(())) => None,
             Ok(Err(e)) => Some(format!("{e:#}")),
-            Err(_) => Some("Error interno del cliente RDP".to_string()),
+            Err(_) => Some(tr("Error interno del cliente RDP").to_string()),
         };
         emit.emit(DesktopEvent::Closed(error));
     });
@@ -156,9 +158,12 @@ fn checked_size(size: DesktopSize) -> Result<DesktopSize> {
     let valid = 1..=MAX_SIZE;
     if !valid.contains(&size.width) || !valid.contains(&size.height) {
         bail!(
-            "El servidor anunció un tamaño de escritorio no válido ({}×{})",
-            size.width,
-            size.height
+            "{}",
+            trf!(
+                "El servidor anunció un tamaño de escritorio no válido ({width}×{height})",
+                width = size.width,
+                height = size.height
+            )
         );
     }
     Ok(size)
@@ -329,9 +334,15 @@ async fn connect(
             Attempt::AuthRejected(detail) => {
                 secret.rejected += 1;
                 if secret.rejected >= MAX_PASSWORD_ATTEMPTS {
-                    bail!("Autenticación fallida: usuario o contraseña incorrectos ({detail})");
+                    bail!(
+                        "{}",
+                        trf!(
+                            "Autenticación fallida: usuario o contraseña incorrectos ({detail})",
+                            detail
+                        )
+                    );
                 }
-                emit.status("El servidor rechazó la contraseña");
+                emit.status(tr("El servidor rechazó la contraseña"));
                 // El servidor ya es de confianza: se pregunta aquí mismo y el
                 // siguiente intento va directo a autenticarse.
                 secret.password = None;
@@ -340,33 +351,38 @@ async fn connect(
             }
         }
     }
-    bail!("No se pudo completar la conexión")
+    bail!("{}", tr("No se pudo completar la conexión"))
 }
 
 /// Pide la contraseña al usuario (solo tras confiar en el servidor).
 async fn ask_password(target: &Target<'_>, secret: &mut Secret) -> Result<()> {
     let Target { user, host, .. } = target;
     let message = if secret.rejected == 0 {
-        format!("Contraseña de {user} en {host}")
+        trf!("Contraseña de {user} en {host}", user, host)
     } else {
-        format!("Contraseña incorrecta. Contraseña de {user} en {host}")
+        trf!(
+            "Contraseña incorrecta. Contraseña de {user} en {host}",
+            user,
+            host
+        )
     };
     let answer = target
         .emit
         .prompter
-        .secret("Escritorio remoto", &message, false, true)
+        .secret(tr("Escritorio remoto"), &message, false, true)
         .await
-        .ok_or_else(|| anyhow!("Autenticación cancelada"))?;
+        .ok_or_else(|| anyhow!("{}", tr("Autenticación cancelada")))?;
     secret.password = Some(answer.value);
     secret.save = answer.save;
     Ok(())
 }
 
-/// Aplica el límite de tiempo de una fase de la conexión.
+/// Aplica el límite de tiempo de una fase de la conexión. `what` dice, ya
+/// traducido, qué se estaba haciendo («negociando TLS»).
 async fn phase<T>(what: &'static str, fut: impl Future<Output = T>) -> Result<T> {
     tokio::time::timeout(PHASE_TIMEOUT, fut)
         .await
-        .map_err(|_| anyhow!("Tiempo de espera agotado {what}"))
+        .map_err(|_| anyhow!("{}", trf!("Tiempo de espera agotado {what}", what)))
 }
 
 async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
@@ -375,7 +391,7 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
     } = target;
     let port = *port;
 
-    emit.status(format!("Conectando a {host}:{port}…"));
+    emit.status(trf!("Conectando a {host}:{port}…", host, port));
     let connection = target.route.connect_with_addr(host, port).await?;
     let stream = connection.stream;
     // A través de un salto no hay socket propio: se usan direcciones neutras.
@@ -388,7 +404,7 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
             a.ip()
         });
 
-    emit.status("Negociando seguridad…");
+    emit.status(tr("Negociando seguridad…"));
     // La negociación va en claro y antes de saber con quién se habla: el
     // conector se crea sin credenciales (ni siquiera el usuario, que si no
     // viajaría en la petición inicial) y se le dan al confiar en el servidor.
@@ -399,11 +415,11 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
     }
     let mut framed = TokioFramed::new(stream);
     let should_upgrade = phase(
-        "negociando con el servidor",
+        tr("negociando con el servidor"),
         ironrdp_tokio::connect_begin(&mut framed, &mut connector),
     )
     .await?
-    .map_err(|e| connector_error("Fallo al negociar la conexión", &e))?;
+    .map_err(|e| connector_error(tr("Fallo al negociar la conexión"), &e))?;
     // ¿Ha elegido el servidor autenticación de red (NLA/CredSSP)?
     let nla = matches!(
         connector.state,
@@ -412,11 +428,14 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
     );
     let (stream, leftover) = framed.into_inner();
     if !leftover.is_empty() {
-        bail!("El servidor envió datos inesperados antes de la negociación TLS");
+        bail!(
+            "{}",
+            tr("El servidor envió datos inesperados antes de la negociación TLS")
+        );
     }
 
     let tls = phase(
-        "negociando TLS",
+        tr("negociando TLS"),
         tls::upgrade(stream, host.clone(), peer_ip),
     )
     .await??;
@@ -426,7 +445,7 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
         .peer_certificates()
         .and_then(|chain| chain.first())
         .map(|cert| cert.as_ref().to_vec())
-        .ok_or_else(|| anyhow!("El servidor no presentó ningún certificado TLS"))?;
+        .ok_or_else(|| anyhow!("{}", tr("El servidor no presentó ningún certificado TLS")))?;
 
     // Confianza en el certificado: siempre antes de enviar credenciales.
     let fingerprint = trust::fingerprint(&certificate);
@@ -435,24 +454,34 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
     match trust::check(&known_hosts, host, port, &fingerprint)? {
         TrustStatus::Trusted => {}
         TrustStatus::Unknown => {
+            // («certificado TLS» no se enseña: es la marca por la que la
+            // interfaz distingue esta pregunta de la de una clave SSH.)
             let accepted = emit
                 .prompter
                 .confirm_host_key(host, port, "certificado TLS".into(), fingerprint.clone())
                 .await;
             if !accepted {
-                bail!("Certificado rechazado por el usuario");
+                bail!("{}", tr("Certificado rechazado por el usuario"));
             }
             trust::remember(&known_hosts, host, port, &fingerprint)
-                .with_context(|| format!("guardando en {}", known_hosts.display()))?;
+                .with_context(|| trf!("guardando en {path}", path = known_hosts.display()))?;
             asked = true;
         }
         TrustStatus::Changed { expected } => bail!(
-            "¡EL CERTIFICADO TLS DE {host}:{port} HA CAMBIADO! Puede ser un intento de \
-             suplantación (ataque de intermediario) o que el servidor haya renovado su \
-             certificado. Huella recibida: {fingerprint}. Huella recordada: {expected}. \
-             Si el cambio es legítimo, elimina la entrada «{}:{port}» de {} y vuelve a conectar.",
-            host.to_lowercase(),
-            known_hosts.display()
+            "{}",
+            trf!(
+                "¡EL CERTIFICADO TLS DE {host}:{port} HA CAMBIADO! Puede ser un intento de \
+                 suplantación (ataque de intermediario) o que el servidor haya renovado su \
+                 certificado. Huella recibida: {fingerprint}. Huella recordada: {expected}. \
+                 Si el cambio es legítimo, elimina la entrada «{entry}:{port}» de {file} y \
+                 vuelve a conectar.",
+                host,
+                port,
+                fingerprint,
+                expected,
+                entry = host.to_lowercase(),
+                file = known_hosts.display()
+            )
         ),
     }
 
@@ -461,7 +490,10 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
         // Sin usuario no hay nada que autenticar desde aquí: con NLA es un
         // error y, si no, será el servidor quien lo pida en su pantalla.
         if nla {
-            bail!("El servidor exige autenticación de red (NLA): indica el usuario en la sesión");
+            bail!(
+                "{}",
+                tr("El servidor exige autenticación de red (NLA): indica el usuario en la sesión")
+            );
         }
     } else if secret.password.is_none() {
         ask_password(target, secret).await?;
@@ -473,7 +505,7 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
     }
     let password = secret.password.clone().unwrap_or_default();
 
-    emit.status("Autenticando…");
+    emit.status(tr("Autenticando…"));
     // Con contraseña, el servidor inicia la sesión sin volver a preguntar.
     connector.config.autologon = !user.is_empty() && !password.is_empty();
     connector.config.credentials = Credentials::UsernamePassword {
@@ -492,7 +524,10 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
             selected_protocol, ..
         } = connector.state
         else {
-            bail!("Estado inesperado del conector RDP antes de CredSSP");
+            bail!(
+                "{}",
+                tr("Estado inesperado del conector RDP antes de CredSSP")
+            );
         };
         public_key = tls::server_public_key(&certificate)?;
         let (sequence, ts_request) = CredsspSequence::init(
@@ -503,10 +538,10 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
             public_key.clone(),
             None,
         )
-        .map_err(|e| connector_error("No se pudo iniciar la autenticación (NLA)", &e))?;
+        .map_err(|e| connector_error(tr("No se pudo iniciar la autenticación (NLA)"), &e))?;
         let mut buf = WriteBuf::new();
         let outcome = phase(
-            "autenticando",
+            tr("autenticando"),
             ironrdp_tokio::perform_credssp(
                 &mut framed,
                 &mut NoNetwork,
@@ -519,14 +554,14 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
         if let Err(e) = outcome {
             return match credssp_rejection(&e) {
                 Some(detail) => Ok(Attempt::AuthRejected(detail)),
-                None => Err(connector_error("Fallo en la autenticación (NLA)", &e)),
+                None => Err(connector_error(tr("Fallo en la autenticación (NLA)"), &e)),
             };
         }
         connector.mark_credssp_as_done();
     }
 
     let outcome = phase(
-        "estableciendo la sesión",
+        tr("estableciendo la sesión"),
         ironrdp_tokio::connect_finalize(
             upgraded,
             connector,
@@ -538,10 +573,13 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
         ),
     )
     .await?
-    .map_err(|e| connector_error("No se pudo establecer la sesión", &e))?;
-    let result = outcome
-        .into_connected()
-        .map_err(|_| anyhow!("El servidor pidió una redirección a otro equipo, no soportada"))?;
+    .map_err(|e| connector_error(tr("No se pudo establecer la sesión"), &e))?;
+    let result = outcome.into_connected().map_err(|_| {
+        anyhow!(
+            "{}",
+            tr("El servidor pidió una redirección a otro equipo, no soportada")
+        )
+    })?;
 
     let to_save = if secret.save {
         vec![(target.session.password_key(), password)]
@@ -559,8 +597,12 @@ async fn attempt(target: &Target<'_>, secret: &mut Secret) -> Result<Attempt> {
 /// Configuración del conector, aún sin credenciales (se añaden al confiar
 /// en el servidor).
 fn build_config(target: &Target<'_>) -> Result<Config> {
-    let codecs = client_codecs_capabilities(&[])
-        .map_err(|e| anyhow!("No se pudieron preparar los códecs gráficos: {e}"))?;
+    let codecs = client_codecs_capabilities(&[]).map_err(|e| {
+        anyhow!(
+            "{}",
+            trf!("No se pudieron preparar los códecs gráficos: {e}", e)
+        )
+    })?;
     let platform = if cfg!(windows) {
         MajorPlatformType::WINDOWS
     } else if cfg!(target_os = "macos") {
@@ -634,9 +676,9 @@ struct NoNetwork;
 
 impl ironrdp_tokio::NetworkClient for NoNetwork {
     async fn send(&mut self, _request: &NetworkRequest) -> ConnectorResult<Vec<u8>> {
-        Err(ironrdp_connector::general_err!(
+        Err(ironrdp_connector::general_err!(tr(
             "Kerberos no está soportado"
-        ))
+        )))
     }
 }
 
@@ -649,7 +691,7 @@ fn credssp_rejection(error: &ConnectorError) -> Option<String> {
     match error.kind() {
         ConnectorErrorKind::Credssp(e) if e.nstatus.is_some() => Some(e.to_string()),
         ConnectorErrorKind::AccessDenied => None,
-        _ => connection_lost(error).then(|| "el servidor cerró la conexión".to_string()),
+        _ => connection_lost(error).then(|| tr("el servidor cerró la conexión").to_string()),
     }
 }
 
@@ -675,36 +717,45 @@ fn connector_error(what: &str, error: &ConnectorError) -> anyhow::Error {
     match error.kind() {
         ConnectorErrorKind::Negotiation(failure) => {
             let reason = match failure.code() {
-                FailureCode::SSL_REQUIRED_BY_SERVER => "el servidor exige TLS o NLA".to_string(),
-                FailureCode::SSL_NOT_ALLOWED_BY_SERVER => {
+                FailureCode::SSL_REQUIRED_BY_SERVER => {
+                    tr("el servidor exige TLS o NLA").to_string()
+                }
+                FailureCode::SSL_NOT_ALLOWED_BY_SERVER => tr(
                     "el servidor solo admite la seguridad RDP estándar (sin TLS), \
-                     que no está soportada"
-                        .to_string()
-                }
+                     que no está soportada",
+                )
+                .to_string(),
                 FailureCode::SSL_CERT_NOT_ON_SERVER => {
-                    "el servidor no tiene un certificado válido".to_string()
+                    tr("el servidor no tiene un certificado válido").to_string()
                 }
-                FailureCode::HYBRID_REQUIRED_BY_SERVER => "el servidor exige NLA".to_string(),
+                FailureCode::HYBRID_REQUIRED_BY_SERVER => tr("el servidor exige NLA").to_string(),
                 FailureCode::SSL_WITH_USER_AUTH_REQUIRED_BY_SERVER => {
-                    "el servidor exige un certificado de cliente, no soportado".to_string()
+                    tr("el servidor exige un certificado de cliente, no soportado").to_string()
                 }
                 FailureCode::ENTRA_AUTH_REQUIRED_BY_SERVER => {
-                    "el servidor exige autenticación con Microsoft Entra, no soportada".to_string()
+                    tr("el servidor exige autenticación con Microsoft Entra, no soportada")
+                        .to_string()
                 }
                 _ => failure.to_string(),
             };
             anyhow!("{what}: {reason}")
         }
-        ConnectorErrorKind::AccessDenied => {
-            anyhow!("{what}: el servidor denegó el acceso a este usuario")
+        ConnectorErrorKind::AccessDenied => anyhow!(
+            "{what}: {}",
+            tr("el servidor denegó el acceso a este usuario")
+        ),
+        _ if connection_lost(error) => {
+            anyhow!("{what}: {}", tr("el servidor cerró la conexión"))
         }
-        _ if connection_lost(error) => anyhow!("{what}: el servidor cerró la conexión"),
         _ => anyhow!("{what}: {}", error.report()),
     }
 }
 
 fn session_error(error: SessionError) -> anyhow::Error {
-    anyhow!("Error en la sesión RDP: {}", error.report())
+    anyhow!(
+        "{}",
+        trf!("Error en la sesión RDP: {error}", error = error.report())
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -765,7 +816,7 @@ async fn active_session(
             writer
                 .write_all(&data)
                 .await
-                .context("Se perdió la conexión con el servidor")?;
+                .context(tr("Se perdió la conexión con el servidor"))?;
         }
     }
 
@@ -782,9 +833,11 @@ async fn active_session(
                     .process(&mut image, action, &payload, reader.last_read_at())
                     .map_err(session_error)?,
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    bail!("El servidor cerró la conexión")
+                    bail!("{}", tr("El servidor cerró la conexión"))
                 }
-                Err(e) => return Err(anyhow!(e).context("Se perdió la conexión con el servidor")),
+                Err(e) => {
+                    return Err(anyhow!(e).context(tr("Se perdió la conexión con el servidor")));
+                }
             },
             input = input_rx.recv(), if closing.is_none() => {
                 let mut events = Vec::new();
@@ -857,7 +910,7 @@ async fn active_session(
                         writer
                             .write_all(&data)
                             .await
-                            .context("Se perdió la conexión con el servidor")?;
+                            .context(tr("Se perdió la conexión con el servidor"))?;
                     }
                 }
                 ActiveStageOutput::GraphicsUpdate(region) => {
@@ -876,9 +929,10 @@ async fn active_session(
                         {
                             Ok(())
                         }
-                        GracefulDisconnectReason::Other(description) => {
-                            Err(anyhow!("El servidor cerró la sesión: {description}"))
-                        }
+                        GracefulDisconnectReason::Other(description) => Err(anyhow!(
+                            "{}",
+                            trf!("El servidor cerró la sesión: {description}", description)
+                        )),
                     };
                 }
                 ActiveStageOutput::DeactivateAll => {
@@ -888,16 +942,16 @@ async fn active_session(
                     let mut buf = WriteBuf::new();
                     let size = loop {
                         let written = phase(
-                            "reactivando la sesión",
+                            tr("reactivando la sesión"),
                             single_sequence_step_read(&mut reader, &mut sequence, &mut buf),
                         )
                         .await?
-                        .map_err(|e| connector_error("Fallo al reactivar la sesión", &e))?;
+                        .map_err(|e| connector_error(tr("Fallo al reactivar la sesión"), &e))?;
                         if written.size().is_some() {
                             writer
                                 .write_all(buf.filled())
                                 .await
-                                .context("Se perdió la conexión con el servidor")?;
+                                .context(tr("Se perdió la conexión con el servidor"))?;
                         }
                         match sequence.connection_activation_state() {
                             ConnectionActivationState::Finalized {
@@ -917,13 +971,19 @@ async fn active_session(
                                     pointer_software_rendering,
                                     static_channel_chunk_size,
                                 ) {
-                                    bail!("El servidor negoció parámetros no válidos al reactivar");
+                                    bail!(
+                                        "{}",
+                                        tr(
+                                            "El servidor negoció parámetros no válidos al reactivar"
+                                        )
+                                    );
                                 }
                                 encoder.set_capabilities(input_flags);
                                 break checked_size(desktop_size)?;
                             }
                             ConnectionActivationState::Redirected { .. } => bail!(
-                                "El servidor pidió una redirección a otro equipo, no soportada"
+                                "{}",
+                                tr("El servidor pidió una redirección a otro equipo, no soportada")
                             ),
                             _ => {}
                         }

@@ -581,11 +581,11 @@ impl Tracker {
 pub fn ago(then: i64, now: i64) -> String {
     let secs = now.saturating_sub(then);
     match secs {
-        i64::MIN..=59 => "ahora".to_string(),
-        60..=3599 => format!("hace {} min", secs / 60),
-        3600..=86_399 => format!("hace {} h", secs / 3600),
-        86_400..=172_799 => "ayer".to_string(),
-        172_800..=2_591_999 => format!("hace {} días", secs / 86_400),
+        i64::MIN..=59 => crate::i18n::tr("ahora").to_string(),
+        60..=3599 => crate::trf!("hace {n} min", n = secs / 60),
+        3600..=86_399 => crate::trf!("hace {n} h", n = secs / 3600),
+        86_400..=172_799 => crate::i18n::tr("ayer").to_string(),
+        172_800..=2_591_999 => crate::trf!("hace {n} días", n = secs / 86_400),
         _ => chrono::DateTime::from_timestamp(then, 0)
             .map(|date| {
                 date.with_timezone(&chrono::Local)

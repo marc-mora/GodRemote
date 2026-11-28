@@ -8,6 +8,11 @@ use godremote::render::{self, Backend};
 const ERRORS_ENV: &str = "GODREMOTE_RENDER_ERRORES";
 
 fn main() -> ExitCode {
+    // El idioma, antes que nada: lo que se enseñe antes del primer fotograma
+    // (también el aviso de que no se puede abrir la ventana) ya sale en él.
+    let settings = godremote::theme::Settings::load(&godremote::paths::settings_file());
+    godremote::i18n::set(godremote::i18n::resolve(settings.language));
+
     let plan = render::plan(std::env::var(render::ENV).ok().as_deref());
     let backend = plan[0];
     let error = match run(backend) {
@@ -42,9 +47,10 @@ fn main() -> ExitCode {
     rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Error)
         .set_title("GodRemote")
-        .set_description(format!(
+        .set_description(godremote::trf!(
             "GodRemote no ha podido abrir su ventana: este equipo no ofrece \
-             ningún modo de dibujo que sirva.\n\n{errors}"
+             ningún modo de dibujo que sirva.\n\n{errors}",
+            errors
         ))
         .show();
     ExitCode::FAILURE

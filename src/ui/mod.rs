@@ -137,19 +137,7 @@ fn reconnect_delay(attempt: u32) -> Duration {
 /// confianza en el servidor no: repetirlo no lo arregla y varios intentos
 /// fallidos seguidos pueden bloquear la cuenta.
 fn worth_retrying(error: &str) -> bool {
-    let error = error.to_lowercase();
-    ![
-        "autenticación",
-        "cancelad",
-        "contraseña",
-        "clave",
-        "agente",
-        "certificado",
-        "known_hosts",
-        "rechaz",
-    ]
-    .iter()
-    .any(|word| error.contains(word))
+    crate::ssh::worth_retrying(error)
 }
 
 /// Pestañas abiertas, para reabrirlas al arrancar.

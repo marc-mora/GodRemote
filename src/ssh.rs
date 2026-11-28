@@ -15,10 +15,12 @@ use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{ChannelMsg, Disconnect, MethodKind, MethodSet};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::i18n::tr;
 use crate::keys::{CertInfo, CertValidity};
 use crate::model::{AuthMethod, Session};
 use crate::terminal::{TermBackend, TermCmd, TermEvent};
 use crate::totp::Totp;
+use crate::trf;
 use crate::tunnels::{self, RemoteForwards};
 use crate::x11::X11Forward;
 
@@ -293,7 +295,9 @@ impl Route {
             Some(endpoint) => {
                 let connected = connect_endpoint(endpoint, prompter, status)
                     .await
-                    .with_context(|| format!("en el salto {}", endpoint.session.display_name()))?;
+                    .with_context(|| {
+                        trf!("en el salto {name}", name = endpoint.session.display_name())
+                    })?;
                 Ok((
                     Self {
                         last_hop: Some(connected.handle),
@@ -349,9 +353,26 @@ impl Route {
                         hop.channel_open_direct_tcpip(host.clone(), port as u32, "127.0.0.1", 0),
                     )
                     .await
-                    .map_err(|_| anyhow!("Tiempo de espera agotado saltando hacia {host}:{port}"))?
+                    .map_err(|_| {
+                        anyhow!(
+                            "{}",
+                            trf!(
+                                "Tiempo de espera agotado saltando hacia {host}:{port}",
+                                host,
+                                port
+                            )
+                        )
+                    })?
                     .map_err(|e| {
-                        anyhow!("El último salto no pudo abrir la conexión con {host}:{port}: {e}")
+                        anyhow!(
+                            "{}",
+                            trf!(
+                                "El último salto no pudo abrir la conexión con {host}:{port}: {e}",
+                                host,
+                                port,
+                                e
+                            )
+                        )
                     })?;
                     Ok(RouteStream {
                         local_addr: None,
@@ -391,7 +412,10 @@ impl client::Handler for ClientHandler {
         let key = match server_public_key {
             PublicKeyOrCertificate::PublicKey { key, .. } => key,
             PublicKeyOrCertificate::Certificate(_) => {
-                bail!("El servidor presentó un certificado de host; no está soportado")
+                bail!(
+                    "{}",
+                    tr("El servidor presentó un certificado de host; no está soportado")
+                )
             }
         };
         match russh::keys::known_hosts::check_known_hosts_path(
@@ -412,7 +436,7 @@ impl client::Handler for ClientHandler {
                     )
                     .await;
                 if !accepted {
-                    bail!("Clave de host rechazada por el usuario");
+                    bail!("{}", tr("Clave de host rechazada por el usuario"));
                 }
                 russh::keys::known_hosts::learn_known_hosts_path(
                     &self.host,
@@ -420,18 +444,22 @@ impl client::Handler for ClientHandler {
                     key,
                     &self.known_hosts,
                 )
-                .with_context(|| format!("guardando en {}", self.known_hosts.display()))?;
+                .with_context(|| trf!("guardando en {path}", path = self.known_hosts.display()))?;
                 Ok(true)
             }
             Err(russh::keys::Error::KeyChanged { line }) => bail!(
-                "¡LA CLAVE DEL HOST HA CAMBIADO! Puede ser un ataque de intermediario \
-                 o que el servidor se haya reinstalado. Huella recibida: {}. \
-                 Si el cambio es legítimo, elimina la línea {} de {} y vuelve a conectar.",
-                key.fingerprint(HashAlg::Sha256),
-                line,
-                self.known_hosts.display()
+                "{}",
+                trf!(
+                    "¡LA CLAVE DEL HOST HA CAMBIADO! Puede ser un ataque de intermediario \
+                     o que el servidor se haya reinstalado. Huella recibida: {fingerprint}. \
+                     Si el cambio es legítimo, elimina la línea {line} de {file} y vuelve a \
+                     conectar.",
+                    fingerprint = key.fingerprint(HashAlg::Sha256),
+                    line,
+                    file = self.known_hosts.display()
+                )
             ),
-            Err(e) => Err(anyhow!("error leyendo known_hosts: {e}")),
+            Err(e) => Err(anyhow!("{}", trf!("error leyendo known_hosts: {e}", e))),
         }
     }
 
@@ -512,8 +540,9 @@ async fn request_agent(
     let kind = match crate::agent::pick().await {
         Ok(kind) => kind,
         Err(e) => {
-            emit(TermEvent::Status(format!(
-                "Reenvío del agente no disponible: {e:#}"
+            emit(TermEvent::Status(trf!(
+                "Reenvío del agente no disponible: {error}",
+                error = format!("{e:#}")
             )));
             return Ok(());
         }
@@ -534,14 +563,14 @@ async fn request_agent(
         *handle.shared.agent_forward.lock().unwrap() = Some(kind);
         emit(TermEvent::Status(
             match kind {
-                crate::agent::AgentKind::OpenSsh => "Reenvío del agente SSH activo",
-                crate::agent::AgentKind::Pageant => "Reenvío del agente SSH activo (Pageant)",
+                crate::agent::AgentKind::OpenSsh => tr("Reenvío del agente SSH activo"),
+                crate::agent::AgentKind::Pageant => tr("Reenvío del agente SSH activo (Pageant)"),
             }
             .into(),
         ));
     } else {
         emit(TermEvent::Status(
-            "El servidor rechazó el reenvío del agente (¿AllowAgentForwarding yes?)".into(),
+            tr("El servidor rechazó el reenvío del agente (¿AllowAgentForwarding yes?)").into(),
         ));
     }
     Ok(())
@@ -578,9 +607,12 @@ pub fn connect_endpoint<'a>(
         let mut to_save = vec![];
         let jump = match &endpoint.via {
             Some(via) => {
-                let connected = connect_endpoint(via, prompter, status)
-                    .await
-                    .with_context(|| format!("en el salto {}", via.session.display_name()))?;
+                let connected =
+                    connect_endpoint(via, prompter, status)
+                        .await
+                        .with_context(|| {
+                            trf!("en el salto {name}", name = via.session.display_name())
+                        })?;
                 to_save.extend(connected.to_save);
                 Some(connected.handle)
             }
@@ -638,20 +670,25 @@ async fn connect_via(
     let mut handle = match &jump {
         // A través del bastión: un canal TCP directo hace de transporte.
         Some(jump) => {
-            status(format!("Saltando hacia {}…", describe(session)));
+            status(trf!("Saltando hacia {host}…", host = describe(session)));
             let channel = jump
                 .channel_open_direct_tcpip(host.clone(), session.port as u32, "127.0.0.1", 0)
                 .await
                 .map_err(|e| {
                     anyhow!(
-                        "El salto no pudo abrir la conexión con {host}:{}: {e}",
-                        session.port
+                        "{}",
+                        trf!(
+                            "El salto no pudo abrir la conexión con {host}:{port}: {e}",
+                            host,
+                            port = session.port,
+                            e
+                        )
                     )
                 })?;
             client::connect_stream(config, channel.into_stream(), handler).await?
         }
         None => {
-            status(format!("Conectando a {}…", describe(session)));
+            status(trf!("Conectando a {host}…", host = describe(session)));
             // Directa o, si lo hay, a través del proxy de salida.
             let stream =
                 crate::proxy::dial(&host, session.port, session.bypass_proxy, CONNECT_TIMEOUT)
@@ -660,7 +697,7 @@ async fn connect_via(
         }
     };
 
-    status(format!("Autenticando como {user}…"));
+    status(trf!("Autenticando como {user}…", user));
     let mut to_save = vec![];
     let mut asker = Asker {
         session,
@@ -750,7 +787,7 @@ impl Asker<'_> {
         }
         let code = fresh_code(self.totp.as_ref()?, self.status).await?;
         self.totp_sent = true;
-        (self.status)("Código de verificación TOTP enviado".into());
+        (self.status)(tr("Código de verificación TOTP enviado").into());
         Some(code)
     }
 }
@@ -788,9 +825,9 @@ async fn fresh_code(totp: &Totp, status: &(dyn Fn(String) + Send + Sync)) -> Opt
         (step, wait)
     };
     if !wait.is_zero() {
-        status(format!(
-            "El código TOTP de ahora ya se ha usado: esperando al siguiente ({} s)…",
-            wait.as_secs() + 1
+        status(trf!(
+            "El código TOTP de ahora ya se ha usado: esperando al siguiente ({secs} s)…",
+            secs = wait.as_secs() + 1
         ));
         tokio::time::sleep(wait + Duration::from_millis(100)).await;
     }
@@ -856,22 +893,23 @@ async fn auth_password(
             Some(p) => (p, false, true),
             None => {
                 let msg = if code_involved {
-                    format!(
+                    trf!(
                         "Contraseña o código de verificación incorrectos. \
-                         Contraseña para {target}"
+                         Contraseña para {target}",
+                        target
                     )
                 } else if attempt == 0 {
-                    format!("Contraseña para {target}")
+                    trf!("Contraseña para {target}", target)
                 } else {
-                    format!("Contraseña incorrecta. Contraseña para {target}")
+                    trf!("Contraseña incorrecta. Contraseña para {target}", target)
                 };
                 match asker
                     .prompter
-                    .secret("Autenticación SSH", &msg, false, true)
+                    .secret(tr("Autenticación SSH"), &msg, false, true)
                     .await
                 {
                     Some(a) => (a.value, a.save, false),
-                    None => bail!("Autenticación cancelada"),
+                    None => bail!("{}", tr("Autenticación cancelada")),
                 }
             }
         };
@@ -887,7 +925,10 @@ async fn auth_password(
                 code_involved = round.code_asked;
                 outcome = round.outcome;
             } else if !remaining.contains(&MethodKind::Password) {
-                bail!("El servidor no admite autenticación por contraseña");
+                bail!(
+                    "{}",
+                    tr("El servidor no admite autenticación por contraseña")
+                );
             }
         }
         if !matches!(outcome, Outcome::Rejected(_)) {
@@ -900,18 +941,21 @@ async fn auth_password(
         if from_vault {
             (asker.status)(
                 if code_involved {
-                    "La contraseña guardada o el código de verificación fueron rechazados"
+                    tr("La contraseña guardada o el código de verificación fueron rechazados")
                 } else {
-                    "La contraseña guardada fue rechazada"
+                    tr("La contraseña guardada fue rechazada")
                 }
                 .into(),
             );
         }
     }
     if code_involved {
-        bail!("Autenticación fallida: contraseña o código de verificación incorrectos")
+        bail!(
+            "{}",
+            tr("Autenticación fallida: contraseña o código de verificación incorrectos")
+        )
     }
-    bail!("Autenticación fallida: contraseña incorrecta")
+    bail!("{}", tr("Autenticación fallida: contraseña incorrecta"))
 }
 
 /// Segundo factor: el servidor aceptó el primer método y exige otro más
@@ -930,9 +974,9 @@ async fn second_factor(
             let password = asker.password.take();
             let round = keyboard_interactive(handle, asker, password.as_deref()).await?;
             let what = if round.code_asked {
-                "el código de verificación"
+                tr("el código de verificación")
             } else {
-                "la respuesta"
+                tr("la respuesta")
             };
             asker.code_rejected = round.code_asked && matches!(round.outcome, Outcome::Rejected(_));
             (round.outcome, what)
@@ -941,17 +985,17 @@ async fn second_factor(
                 Some(p) => (p, false),
                 None => {
                     let msg = if failures == 0 {
-                        format!("Contraseña para {target}")
+                        trf!("Contraseña para {target}", target)
                     } else {
-                        format!("Contraseña incorrecta. Contraseña para {target}")
+                        trf!("Contraseña incorrecta. Contraseña para {target}", target)
                     };
                     match asker
                         .prompter
-                        .secret("Autenticación SSH", &msg, false, true)
+                        .secret(tr("Autenticación SSH"), &msg, false, true)
                         .await
                     {
                         Some(a) => (a.value, a.save),
-                        None => bail!("Autenticación cancelada"),
+                        None => bail!("{}", tr("Autenticación cancelada")),
                     }
                 }
             };
@@ -962,13 +1006,16 @@ async fn second_factor(
             if save && !matches!(outcome, Outcome::Rejected(_)) {
                 to_save.push((asker.session.password_key(), password));
             }
-            (outcome, "la contraseña")
+            (outcome, tr("la contraseña"))
         } else {
             let methods: Vec<&str> = remaining.iter().map(<&str>::from).collect();
             bail!(
-                "Autenticación fallida: el servidor exige además un método que no se puede \
-                 ofrecer aquí ({})",
-                methods.join(", ")
+                "{}",
+                trf!(
+                    "Autenticación fallida: el servidor exige además un método que no se puede \
+                     ofrecer aquí ({methods})",
+                    methods = methods.join(", ")
+                )
             );
         };
         match outcome {
@@ -980,16 +1027,22 @@ async fn second_factor(
             Outcome::Rejected(more) => {
                 failures += 1;
                 if failures >= 3 {
-                    bail!("Autenticación fallida: el servidor rechazó {what}");
+                    bail!(
+                        "{}",
+                        trf!("Autenticación fallida: el servidor rechazó {what}", what)
+                    );
                 }
-                (asker.status)(format!("El servidor no aceptó {what}"));
+                (asker.status)(trf!("El servidor no aceptó {what}", what));
                 if !more.is_empty() {
                     remaining = more;
                 }
             }
         }
     }
-    bail!("Autenticación fallida: el servidor encadena demasiados pasos")
+    bail!(
+        "{}",
+        tr("Autenticación fallida: el servidor encadena demasiados pasos")
+    )
 }
 
 /// Cómo acabó una ronda de preguntas keyboard-interactive.
@@ -1057,12 +1110,13 @@ async fn keyboard_interactive(
                         }
                         let rejected = std::mem::take(&mut asker.code_rejected);
                         if asker.totp_sent && !asker.code_typed {
-                            msg = format!(
+                            msg = trf!(
                                 "El código TOTP automático ya se envió y no bastó: escribe el \
-                                 siguiente.\n{msg}"
+                                 siguiente.\n{msg}",
+                                msg
                             );
                         } else if rejected {
-                            msg = format!("El servidor no aceptó el código anterior.\n{msg}");
+                            msg = trf!("El servidor no aceptó el código anterior.\n{msg}", msg);
                         }
                         asker.code_typed = true;
                     } else if !p.echo
@@ -1072,13 +1126,13 @@ async fn keyboard_interactive(
                         continue;
                     }
                     let title = if name.is_empty() {
-                        "Autenticación SSH".to_string()
+                        tr("Autenticación SSH").to_string()
                     } else {
                         name.clone()
                     };
                     match asker.prompter.secret(&title, &msg, p.echo, false).await {
                         Some(a) => answers.push(a.value),
-                        None => bail!("Autenticación cancelada"),
+                        None => bail!("{}", tr("Autenticación cancelada")),
                     }
                 }
                 response = handle
@@ -1125,8 +1179,9 @@ impl russh::Signer for KeySigner {
             other => other.try_sign(&to_sign),
         };
         async move {
-            let signature =
-                signature.map_err(|e| anyhow!("no se pudo firmar con la clave privada: {e}"))?;
+            let signature = signature.map_err(|e| {
+                anyhow!("{}", trf!("no se pudo firmar con la clave privada: {e}", e))
+            })?;
             // La firma va a continuación de lo firmado, como cadena SSH.
             let blob = signature.encode_vec()?;
             to_sign.extend_from_slice(&(blob.len() as u32).to_be_bytes());
@@ -1169,12 +1224,16 @@ fn find_certificate(
     // En los mensajes basta el nombre del fichero: la ruta ya se conoce.
     let name = file_name(&path);
     let unusable = if cert.public_key() != key.public_key().key_data() {
-        Some(format!(
-            "El certificado {name} no corresponde a la clave {}",
-            file_name(key_path)
+        Some(trf!(
+            "El certificado {name} no corresponde a la clave {key}",
+            name,
+            key = file_name(key_path)
         ))
     } else if info.host {
-        Some(format!("{name} es un certificado de host, no de usuario"))
+        Some(trf!(
+            "{name} es un certificado de host, no de usuario",
+            name
+        ))
     } else {
         None
     };
@@ -1186,7 +1245,11 @@ fn find_certificate(
         return Ok(None);
     }
     if info.validity() != CertValidity::Valid {
-        *problem = Some(format!("El certificado {name} {}", info.validity_text()));
+        *problem = Some(trf!(
+            "El certificado {name} {validity}",
+            name,
+            validity = info.validity_text()
+        ));
         return Ok(None);
     }
     Ok(Some((cert, info)))
@@ -1201,19 +1264,22 @@ fn file_name(path: &std::path::Path) -> String {
 
 /// Por qué pudo rechazar el servidor un certificado, para el mensaje.
 fn cert_rejection(info: &CertInfo, user: &str) -> String {
-    let mut why = format!(
-        "El servidor no aceptó el certificado {}",
-        file_name(&info.path)
-    );
+    let name = file_name(&info.path);
     if !info.principals.is_empty() && !info.principals.iter().any(|p| p == user) {
-        why.push_str(&format!(
-            " (vale para {}, no para «{user}»)",
-            info.principals_text()
-        ));
+        trf!(
+            "El servidor no aceptó el certificado {name} (vale para {principals}, no para \
+             «{user}»)",
+            name,
+            principals = info.principals_text(),
+            user
+        )
     } else {
-        why.push_str(" (¿confía el servidor en la autoridad que lo firmó?)");
+        trf!(
+            "El servidor no aceptó el certificado {name} (¿confía el servidor en la autoridad \
+             que lo firmó?)",
+            name
+        )
     }
-    why
 }
 
 async fn auth_key(
@@ -1227,7 +1293,7 @@ async fn auth_key(
     let path = crate::paths::expand_tilde(&session.key_path);
     let target = asker.target();
     let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("No se pudo leer la clave {}", path.display()))?;
+        .with_context(|| trf!("No se pudo leer la clave {path}", path = path.display()))?;
 
     // Una llave de seguridad FIDO2 no se puede usar desde su fichero (ni
     // hace falta su passphrase): firma la llave, a través del agente.
@@ -1246,16 +1312,24 @@ async fn auth_key(
                 Some(p) => (p, false),
                 None => {
                     let msg = if attempt == 0 {
-                        format!("Passphrase de la clave {} (para {target})", path.display())
+                        trf!(
+                            "Passphrase de la clave {path} (para {target})",
+                            path = path.display(),
+                            target
+                        )
                     } else {
-                        format!(
-                            "Passphrase incorrecta. Passphrase de {} (para {target})",
-                            path.display()
+                        trf!(
+                            "Passphrase incorrecta. Passphrase de {path} (para {target})",
+                            path = path.display(),
+                            target
                         )
                     };
-                    match prompter.secret("Clave privada", &msg, false, true).await {
+                    match prompter
+                        .secret(tr("Clave privada"), &msg, false, true)
+                        .await
+                    {
                         Some(a) => (a.value, a.save),
-                        None => bail!("Autenticación cancelada"),
+                        None => bail!("{}", tr("Autenticación cancelada")),
                     }
                 }
             };
@@ -1267,17 +1341,28 @@ async fn auth_key(
                 break;
             }
         }
-        found.ok_or_else(|| anyhow!("No se pudo descifrar la clave privada"))?
+        found.ok_or_else(|| anyhow!("{}", tr("No se pudo descifrar la clave privada")))?
     } else {
-        russh::keys::decode_secret_key(&text, None)
-            .map_err(|e| anyhow!("Clave privada no válida ({}): {e}", path.display()))?
+        russh::keys::decode_secret_key(&text, None).map_err(|e| {
+            anyhow!(
+                "{}",
+                trf!(
+                    "Clave privada no válida ({path}): {e}",
+                    path = path.display(),
+                    e
+                )
+            )
+        })?
     };
     let key = Arc::new(key);
 
     let mut cert_problem = None;
     let cert = find_certificate(session, &path, &key, &mut cert_problem)?;
     if let Some(problem) = &cert_problem {
-        status(format!("{problem}: se prueba la clave sin certificado"));
+        status(trf!(
+            "{problem}: se prueba la clave sin certificado",
+            problem
+        ));
     }
     let hash = handle.best_supported_rsa_hash().await?.flatten();
 
@@ -1292,7 +1377,10 @@ async fn auth_key(
             return Ok(outcome);
         }
         let why = cert_rejection(&info, user);
-        status(format!("{why}: se prueba la clave sin certificado"));
+        status(trf!(
+            "{problem}: se prueba la clave sin certificado",
+            problem = why
+        ));
         cert_problem = Some(why);
     }
     let result = handle
@@ -1301,8 +1389,18 @@ async fn auth_key(
     let outcome = Outcome::from(result);
     if matches!(outcome, Outcome::Rejected(_)) {
         match cert_problem {
-            Some(problem) => bail!("El servidor rechazó la clave {}. {problem}", path.display()),
-            None => bail!("El servidor rechazó la clave {}", path.display()),
+            Some(problem) => bail!(
+                "{}",
+                trf!(
+                    "El servidor rechazó la clave {path}. {problem}",
+                    path = path.display(),
+                    problem
+                )
+            ),
+            None => bail!(
+                "{}",
+                trf!("El servidor rechazó la clave {path}", path = path.display())
+            ),
         }
     }
     to_save.extend(pending_save);
@@ -1328,9 +1426,9 @@ impl russh::Signer for AgentSigner<'_> {
         to_sign: Vec<u8>,
     ) -> Result<Vec<u8>, Self::Error> {
         if crate::keys::is_security_key(&identity.public_key().algorithm()) {
-            (self.status)(format!(
-                "Toca la llave de seguridad{} para confirmar…",
-                self.name
+            (self.status)(trf!(
+                "Toca la llave de seguridad{name} para confirmar…",
+                name = self.name
             ));
         }
         self.agent
@@ -1345,7 +1443,7 @@ fn quoted(name: &str) -> String {
     if name.is_empty() {
         String::new()
     } else {
-        format!(" «{name}»")
+        trf!(" «{name}»", name)
     }
 }
 
@@ -1384,9 +1482,14 @@ async fn offer_agent_identities(
                     continue;
                 }
                 if info.validity() != CertValidity::Valid {
-                    let note = format!("el certificado «{}» {}", info.key_id, info.validity_text());
-                    status(format!(
-                        "El agente tiene un certificado que no vale: {note}"
+                    let note = trf!(
+                        "el certificado «{id}» {validity}",
+                        id = info.key_id,
+                        validity = info.validity_text()
+                    );
+                    status(trf!(
+                        "El agente tiene un certificado que no vale: {note}",
+                        note
                     ));
                     notes.push(note);
                     continue;
@@ -1403,16 +1506,20 @@ async fn offer_agent_identities(
             // pide confirmación y se denegó…): se sigue con las demás.
             Err(russh::AgentAuthError::Key(e)) => {
                 let note = if security_key {
-                    format!(
-                        "la llave de seguridad{name} no firmó (¿está conectada y la has tocado?)"
+                    trf!(
+                        "la llave de seguridad{name} no firmó (¿está conectada y la has tocado?)",
+                        name
                     )
                 } else {
-                    format!("el agente no firmó con la clave{name}: {e}")
+                    trf!("el agente no firmó con la clave{name}: {e}", name, e)
                 };
-                status(format!("Aviso: {note}"));
+                status(trf!("Aviso: {note}", note));
                 notes.push(note);
             }
-            Err(e) => bail!("Se perdió la conexión mientras firmaba el agente: {e}"),
+            Err(e) => bail!(
+                "{}",
+                trf!("Se perdió la conexión mientras firmaba el agente: {e}", e)
+            ),
         }
     }
     Ok(None)
@@ -1427,26 +1534,40 @@ async fn auth_agent(
         client: mut agent,
         kind,
         identities,
-    } = crate::agent::connect()
-        .await
-        .map_err(|e| anyhow!("No se pudo usar el agente SSH: {e:#}"))?;
+    } = crate::agent::connect().await.map_err(|e| {
+        anyhow!(
+            "{}",
+            trf!(
+                "No se pudo usar el agente SSH: {error}",
+                error = format!("{e:#}")
+            )
+        )
+    })?;
     if identities.is_empty() {
         match kind {
             crate::agent::AgentKind::OpenSsh => {
-                bail!("El agente SSH no tiene ninguna clave cargada")
+                bail!("{}", tr("El agente SSH no tiene ninguna clave cargada"))
             }
-            crate::agent::AgentKind::Pageant => bail!("Pageant no tiene ninguna clave cargada"),
+            crate::agent::AgentKind::Pageant => {
+                bail!("{}", tr("Pageant no tiene ninguna clave cargada"))
+            }
         }
     }
     let mut notes = vec![];
     match offer_agent_identities(handle, asker, &mut agent, identities, &mut notes).await? {
         Some(outcome) => Ok(outcome),
         None if notes.is_empty() => {
-            bail!("Ninguna clave del agente fue aceptada por el servidor")
+            bail!(
+                "{}",
+                tr("Ninguna clave del agente fue aceptada por el servidor")
+            )
         }
         None => bail!(
-            "Ninguna clave del agente fue aceptada por el servidor ({})",
-            notes.join("; ")
+            "{}",
+            trf!(
+                "Ninguna clave del agente fue aceptada por el servidor ({notes})",
+                notes = notes.join("; ")
+            )
         ),
     }
 }
@@ -1461,18 +1582,26 @@ async fn auth_security_key(
     public: &russh::keys::PublicKey,
 ) -> Result<Outcome> {
     let name = file_name(path);
-    let how = format!(
+    let how = trf!(
         "{name} es una llave de seguridad: firma la propia llave, a través del agente SSH. \
-         Cárgala en el agente (ssh-add {}) y vuelve a conectar",
-        path.display()
+         Cárgala en el agente (ssh-add {path}) y vuelve a conectar",
+        name,
+        path = path.display()
     );
     let crate::agent::Connected {
         client: mut agent,
         identities,
         ..
-    } = crate::agent::connect()
-        .await
-        .map_err(|e| anyhow!("No se pudo usar el agente SSH ({e:#}). {how}"))?;
+    } = crate::agent::connect().await.map_err(|e| {
+        anyhow!(
+            "{}",
+            trf!(
+                "No se pudo usar el agente SSH ({error}). {how}",
+                error = format!("{e:#}"),
+                how
+            )
+        )
+    })?;
     // Solo las identidades de esta llave (la clave y, si lo hay, su
     // certificado, que va primero).
     let (mut certs, mut plain): (Vec<_>, Vec<_>) = identities
@@ -1481,21 +1610,30 @@ async fn auth_security_key(
         .partition(|identity| matches!(identity, AgentIdentity::Certificate { .. }));
     certs.append(&mut plain);
     if certs.is_empty() {
-        bail!("El agente SSH no tiene cargada esta clave. {how}");
+        bail!(
+            "{}",
+            trf!("El agente SSH no tiene cargada esta clave. {how}", how)
+        );
     }
     let mut notes = vec![];
     match offer_agent_identities(handle, asker, &mut agent, certs, &mut notes).await? {
         Some(outcome) => Ok(outcome),
         None if notes.is_empty() => {
             bail!(
-                "El servidor rechazó la clave {} (llave de seguridad)",
-                path.display()
+                "{}",
+                trf!(
+                    "El servidor rechazó la clave {path} (llave de seguridad)",
+                    path = path.display()
+                )
             )
         }
         None => bail!(
-            "No se pudo entrar con la clave {}: {}",
-            path.display(),
-            notes.join("; ")
+            "{}",
+            trf!(
+                "No se pudo entrar con la clave {path}: {notes}",
+                path = path.display(),
+                notes = notes.join("; ")
+            )
         ),
     }
 }
@@ -1536,8 +1674,9 @@ async fn request_x11(
     let forward = match X11Forward::prepare() {
         Ok(f) => f,
         Err(e) => {
-            emit(TermEvent::Status(format!(
-                "Reenvío X11 no disponible: {e:#}"
+            emit(TermEvent::Status(trf!(
+                "Reenvío X11 no disponible: {error}",
+                error = format!("{e:#}")
             )));
             return Ok(());
         }
@@ -1564,15 +1703,18 @@ async fn request_x11(
     .unwrap_or(false);
     if accepted {
         let message = if forward.is_embedded() {
-            "Reenvío X11 activo: las aplicaciones gráficas se abrirán en la pestaña «Servidor X»"
+            tr(
+                "Reenvío X11 activo: las aplicaciones gráficas se abrirán en la pestaña \
+                 «Servidor X»",
+            )
         } else {
-            "Reenvío X11 activo (servidor X del sistema)"
+            tr("Reenvío X11 activo (servidor X del sistema)")
         };
         *handle.shared.x11.lock().unwrap() = Some(Arc::new(forward));
         emit(TermEvent::Status(message.into()));
     } else {
         emit(TermEvent::Status(
-            "El servidor rechazó el reenvío X11 (¿X11Forwarding yes y xauth instalado?)".into(),
+            tr("El servidor rechazó el reenvío X11 (¿X11Forwarding yes y xauth instalado?)").into(),
         ));
     }
     Ok(())
@@ -1666,20 +1808,91 @@ async fn run_shell(
     match exit_status {
         // Sin código de salida y sin haberlo cerrado nosotros, el canal se
         // ha cortado: la conexión se ha caído (red, reinicio del servidor…).
-        None if !closed_by_user => bail!("Se perdió la conexión con el servidor"),
+        None if !closed_by_user => bail!("{}", tr("Se perdió la conexión con el servidor")),
         Some(0) | None => Ok(()),
         Some(code) => {
-            emit(TermEvent::Status(format!(
-                "La shell terminó con código {code}"
+            emit(TermEvent::Status(trf!(
+                "La shell terminó con código {code}",
+                code
             )));
             Ok(())
         }
     }
 }
 
+/// ¿Merece reintentar sola una conexión que ha acabado con este error? Un
+/// corte de red, sí. Un fallo de autenticación o de confianza en el servidor,
+/// no: repetirlo no lo arregla y varios intentos fallidos seguidos pueden
+/// bloquear la cuenta.
+///
+/// Se decide por palabras del mensaje, que es lo único que le llega a quien
+/// pregunta (la reconexión de los terminales, el gestor de túneles, el panel
+/// de estado). El mensaje está en el idioma en que se creó, que puede no ser
+/// el de ahora, así que se buscan siempre las palabras de todos los idiomas:
+/// el resultado no depende del idioma en uso. Una prueba, junto a la tabla
+/// de traducciones (`i18n/en/backend.rs`), vigila que cada mensaje se
+/// clasifique igual en todos.
+pub fn worth_retrying(error: &str) -> bool {
+    const PERMANENT: [&str; 15] = [
+        // En español…
+        "autenticación",
+        "cancelad",
+        "contraseña",
+        "clave",
+        "agente",
+        "certificado",
+        "known_hosts",
+        "rechaz",
+        // …y en inglés.
+        "authentication",
+        "cancelled",
+        "password",
+        "key",
+        "agent",
+        "certificate",
+        "reject",
+    ];
+    let error = error.to_lowercase();
+    !PERMANENT.iter().any(|word| error.contains(word))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_network_failures_are_worth_retrying() {
+        // Cortes de red, en cualquier idioma (y los del sistema, en inglés).
+        for error in [
+            "Connection reset by peer",
+            "Tiempo de espera agotado conectando a 10.0.0.5:22",
+            "Timed out connecting to 10.0.0.5:22",
+            "El último salto no pudo abrir la conexión con x:22: refused",
+            "The last jump host could not open the connection to x:22: refused",
+            "Se perdió la conexión con el servidor",
+            "The connection to the server was lost",
+            "No se pudo conectar a x:22: Connection refused (os error 111)",
+        ] {
+            assert!(worth_retrying(error), "{error}");
+        }
+        // Autenticación o confianza: insistir puede bloquear la cuenta.
+        for error in [
+            "Autenticación fallida: contraseña incorrecta",
+            "Authentication failed: wrong password",
+            "Autenticación cancelada",
+            "Authentication cancelled",
+            "El servidor rechazó la clave /home/u/.ssh/id",
+            "The server rejected the key /home/u/.ssh/id",
+            "Clave de host rechazada por el usuario",
+            "Host key rejected by the user",
+            "Ninguna clave del agente fue aceptada por el servidor",
+            "The server accepted none of the agent's keys",
+            "error leyendo known_hosts: permiso denegado",
+            "The server presented no TLS certificate",
+        ] {
+            assert!(!worth_retrying(error), "{error}");
+        }
+    }
 
     #[test]
     fn verification_code_prompts_are_recognised() {

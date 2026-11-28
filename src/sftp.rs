@@ -14,7 +14,9 @@ use russh_sftp::protocol::{FileAttributes, OpenFlags};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::i18n::tr;
 use crate::ssh::{Endpoint, Prompter, SshHandle};
+use crate::trf;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteEntry {
@@ -669,16 +671,16 @@ async fn run(
         }
     };
 
-    emit(SftpEvent::Status("Iniciando SFTP…".into()));
+    emit(SftpEvent::Status(tr("Iniciando SFTP…").into()));
     let channel = handle.channel_open_session().await?;
     channel
         .request_subsystem(true, "sftp")
         .await
-        .context("El servidor no ofrece el subsistema SFTP")?;
+        .context(tr("El servidor no ofrece el subsistema SFTP"))?;
     let sftp = Arc::new(
         SftpSession::new(channel.into_stream())
             .await
-            .map_err(|e| anyhow!("No se pudo iniciar SFTP: {e}"))?,
+            .map_err(|e| anyhow!("{}", trf!("No se pudo iniciar SFTP: {e}", e)))?,
     );
     let home = sftp
         .canonicalize(".")
@@ -698,11 +700,19 @@ async fn run(
         match cmd {
             SftpCmd::List(path) => match list(&sftp, &path).await {
                 Ok((path, entries)) => emit(SftpEvent::Listing { path, entries }),
-                Err(e) => emit(SftpEvent::Error(format!("No se pudo listar {path}: {e:#}"))),
+                Err(e) => emit(SftpEvent::Error(trf!(
+                    "No se pudo listar {path}: {error}",
+                    path,
+                    error = format!("{e:#}")
+                ))),
             },
             SftpCmd::Mkdir(path) => match sftp.create_dir(path.as_str()).await {
-                Ok(()) => emit(SftpEvent::Done(format!("Carpeta creada: {path}"))),
-                Err(e) => emit(SftpEvent::Error(format!("No se pudo crear {path}: {e}"))),
+                Ok(()) => emit(SftpEvent::Done(trf!("Carpeta creada: {path}", path))),
+                Err(e) => emit(SftpEvent::Error(trf!(
+                    "No se pudo crear {path}: {e}",
+                    path,
+                    e
+                ))),
             },
             SftpCmd::Remove { path, is_dir } => {
                 let res = if is_dir {
@@ -711,31 +721,38 @@ async fn run(
                     sftp.remove_file(path.as_str()).await.map_err(Into::into)
                 };
                 match res {
-                    Ok(()) => emit(SftpEvent::Done(format!("Eliminado: {path}"))),
-                    Err(e) => emit(SftpEvent::Error(format!(
-                        "No se pudo eliminar {path}: {e:#}"
+                    Ok(()) => emit(SftpEvent::Done(trf!("Eliminado: {path}", path))),
+                    Err(e) => emit(SftpEvent::Error(trf!(
+                        "No se pudo eliminar {path}: {error}",
+                        path,
+                        error = format!("{e:#}")
                     ))),
                 }
             }
             SftpCmd::Rename { from, to } => match sftp.rename(from.as_str(), to.as_str()).await {
-                Ok(()) => emit(SftpEvent::Done(format!("Renombrado a {to}"))),
-                Err(e) => emit(SftpEvent::Error(format!("No se pudo renombrar: {e}"))),
+                Ok(()) => emit(SftpEvent::Done(trf!("Renombrado a {to}", to))),
+                Err(e) => emit(SftpEvent::Error(trf!("No se pudo renombrar: {e}", e))),
             },
             SftpCmd::Chmod {
                 path,
                 mode,
                 recursive,
             } => match chmod(&sftp, &path, mode, recursive).await {
-                Ok(1) => emit(SftpEvent::Done(format!(
-                    "Permisos de {path}: {}",
-                    mode_octal(mode)
+                Ok(1) => emit(SftpEvent::Done(trf!(
+                    "Permisos de {path}: {mode}",
+                    path,
+                    mode = mode_octal(mode)
                 ))),
-                Ok(n) => emit(SftpEvent::Done(format!(
-                    "Permisos de {path} y su contenido ({n} elementos): {}",
-                    mode_octal(mode)
+                Ok(n) => emit(SftpEvent::Done(trf!(
+                    "Permisos de {path} y su contenido ({n} elementos): {mode}",
+                    path,
+                    n,
+                    mode = mode_octal(mode)
                 ))),
-                Err(e) => emit(SftpEvent::Error(format!(
-                    "No se pudieron cambiar los permisos de {path}: {e:#}"
+                Err(e) => emit(SftpEvent::Error(trf!(
+                    "No se pudieron cambiar los permisos de {path}: {error}",
+                    path,
+                    error = format!("{e:#}")
                 ))),
             },
             SftpCmd::Cancel(id) => {
@@ -887,7 +904,9 @@ async fn chmod(sftp: &SftpSession, path: &str, mode: u32, recursive: bool) -> Re
     let mut stack = vec![(path.to_string(), false)];
     while let Some((dir, visited)) = stack.pop() {
         if visited {
-            set(&dir).await.with_context(|| format!("en {dir}"))?;
+            set(&dir)
+                .await
+                .with_context(|| trf!("en {path}", path = dir))?;
             changed += 1;
             continue;
         }
@@ -895,10 +914,12 @@ async fn chmod(sftp: &SftpSession, path: &str, mode: u32, recursive: bool) -> Re
             Ok(entries) => entries,
             Err(_) => {
                 // Y al revés: si no se puede leer, quizá sí con los nuevos.
-                set(&dir).await.with_context(|| format!("en {dir}"))?;
+                set(&dir)
+                    .await
+                    .with_context(|| trf!("en {path}", path = dir))?;
                 sftp.read_dir(dir.as_str())
                     .await
-                    .with_context(|| format!("listando {dir}"))?
+                    .with_context(|| trf!("listando {path}", path = dir))?
             }
         };
         stack.push((dir.clone(), true));
@@ -913,7 +934,9 @@ async fn chmod(sftp: &SftpSession, path: &str, mode: u32, recursive: bool) -> Re
                 stack.push((child, false));
             } else if !file_type.is_symlink() {
                 // `setstat` sigue los enlaces: se dejan como están.
-                set(&child).await.with_context(|| format!("en {child}"))?;
+                set(&child)
+                    .await
+                    .with_context(|| trf!("en {path}", path = child))?;
                 changed += 1;
             }
         }
@@ -964,7 +987,7 @@ impl Transfer {
 
     fn check(&self) -> Result<()> {
         if self.cancel.load(Ordering::Relaxed) {
-            bail!("Cancelado");
+            bail!("{}", tr("Cancelado"));
         }
         Ok(())
     }
@@ -1031,7 +1054,7 @@ impl Transfer {
             match tokio::time::timeout(Duration::from_millis(200), &mut answer).await {
                 Ok(Ok(answer)) => break answer,
                 // La vista se cerró (o descartó la pregunta) sin contestar.
-                Ok(Err(_)) => bail!("Cancelado"),
+                Ok(Err(_)) => bail!("{}", tr("Cancelado")),
                 Err(_) => {}
             }
         };
@@ -1059,7 +1082,7 @@ async fn download(sftp: &SftpSession, remote: &str, local: &Path, t: &Transfer) 
             t.check()?;
             tokio::fs::create_dir_all(&ldir)
                 .await
-                .with_context(|| format!("creando {}", ldir.display()))?;
+                .with_context(|| trf!("creando {path}", path = ldir.display()))?;
             for entry in sftp.read_dir(rdir.as_str()).await? {
                 let name = entry.file_name().to_string();
                 if name == "." || name == ".." {
@@ -1067,7 +1090,13 @@ async fn download(sftp: &SftpSession, remote: &str, local: &Path, t: &Transfer) 
                 }
                 // Un servidor malicioso no debe poder escribir fuera del destino.
                 if !safe_component(&name) {
-                    bail!("Nombre remoto no válido: {name:?}");
+                    bail!(
+                        "{}",
+                        trf!(
+                            "Nombre remoto no válido: {name}",
+                            name = format!("{name:?}")
+                        )
+                    );
                 }
                 let rchild = join_remote(&rdir, &name);
                 let lchild = ldir.join(&name);
@@ -1128,12 +1157,15 @@ async fn download_file(
             .write(true)
             .open(local)
             .await
-            .with_context(|| format!("abriendo {}", local.display()))?;
+            .with_context(|| trf!("abriendo {path}", path = local.display()))?;
         let offset = dst.metadata().await?.len();
         if src.metadata().await?.size.is_some_and(|size| offset > size) {
             bail!(
-                "No se puede reanudar {}: ya es mayor que el origen",
-                local.display()
+                "{}",
+                trf!(
+                    "No se puede reanudar {path}: ya es mayor que el origen",
+                    path = local.display()
+                )
             );
         }
         src.seek(SeekFrom::Start(offset)).await?;
@@ -1144,7 +1176,7 @@ async fn download_file(
     } else {
         tokio::fs::File::create(local)
             .await
-            .with_context(|| format!("creando {}", local.display()))?
+            .with_context(|| trf!("creando {path}", path = local.display()))?
     };
     let mut buf = vec![0u8; CHUNK];
     loop {
@@ -1165,7 +1197,7 @@ async fn download_file(
 async fn upload(sftp: &SftpSession, local: &Path, remote: &str, t: &Transfer) -> Result<()> {
     let meta = tokio::fs::metadata(local)
         .await
-        .with_context(|| format!("leyendo {}", local.display()))?;
+        .with_context(|| trf!("leyendo {path}", path = local.display()))?;
     if meta.is_dir() {
         t.multiple.store(true, Ordering::Relaxed);
         let mut stack = vec![(local.to_path_buf(), remote.to_string())];
@@ -1237,13 +1269,19 @@ async fn upload_file(
 ) -> Result<()> {
     let mut src = tokio::fs::File::open(local)
         .await
-        .with_context(|| format!("abriendo {}", local.display()))?;
+        .with_context(|| trf!("abriendo {path}", path = local.display()))?;
     let name = local.display().to_string();
     let mut dst = if resume {
         let mut dst = sftp.open_with_flags(remote, OpenFlags::WRITE).await?;
         let offset = dst.metadata().await?.size.unwrap_or(0);
         if offset > src.metadata().await?.len() {
-            bail!("No se puede reanudar {remote}: ya es mayor que el origen");
+            bail!(
+                "{}",
+                trf!(
+                    "No se puede reanudar {path}: ya es mayor que el origen",
+                    path = remote
+                )
+            );
         }
         src.seek(SeekFrom::Start(offset)).await?;
         dst.seek(SeekFrom::Start(offset)).await?;
@@ -1303,7 +1341,7 @@ async fn scan_local(root: &Path, t: &Transfer) -> Result<SyncTree> {
         t.progress(0, &dir.display().to_string(), false);
         let mut entries = tokio::fs::read_dir(&dir)
             .await
-            .with_context(|| format!("leyendo {}", dir.display()))?;
+            .with_context(|| trf!("leyendo {path}", path = dir.display()))?;
         while let Some(entry) = entries.next_entry().await? {
             let name = entry.file_name();
             // Un nombre que no se puede escribir tal cual en el otro lado.
@@ -1343,7 +1381,7 @@ async fn scan_remote(sftp: &SftpSession, root: &str, t: &Transfer) -> Result<Syn
         let entries = sftp
             .read_dir(dir.as_str())
             .await
-            .with_context(|| format!("listando {dir}"))?;
+            .with_context(|| trf!("listando {path}", path = dir))?;
         for entry in entries {
             let name = entry.file_name();
             let name = name.as_str();
@@ -1411,12 +1449,15 @@ impl SyncRoots<'_> {
             match tokio::fs::symlink_metadata(&path).await {
                 Ok(meta) if meta.is_dir() => {}
                 Ok(_) => bail!(
-                    "{} no es una carpeta (no se siguen enlaces)",
-                    path.display()
+                    "{}",
+                    trf!(
+                        "{path} no es una carpeta (no se siguen enlaces)",
+                        path = path.display()
+                    )
                 ),
                 Err(_) if create => tokio::fs::create_dir(&path)
                     .await
-                    .with_context(|| format!("creando {}", path.display()))?,
+                    .with_context(|| trf!("creando {path}", path = path.display()))?,
                 Err(e) => bail!("{}: {e}", path.display()),
             }
             self.local_dirs.insert(prefix.to_string());
@@ -1433,12 +1474,15 @@ impl SyncRoots<'_> {
             let path = self.remote_path(prefix);
             match self.sftp.symlink_metadata(path.as_str()).await {
                 Ok(meta) if meta.file_type().is_dir() => {}
-                Ok(_) => bail!("{path} no es una carpeta (no se siguen enlaces)"),
+                Ok(_) => bail!(
+                    "{}",
+                    trf!("{path} no es una carpeta (no se siguen enlaces)", path)
+                ),
                 Err(_) if create => self
                     .sftp
                     .create_dir(path.as_str())
                     .await
-                    .with_context(|| format!("creando {path}"))?,
+                    .with_context(|| trf!("creando {path}", path))?,
                 Err(e) => bail!("{path}: {e}"),
             }
             self.remote_dirs.insert(prefix.to_string());
@@ -1457,7 +1501,7 @@ impl SyncRoots<'_> {
         let copy = async {
             let meta = tokio::fs::symlink_metadata(&local).await?;
             if !meta.is_file() {
-                bail!("ya no es un fichero normal");
+                bail!("{}", tr("ya no es un fichero normal"));
             }
             upload_file(sftp, &local, &part, false, t).await?;
             // Sin la fecha del origen, la próxima comparación lo vería como
@@ -1482,7 +1526,9 @@ impl SyncRoots<'_> {
             }
             anyhow::Ok(())
         };
-        let result = copy.await.with_context(|| format!("subiendo {rel}"));
+        let result = copy
+            .await
+            .with_context(|| trf!("subiendo {path}", path = rel));
         if result.is_err() {
             let _ = sftp.remove_file(part.as_str()).await;
         }
@@ -1501,7 +1547,7 @@ impl SyncRoots<'_> {
         let copy = async {
             let meta = sftp.symlink_metadata(remote.as_str()).await?;
             if !meta.file_type().is_file() {
-                bail!("ya no es un fichero normal");
+                bail!("{}", tr("ya no es un fichero normal"));
             }
             // Si quedara algo con el nombre provisional (aunque fuera un
             // enlace), se quita: se escribe en un fichero nuevo.
@@ -1524,7 +1570,9 @@ impl SyncRoots<'_> {
             tokio::fs::rename(&part, &local).await?;
             anyhow::Ok(())
         };
-        let result = copy.await.with_context(|| format!("descargando {rel}"));
+        let result = copy
+            .await
+            .with_context(|| trf!("descargando {path}", path = rel));
         if result.is_err() {
             let _ = tokio::fs::remove_file(&part).await;
         }
@@ -1550,7 +1598,13 @@ async fn sync_run(
     // de tocar nada.
     for item in items {
         if !item.path.split('/').all(safe_component) {
-            bail!("Ruta no válida en el plan: {:?}", item.path);
+            bail!(
+                "{}",
+                trf!(
+                    "Ruta no válida en el plan: {path}",
+                    path = format!("{:?}", item.path)
+                )
+            );
         }
     }
     let mut roots = SyncRoots {
@@ -1592,7 +1646,7 @@ async fn sync_run(
             } else {
                 tokio::fs::remove_file(&path).await
             };
-            res.with_context(|| format!("borrando {}", path.display()))?;
+            res.with_context(|| trf!("borrando {path}", path = path.display()))?;
         } else {
             roots.remote_dir(parent, false).await?;
             let path = roots.remote_path(&item.path);
@@ -1601,7 +1655,7 @@ async fn sync_run(
             } else {
                 sftp.remove_file(path.as_str()).await
             };
-            res.with_context(|| format!("borrando {path}"))?;
+            res.with_context(|| trf!("borrando {path}", path))?;
         }
         t.count(|s| s.deleted += 1);
         t.progress(0, &item.path, false);

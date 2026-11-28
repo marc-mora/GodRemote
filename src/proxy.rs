@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::i18n::tr;
+use crate::trf;
+
 /// Clave del baúl donde se guarda la contraseña del proxy.
 pub const PASSWORD_KEY: &str = "proxy/password";
 /// Cabeceras de respuesta del proxy HTTP: más que esto no es un proxy.
@@ -32,7 +35,7 @@ impl ProxyKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            ProxyKind::None => "Sin proxy",
+            ProxyKind::None => tr("Sin proxy"),
             ProxyKind::Http => "HTTP (CONNECT)",
             ProxyKind::Socks5 => "SOCKS5",
         }
@@ -142,13 +145,20 @@ pub async fn dial(host: &str, port: u16, bypass: bool, timeout: Duration) -> Res
         match &proxy {
             None => TcpStream::connect((host, port))
                 .await
-                .with_context(|| format!("No se pudo conectar a {host}:{port}")),
+                .with_context(|| trf!("No se pudo conectar a {host}:{port}", host, port)),
             Some(config) => through(config, host, port).await,
         }
     };
-    let stream = tokio::time::timeout(timeout, work)
-        .await
-        .map_err(|_| anyhow!("Tiempo de espera agotado conectando a {host}:{port}"))??;
+    let stream = tokio::time::timeout(timeout, work).await.map_err(|_| {
+        anyhow!(
+            "{}",
+            trf!(
+                "Tiempo de espera agotado conectando a {host}:{port}",
+                host,
+                port
+            )
+        )
+    })??;
     let _ = stream.set_nodelay(true);
     Ok(stream)
 }
@@ -159,7 +169,7 @@ pub async fn through(config: &ProxyConfig, host: &str, port: u16) -> Result<TcpS
     let proxy = format!("{}:{}", settings.host.trim(), settings.port);
     let mut stream = TcpStream::connect((settings.host.trim(), settings.port))
         .await
-        .with_context(|| format!("No se pudo conectar con el proxy {proxy}"))?;
+        .with_context(|| trf!("No se pudo conectar con el proxy {proxy}", proxy))?;
     let user = settings.username.trim();
     let password = config.password.as_deref().unwrap_or("");
     let result = match settings.kind {
@@ -167,7 +177,7 @@ pub async fn through(config: &ProxyConfig, host: &str, port: u16) -> Result<TcpS
         ProxyKind::Socks5 => socks5_connect(&mut stream, host, port, user, password).await,
         ProxyKind::None => Ok(()),
     };
-    result.with_context(|| format!("a través del proxy {proxy}"))?;
+    result.with_context(|| trf!("a través del proxy {proxy}", proxy))?;
     Ok(stream)
 }
 
@@ -182,7 +192,7 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     if host.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        bail!("nombre de equipo no válido");
+        bail!("{}", tr("nombre de equipo no válido"));
     }
     // IPv6 literal: entre corchetes.
     let target = if host.contains(':') && !host.starts_with('[') {
@@ -203,12 +213,12 @@ where
     let mut reply = Vec::with_capacity(256);
     while !reply.ends_with(b"\r\n\r\n") {
         if reply.len() >= MAX_HTTP_REPLY {
-            bail!("la respuesta del proxy no tiene fin");
+            bail!("{}", tr("la respuesta del proxy no tiene fin"));
         }
         let byte = stream
             .read_u8()
             .await
-            .map_err(|_| anyhow!("el proxy cerró la conexión sin contestar"))?;
+            .map_err(|_| anyhow!("{}", tr("el proxy cerró la conexión sin contestar")))?;
         reply.push(byte);
     }
     let text = String::from_utf8_lossy(&reply);
@@ -216,16 +226,22 @@ where
     let mut parts = status_line.split_whitespace();
     let (version, code) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
     if !version.starts_with("HTTP/") {
-        bail!("lo que contesta no es un proxy HTTP");
+        bail!("{}", tr("lo que contesta no es un proxy HTTP"));
     }
     match code {
         "200" => Ok(()),
         "407" => bail!(
-            "el proxy pide usuario y contraseña (o no acepta los indicados; si la contraseña \
-             está en el baúl, desbloquéalo)"
+            "{}",
+            tr(
+                "el proxy pide usuario y contraseña (o no acepta los indicados; si la \
+                 contraseña está en el baúl, desbloquéalo)"
+            )
         ),
-        "403" => bail!("el proxy no permite conectar con {target}"),
-        _ => bail!("el proxy contestó «{status_line}»"),
+        "403" => bail!(
+            "{}",
+            trf!("el proxy no permite conectar con {target}", target)
+        ),
+        _ => bail!("{}", trf!("el proxy contestó «{status_line}»", status_line)),
     }
 }
 
@@ -241,7 +257,10 @@ where
 {
     let with_auth = !user.is_empty();
     if with_auth && (user.len() > 255 || password.len() > 255) {
-        bail!("usuario o contraseña demasiado largos para SOCKS5");
+        bail!(
+            "{}",
+            tr("usuario o contraseña demasiado largos para SOCKS5")
+        );
     }
     // Saludo: métodos de autenticación que ofrecemos.
     let methods: &[u8] = if with_auth { &[0, 2] } else { &[0] };
@@ -252,9 +271,9 @@ where
     stream
         .read_exact(&mut choice)
         .await
-        .map_err(|_| anyhow!("el proxy cerró la conexión sin contestar"))?;
+        .map_err(|_| anyhow!("{}", tr("el proxy cerró la conexión sin contestar")))?;
     if choice[0] != 5 {
-        bail!("lo que contesta no es un proxy SOCKS5");
+        bail!("{}", tr("lo que contesta no es un proxy SOCKS5"));
     }
     match choice[1] {
         0 => {}
@@ -267,10 +286,13 @@ where
             let mut result = [0u8; 2];
             stream.read_exact(&mut result).await?;
             if result[1] != 0 {
-                bail!("el proxy no acepta el usuario o la contraseña");
+                bail!("{}", tr("el proxy no acepta el usuario o la contraseña"));
             }
         }
-        _ => bail!("el proxy pide una autenticación que no se le puede dar"),
+        _ => bail!(
+            "{}",
+            tr("el proxy pide una autenticación que no se le puede dar")
+        ),
     }
     // Petición CONNECT; el nombre lo resuelve el proxy.
     let host = host.trim().trim_start_matches('[').trim_end_matches(']');
@@ -286,7 +308,7 @@ where
         }
         Err(_) => {
             if host.is_empty() || host.len() > 255 {
-                bail!("nombre de equipo no válido");
+                bail!("{}", tr("nombre de equipo no válido"));
             }
             request.push(3);
             request.push(host.len() as u8);
@@ -299,18 +321,18 @@ where
     stream
         .read_exact(&mut head)
         .await
-        .map_err(|_| anyhow!("el proxy cerró la conexión sin contestar"))?;
+        .map_err(|_| anyhow!("{}", tr("el proxy cerró la conexión sin contestar")))?;
     if head[0] != 5 {
-        bail!("respuesta SOCKS5 no válida");
+        bail!("{}", tr("respuesta SOCKS5 no válida"));
     }
     if head[1] != 0 {
         bail!(match head[1] {
-            2 => "el proxy no permite esa conexión".to_string(),
-            3 => "red inalcanzable desde el proxy".to_string(),
-            4 => "equipo inalcanzable desde el proxy".to_string(),
-            5 => "el destino rechazó la conexión".to_string(),
-            6 => "la conexión tardó demasiado".to_string(),
-            code => format!("el proxy no pudo conectar (código {code})"),
+            2 => tr("el proxy no permite esa conexión").to_string(),
+            3 => tr("red inalcanzable desde el proxy").to_string(),
+            4 => tr("equipo inalcanzable desde el proxy").to_string(),
+            5 => tr("el destino rechazó la conexión").to_string(),
+            6 => tr("la conexión tardó demasiado").to_string(),
+            code => trf!("el proxy no pudo conectar (código {code})", code),
         });
     }
     // Dirección a la que se ha enlazado el proxy: se lee y se descarta.
@@ -318,7 +340,7 @@ where
         1 => 4 + 2,
         4 => 16 + 2,
         3 => stream.read_u8().await? as usize + 2,
-        _ => bail!("respuesta SOCKS5 no válida"),
+        _ => bail!("{}", tr("respuesta SOCKS5 no válida")),
     };
     let mut discard = vec![0u8; rest];
     stream.read_exact(&mut discard).await?;

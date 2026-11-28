@@ -9,6 +9,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::tr;
+use crate::trf;
+
 /// Ficheros sueltos de la carpeta de datos que entran en la copia.
 const FILES: [&str; 6] = [
     "sessions.json",
@@ -57,10 +60,16 @@ impl Entry {
     fn bytes(&self) -> Result<Vec<u8>> {
         match (&self.text, &self.base64) {
             (Some(text), _) => Ok(text.clone().into_bytes()),
-            (None, Some(data)) => B64
-                .decode(data)
-                .map_err(|_| anyhow!("«{}» está dañado en la copia", self.path)),
-            (None, None) => bail!("«{}» no tiene contenido en la copia", self.path),
+            (None, Some(data)) => B64.decode(data).map_err(|_| {
+                anyhow!(
+                    "{}",
+                    trf!("«{path}» está dañado en la copia", path = self.path)
+                )
+            }),
+            (None, None) => bail!(
+                "{}",
+                trf!("«{path}» no tiene contenido en la copia", path = self.path)
+            ),
         }
     }
 }
@@ -86,25 +95,42 @@ fn safe_path(path: &str) -> Result<PathBuf> {
             _ => Err(()),
         })
         .collect::<Result<_, _>>()
-        .map_err(|_| anyhow!("La copia contiene una ruta no admitida: {path}"))?;
+        .map_err(|_| anyhow!("{}", bad_path(path)))?;
     let allowed = match parts.as_slice() {
         [file] => FILES.contains(file),
         [dir, file] => (*dir == THEMES || *dir == KEYS) && !file.starts_with('.'),
         _ => false,
     };
     if !allowed || path.contains('\\') {
-        bail!("La copia contiene una ruta no admitida: {path}");
+        bail!("{}", bad_path(path));
     }
     Ok(parts.iter().collect())
 }
 
+fn bad_path(path: &str) -> String {
+    trf!("La copia contiene una ruta no admitida: {path}", path)
+}
+
+fn could_not_read(path: &Path) -> String {
+    trf!("No se pudo leer {path}", path = path.display())
+}
+
+fn could_not_write(path: &Path) -> String {
+    trf!("No se pudo escribir {path}", path = path.display())
+}
+
 fn read_limited(path: &Path) -> Result<Vec<u8>> {
-    let meta =
-        std::fs::metadata(path).with_context(|| format!("No se pudo leer {}", path.display()))?;
+    let meta = std::fs::metadata(path).with_context(|| could_not_read(path))?;
     if meta.len() > MAX_FILE {
-        bail!("{} es demasiado grande para la copia", path.display());
+        bail!(
+            "{}",
+            trf!(
+                "{path} es demasiado grande para la copia",
+                path = path.display()
+            )
+        );
     }
-    std::fs::read(path).with_context(|| format!("No se pudo leer {}", path.display()))
+    std::fs::read(path).with_context(|| could_not_read(path))
 }
 
 impl Backup {
@@ -137,7 +163,7 @@ impl Backup {
             }
         }
         if files.is_empty() {
-            bail!("Todavía no hay nada que guardar");
+            bail!("{}", tr("Todavía no hay nada que guardar"));
         }
         Ok(Backup {
             version: VERSION,
@@ -152,31 +178,40 @@ impl Backup {
         }
         let data = serde_json::to_vec_pretty(self)?;
         // Lleva el baúl y puede llevar claves: solo para su dueño.
-        crate::paths::write_private(path, &data)
-            .with_context(|| format!("No se pudo escribir {}", path.display()))?;
+        crate::paths::write_private(path, &data).with_context(|| could_not_write(path))?;
         Ok(())
     }
 
     /// Lee y valida un fichero de copia.
     pub fn read(path: &Path) -> Result<Backup> {
-        let meta = std::fs::metadata(path)
-            .with_context(|| format!("No se pudo leer {}", path.display()))?;
+        let meta = std::fs::metadata(path).with_context(|| could_not_read(path))?;
         if meta.len() > 512 * 1024 * 1024 {
-            bail!("{} es demasiado grande para ser una copia", path.display());
+            bail!(
+                "{}",
+                trf!(
+                    "{path} es demasiado grande para ser una copia",
+                    path = path.display()
+                )
+            );
         }
-        let data =
-            std::fs::read(path).with_context(|| format!("No se pudo leer {}", path.display()))?;
+        let data = std::fs::read(path).with_context(|| could_not_read(path))?;
         let backup: Backup = serde_json::from_slice(&data).map_err(|_| {
             anyhow!(
-                "{} no es una copia de seguridad de GodRemote",
-                path.display()
+                "{}",
+                trf!(
+                    "{path} no es una copia de seguridad de GodRemote",
+                    path = path.display()
+                )
             )
         })?;
         if backup.version > VERSION {
-            bail!("La copia es de una versión más reciente de GodRemote");
+            bail!(
+                "{}",
+                tr("La copia es de una versión más reciente de GodRemote")
+            );
         }
         if backup.files.is_empty() || backup.files.len() > MAX_FILES {
-            bail!("La copia no contiene ficheros válidos");
+            bail!("{}", tr("La copia no contiene ficheros válidos"));
         }
         for entry in &backup.files {
             safe_path(&entry.path)?;
@@ -201,27 +236,31 @@ impl Backup {
         let has = |name: &str| self.files.iter().any(|e| e.path == name);
         let mut parts = vec![];
         if has("sessions.json") {
-            parts.push("los equipos".to_string());
+            parts.push(tr("los equipos").to_string());
         }
         if has("vault.json") {
-            parts.push("el baúl cifrado".to_string());
+            parts.push(tr("el baúl cifrado").to_string());
         }
         if has("settings.json") {
-            parts.push("los ajustes".to_string());
+            parts.push(tr("los ajustes").to_string());
         }
         if has("macros.json") {
-            parts.push("los snippets".to_string());
+            parts.push(tr("los snippets").to_string());
         }
         if has("tunnels.json") {
-            parts.push("los túneles".to_string());
+            parts.push(tr("los túneles").to_string());
         }
         if count("themes/") > 0 {
-            parts.push(format!("{} tema(s)", count("themes/")));
+            parts.push(trf!("{n} tema(s)", n = count("themes/")));
         }
         if count("keys/") > 0 {
-            parts.push(format!("{} fichero(s) de claves", count("keys/")));
+            parts.push(trf!("{n} fichero(s) de claves", n = count("keys/")));
         }
-        format!("Copia del {}: {}", self.created, parts.join(", "))
+        trf!(
+            "Copia del {date}: {contents}",
+            date = self.created,
+            contents = parts.join(", ")
+        )
     }
 
     /// Escribe los ficheros de la copia en la carpeta de datos, sustituyendo
@@ -236,8 +275,7 @@ impl Backup {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            crate::paths::write_private(path, bytes)
-                .with_context(|| format!("No se pudo escribir {}", path.display()))?;
+            crate::paths::write_private(path, bytes).with_context(|| could_not_write(path))?;
         }
         Ok(writes.len())
     }

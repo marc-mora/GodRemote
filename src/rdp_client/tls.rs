@@ -83,7 +83,7 @@ pub(super) async fn upgrade(
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let mut config = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
-        .context("No se pudo preparar TLS")?
+        .context(crate::i18n::tr("No se pudo preparar TLS"))?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinnedLater { provider }))
         .with_no_client_auth();
@@ -96,8 +96,10 @@ pub(super) async fn upgrade(
     let mut tls = tokio_rustls::TlsConnector::from(Arc::new(config))
         .connect(name, stream)
         .await
-        .context("Fallo en la negociación TLS")?;
-    tls.flush().await.context("Fallo en la negociación TLS")?;
+        .context(crate::i18n::tr("Fallo en la negociación TLS"))?;
+    tls.flush()
+        .await
+        .context(crate::i18n::tr("Fallo en la negociación TLS"))?;
     Ok(tls)
 }
 
@@ -111,11 +113,21 @@ pub(super) fn server_public_key(certificate: &[u8]) -> Result<Vec<u8>> {
     let cert = x509_cert::certificate::CertificateInner::<x509_cert::certificate::Raw>::from_der(
         certificate,
     )
-    .map_err(|e| anyhow!("No se pudo interpretar el certificado del servidor: {e}"))?;
+    .map_err(|e| {
+        anyhow!(
+            "{}",
+            crate::trf!("No se pudo interpretar el certificado del servidor: {e}", e)
+        )
+    })?;
     cert.tbs_certificate()
         .subject_public_key_info()
         .subject_public_key
         .as_bytes()
         .map(<[u8]>::to_vec)
-        .ok_or_else(|| anyhow!("El certificado del servidor tiene una clave pública no válida"))
+        .ok_or_else(|| {
+            anyhow!(
+                "{}",
+                crate::i18n::tr("El certificado del servidor tiene una clave pública no válida")
+            )
+        })
 }

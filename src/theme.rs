@@ -12,7 +12,9 @@ use egui::Color32;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::backdrop::Backdrop;
+use crate::i18n::tr;
 use crate::monitor::ServerBar;
+use crate::{mark, trf};
 
 /// Color RGB que se guarda como `"#rrggbb"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,8 +67,9 @@ impl<'de> Deserialize<'de> for Rgb {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let text = String::deserialize(d)?;
         Rgb::parse(&text).ok_or_else(|| {
-            serde::de::Error::custom(format!(
-                "color no válido «{text}» (se espera #rrggbb, por ejemplo #1e90ff)"
+            serde::de::Error::custom(trf!(
+                "color no válido «{text}» (se espera #rrggbb, por ejemplo #1e90ff)",
+                text
             ))
         })
     }
@@ -121,39 +124,41 @@ pub struct UiColors {
 }
 
 impl UiColors {
-    /// Referencias mutables a todos los colores con su nombre visible.
+    /// Referencias mutables a todos los colores con su nombre visible (en
+    /// español: quien lo pinte lo traduce con `tr`).
     pub fn fields_mut(&mut self) -> [(&'static str, &mut Rgb); 17] {
         [
-            ("Fondo", &mut self.background),
-            ("Fondo de ventanas y menús", &mut self.window),
-            ("Fondo de campos de texto", &mut self.field),
-            ("Fondo alterno", &mut self.alternate),
-            ("Texto", &mut self.text),
-            ("Texto tenue", &mut self.text_weak),
-            ("Texto destacado", &mut self.text_strong),
-            ("Acento (selección)", &mut self.accent),
-            ("Texto sobre el acento", &mut self.on_accent),
-            ("Botón", &mut self.button),
-            ("Botón (ratón encima)", &mut self.button_hover),
-            ("Botón (pulsado)", &mut self.button_active),
-            ("Bordes", &mut self.border),
-            ("Enlaces", &mut self.link),
-            ("Correcto", &mut self.ok),
-            ("Aviso", &mut self.warn),
-            ("Error", &mut self.error),
+            (mark!("Fondo"), &mut self.background),
+            (mark!("Fondo de ventanas y menús"), &mut self.window),
+            (mark!("Fondo de campos de texto"), &mut self.field),
+            (mark!("Fondo alterno"), &mut self.alternate),
+            (mark!("Texto"), &mut self.text),
+            (mark!("Texto tenue"), &mut self.text_weak),
+            (mark!("Texto destacado"), &mut self.text_strong),
+            (mark!("Acento (selección)"), &mut self.accent),
+            (mark!("Texto sobre el acento"), &mut self.on_accent),
+            (mark!("Botón"), &mut self.button),
+            (mark!("Botón (ratón encima)"), &mut self.button_hover),
+            (mark!("Botón (pulsado)"), &mut self.button_active),
+            (mark!("Bordes"), &mut self.border),
+            (mark!("Enlaces"), &mut self.link),
+            (mark!("Correcto"), &mut self.ok),
+            (mark!("Aviso"), &mut self.warn),
+            (mark!("Error"), &mut self.error),
         ]
     }
 }
 
 impl TerminalColors {
-    /// Colores básicos del terminal (sin la paleta ANSI).
+    /// Colores básicos del terminal (sin la paleta ANSI), con su nombre
+    /// visible (en español: quien lo pinte lo traduce con `tr`).
     pub fn fields_mut(&mut self) -> [(&'static str, &mut Rgb); 5] {
         [
-            ("Texto", &mut self.foreground),
-            ("Fondo", &mut self.background),
-            ("Cursor", &mut self.cursor),
-            ("Fondo de la selección", &mut self.selection_bg),
-            ("Texto de la selección", &mut self.selection_fg),
+            (mark!("Texto"), &mut self.foreground),
+            (mark!("Fondo"), &mut self.background),
+            (mark!("Cursor"), &mut self.cursor),
+            (mark!("Fondo de la selección"), &mut self.selection_bg),
+            (mark!("Texto de la selección"), &mut self.selection_fg),
         ]
     }
 }
@@ -218,25 +223,26 @@ impl AnsiColors {
         ]
     }
 
-    /// Referencias mutables a los 16 colores con su nombre visible.
+    /// Referencias mutables a los 16 colores con su nombre visible (en
+    /// español: quien lo pinte lo traduce con `tr`).
     pub fn fields_mut(&mut self) -> [(&'static str, &mut Rgb); 16] {
         [
-            ("Negro", &mut self.black),
-            ("Rojo", &mut self.red),
-            ("Verde", &mut self.green),
-            ("Amarillo", &mut self.yellow),
-            ("Azul", &mut self.blue),
-            ("Magenta", &mut self.magenta),
-            ("Cian", &mut self.cyan),
-            ("Blanco", &mut self.white),
-            ("Negro brillante", &mut self.bright_black),
-            ("Rojo brillante", &mut self.bright_red),
-            ("Verde brillante", &mut self.bright_green),
-            ("Amarillo brillante", &mut self.bright_yellow),
-            ("Azul brillante", &mut self.bright_blue),
-            ("Magenta brillante", &mut self.bright_magenta),
-            ("Cian brillante", &mut self.bright_cyan),
-            ("Blanco brillante", &mut self.bright_white),
+            (mark!("Negro"), &mut self.black),
+            (mark!("Rojo"), &mut self.red),
+            (mark!("Verde"), &mut self.green),
+            (mark!("Amarillo"), &mut self.yellow),
+            (mark!("Azul"), &mut self.blue),
+            (mark!("Magenta"), &mut self.magenta),
+            (mark!("Cian"), &mut self.cyan),
+            (mark!("Blanco"), &mut self.white),
+            (mark!("Negro brillante"), &mut self.bright_black),
+            (mark!("Rojo brillante"), &mut self.bright_red),
+            (mark!("Verde brillante"), &mut self.bright_green),
+            (mark!("Amarillo brillante"), &mut self.bright_yellow),
+            (mark!("Azul brillante"), &mut self.bright_blue),
+            (mark!("Magenta brillante"), &mut self.bright_magenta),
+            (mark!("Cian brillante"), &mut self.bright_cyan),
+            (mark!("Blanco brillante"), &mut self.bright_white),
         ]
     }
 }
@@ -771,14 +777,18 @@ impl Theme {
     pub fn from_json(text: &str) -> Result<Theme> {
         let mut theme: Theme = serde_json::from_str(text).map_err(|e| {
             anyhow!(
-                "El tema no es válido (línea {}, columna {}): {e}",
-                e.line(),
-                e.column()
+                "{}",
+                trf!(
+                    "El tema no es válido (línea {line}, columna {column}): {e}",
+                    line = e.line(),
+                    column = e.column(),
+                    e
+                )
             )
         })?;
         theme.sanitize();
         if theme.name.is_empty() {
-            bail!("El tema no tiene nombre (campo «nombre»)");
+            bail!("{}", tr("El tema no tiene nombre (campo «nombre»)"));
         }
         Ok(theme)
     }
@@ -1024,17 +1034,25 @@ pub struct ThemeStore {
 /// Tamaño máximo de un fichero de tema (puede llevar dentro una imagen).
 const MAX_THEME_FILE: u64 = 16 * 1024 * 1024;
 
+fn could_not_read(path: &Path) -> String {
+    trf!("No se pudo leer {path}", path = path.display())
+}
+
 fn read_theme_file(path: &Path) -> Result<Theme> {
-    let meta =
-        std::fs::metadata(path).with_context(|| format!("No se pudo leer {}", path.display()))?;
+    let meta = std::fs::metadata(path).with_context(|| could_not_read(path))?;
     if !meta.is_file() {
-        bail!("{} no es un fichero", path.display());
+        bail!("{}", trf!("{path} no es un fichero", path = path.display()));
     }
     if meta.len() > MAX_THEME_FILE {
-        bail!("{} es demasiado grande para ser un tema", path.display());
+        bail!(
+            "{}",
+            trf!(
+                "{path} es demasiado grande para ser un tema",
+                path = path.display()
+            )
+        );
     }
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("No se pudo leer {}", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| could_not_read(path))?;
     Theme::from_json(&text)
 }
 
@@ -1056,10 +1074,10 @@ impl ThemeStore {
             }
             match read_theme_file(&path) {
                 Ok(theme) if !store.exists(&theme.name) => store.user.push(theme),
-                Ok(theme) => store.load_errors.push(format!(
-                    "{}: nombre repetido «{}»",
-                    path.display(),
-                    theme.name
+                Ok(theme) => store.load_errors.push(trf!(
+                    "{path}: nombre repetido «{name}»",
+                    path = path.display(),
+                    name = theme.name
                 )),
                 Err(e) => store.load_errors.push(format!("{e:#}")),
             }
@@ -1111,18 +1129,31 @@ impl ThemeStore {
     pub fn save_user(&mut self, mut theme: Theme, previous_name: Option<&str>) -> Result<()> {
         theme.sanitize();
         if theme.name.is_empty() {
-            bail!("El tema necesita un nombre");
+            bail!("{}", tr("El tema necesita un nombre"));
         }
         if self.is_builtin(&theme.name) {
-            bail!("«{}» es un tema integrado; elige otro nombre", theme.name);
+            bail!(
+                "{}",
+                trf!(
+                    "«{name}» es un tema integrado; elige otro nombre",
+                    name = theme.name
+                )
+            );
         }
         let renaming = previous_name.is_some_and(|p| p != theme.name);
         if (renaming || previous_name.is_none()) && self.exists(&theme.name) {
-            bail!("Ya existe un tema llamado «{}»", theme.name);
+            bail!(
+                "{}",
+                trf!("Ya existe un tema llamado «{name}»", name = theme.name)
+            );
         }
         std::fs::create_dir_all(&self.dir)?;
-        std::fs::write(self.path_for(&theme.name), theme.to_json())
-            .with_context(|| format!("No se pudo guardar el tema en {}", self.dir.display()))?;
+        std::fs::write(self.path_for(&theme.name), theme.to_json()).with_context(|| {
+            trf!(
+                "No se pudo guardar el tema en {path}",
+                path = self.dir.display()
+            )
+        })?;
         if let Some(previous) = previous_name {
             if renaming {
                 let _ = std::fs::remove_file(self.path_for(previous));
@@ -1137,7 +1168,7 @@ impl ThemeStore {
 
     pub fn delete_user(&mut self, name: &str) -> Result<()> {
         if self.is_builtin(name) {
-            bail!("Los temas integrados no se pueden eliminar");
+            bail!("{}", tr("Los temas integrados no se pueden eliminar"));
         }
         let _ = std::fs::remove_file(self.path_for(name));
         self.user.retain(|t| t.name != name);
@@ -1161,7 +1192,7 @@ pub fn export(theme: &Theme, path: &Path) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, theme.to_json())
-        .with_context(|| format!("No se pudo escribir {}", path.display()))
+        .with_context(|| trf!("No se pudo escribir {path}", path = path.display()))
 }
 
 /// Carpeta sugerida para exportar: Descargas, o la carpeta personal.

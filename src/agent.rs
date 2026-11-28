@@ -11,7 +11,9 @@ use russh::keys::ssh_key::HashAlg;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::i18n::tr;
 use crate::keys::CertInfo;
+use crate::trf;
 
 /// Qué agente SSH usar (ajuste; solo cambia algo en Windows, donde conviven
 /// el agente de OpenSSH y Pageant, el de PuTTY).
@@ -36,8 +38,8 @@ impl AgentChoice {
 
     pub fn label(self) -> &'static str {
         match self {
-            AgentChoice::Auto => "Automático (OpenSSH y, si no, Pageant)",
-            AgentChoice::OpenSsh => "Agente de OpenSSH",
+            AgentChoice::Auto => tr("Automático (OpenSSH y, si no, Pageant)"),
+            AgentChoice::OpenSsh => tr("Agente de OpenSSH"),
             AgentChoice::Pageant => "Pageant (PuTTY)",
         }
     }
@@ -82,7 +84,7 @@ pub enum AgentKind {
 impl AgentKind {
     pub fn label(self) -> &'static str {
         match self {
-            AgentKind::OpenSsh => "el agente de OpenSSH",
+            AgentKind::OpenSsh => tr("el agente de OpenSSH"),
             AgentKind::Pageant => "Pageant",
         }
     }
@@ -104,7 +106,7 @@ async fn open(kind: AgentKind) -> Result<Client> {
     // (La tubería de Windows se reintenta sin fin mientras esté ocupada.)
     tokio::time::timeout(ANSWER_TIMEOUT, open_now(kind))
         .await
-        .map_err(|_| anyhow!("{} no contesta", kind.label()))?
+        .map_err(|_| anyhow!("{}", trf!("{agent} no contesta", agent = kind.label())))?
 }
 
 async fn open_now(kind: AgentKind) -> Result<Client> {
@@ -114,24 +116,24 @@ async fn open_now(kind: AgentKind) -> Result<Client> {
             {
                 let socket = std::env::var_os("SSH_AUTH_SOCK")
                     .filter(|path| !path.is_empty())
-                    .context("no hay agente SSH (variable SSH_AUTH_SOCK sin definir)")?;
-                let client = AgentClient::connect_uds(socket)
-                    .await
-                    .context("no se pudo conectar con el agente SSH (¿SSH_AUTH_SOCK?)")?;
+                    .context(tr("no hay agente SSH (variable SSH_AUTH_SOCK sin definir)"))?;
+                let client = AgentClient::connect_uds(socket).await.context(tr(
+                    "no se pudo conectar con el agente SSH (¿SSH_AUTH_SOCK?)",
+                ))?;
                 Ok(client.dynamic())
             }
             #[cfg(windows)]
             {
                 let client = AgentClient::connect_named_pipe(OPENSSH_PIPE)
                     .await
-                    .context(
+                    .context(tr(
                         "no se pudo conectar con el agente de OpenSSH (¿servicio ssh-agent?)",
-                    )?;
+                    ))?;
                 Ok(client.dynamic())
             }
             #[cfg(not(any(unix, windows)))]
             {
-                Err(anyhow!("no hay agente SSH en este sistema"))
+                Err(anyhow!("{}", tr("no hay agente SSH en este sistema")))
             }
         }
         AgentKind::Pageant => {
@@ -139,12 +141,12 @@ async fn open_now(kind: AgentKind) -> Result<Client> {
             {
                 let client = AgentClient::connect_pageant()
                     .await
-                    .context("no se pudo conectar con Pageant (¿está en marcha?)")?;
+                    .context(tr("no se pudo conectar con Pageant (¿está en marcha?)"))?;
                 Ok(client.dynamic())
             }
             #[cfg(not(windows))]
             {
-                Err(anyhow!("Pageant solo existe en Windows"))
+                Err(anyhow!("{}", tr("Pageant solo existe en Windows")))
             }
         }
     }
@@ -162,10 +164,16 @@ pub struct Connected {
 async fn probe(kind: AgentKind) -> Result<Connected> {
     let attempt = async {
         let mut client = open(kind).await?;
-        let identities = client
-            .request_identities()
-            .await
-            .map_err(|e| anyhow!("{} no devolvió sus claves: {e}", kind.label()))?;
+        let identities = client.request_identities().await.map_err(|e| {
+            anyhow!(
+                "{}",
+                trf!(
+                    "{agent} no devolvió sus claves: {e}",
+                    agent = kind.label(),
+                    e
+                )
+            )
+        })?;
         Ok(Connected {
             client,
             kind,
@@ -174,7 +182,7 @@ async fn probe(kind: AgentKind) -> Result<Connected> {
     };
     tokio::time::timeout(ANSWER_TIMEOUT, attempt)
         .await
-        .map_err(|_| anyhow!("{} no contesta", kind.label()))?
+        .map_err(|_| anyhow!("{}", trf!("{agent} no contesta", agent = kind.label())))?
 }
 
 /// Conecta con el agente SSH que toque según el ajuste y le pide sus
@@ -279,7 +287,7 @@ pub fn list_blocking() -> Result<AgentListing> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .context("no se pudo preparar la consulta al agente")?
+        .context(tr("no se pudo preparar la consulta al agente"))?
         .block_on(list())
 }
 

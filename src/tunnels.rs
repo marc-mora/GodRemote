@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 
 use crate::model::{Tunnel, TunnelKind};
 use crate::ssh::SshHandle;
+use crate::trf;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TunnelStatus {
@@ -67,8 +68,13 @@ async fn remote(handle: &SshHandle, tunnel: &Tunnel) -> Result<()> {
             Ok(())
         }
         Err(_) => bail!(
-            "el servidor rechazó escuchar en {host}:{} (¿AllowTcpForwarding / GatewayPorts?)",
-            tunnel.listen_port
+            "{}",
+            trf!(
+                "el servidor rechazó escuchar en {host}:{port} (¿AllowTcpForwarding / \
+                 GatewayPorts?)",
+                host,
+                port = tunnel.listen_port
+            )
         ),
     }
 }
@@ -77,7 +83,17 @@ async fn listen(handle: SshHandle, tunnel: Tunnel) -> Result<Option<JoinHandle<(
     let addr = (tunnel.listen_host.trim().to_string(), tunnel.listen_port);
     let listener = TcpListener::bind((addr.0.as_str(), addr.1))
         .await
-        .map_err(|e| anyhow::anyhow!("no se pudo escuchar en {}:{}: {e}", addr.0, addr.1))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "{}",
+                trf!(
+                    "no se pudo escuchar en {host}:{port}: {e}",
+                    host = addr.0,
+                    port = addr.1,
+                    e
+                )
+            )
+        })?;
     Ok(Some(tokio::spawn(async move {
         loop {
             let Ok((socket, peer)) = listener.accept().await else {

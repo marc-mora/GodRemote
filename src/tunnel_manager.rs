@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use crate::i18n::tr;
 use crate::model::Tunnel;
 use crate::ssh::{Endpoint, Prompter};
 use crate::tunnels::{self, TunnelStatus};
@@ -55,7 +56,7 @@ impl SavedTunnel {
 
     pub fn validate(&self) -> Result<(), String> {
         if self.session.is_none() {
-            return Err("Elige el equipo SSH por el que pasa el túnel".into());
+            return Err(tr("Elige el equipo SSH por el que pasa el túnel").into());
         }
         self.tunnel.validate()
     }
@@ -187,7 +188,7 @@ pub fn spawn(
     RunningTunnel {
         events: event_rx,
         stop: Some(stop_tx),
-        state: RunState::Connecting("Conectando…".into()),
+        state: RunState::Connecting(tr("Conectando…").into()),
         was_active: false,
         secrets_to_save: vec![],
     }
@@ -232,7 +233,10 @@ async fn run(
                     _ = &mut stop => break Ok(()),
                     _ = tokio::time::sleep(Duration::from_millis(500)) => {
                         if handle.is_closed() {
-                            break Err(anyhow::anyhow!("Se perdió la conexión con el servidor"));
+                            break Err(anyhow::anyhow!(
+                                "{}",
+                                tr("Se perdió la conexión con el servidor")
+                            ));
                         }
                     }
                 }
@@ -247,7 +251,7 @@ async fn run(
     if let Err(error) = &outcome
         && error.to_string().is_empty()
     {
-        bail!("El túnel no se pudo abrir");
+        bail!("{}", tr("El túnel no se pudo abrir"));
     }
     outcome
 }

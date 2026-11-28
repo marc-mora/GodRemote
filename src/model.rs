@@ -5,6 +5,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::i18n::tr;
+use crate::trf;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Protocol {
     Ssh,
@@ -32,7 +35,7 @@ impl Protocol {
             Protocol::Rdp => "RDP",
             Protocol::Vnc => "VNC",
             Protocol::Telnet => "Telnet",
-            Protocol::Serial => "Serie",
+            Protocol::Serial => tr("Serie"),
         }
     }
 
@@ -90,9 +93,9 @@ impl AuthMethod {
 
     pub fn label(self) -> &'static str {
         match self {
-            AuthMethod::Password => "Contraseña",
-            AuthMethod::Key => "Clave privada",
-            AuthMethod::Agent => "Agente SSH",
+            AuthMethod::Password => tr("Contraseña"),
+            AuthMethod::Key => tr("Clave privada"),
+            AuthMethod::Agent => tr("Agente SSH"),
         }
     }
 }
@@ -142,8 +145,8 @@ impl TunnelKind {
     pub fn label(self) -> &'static str {
         match self {
             TunnelKind::Local => "Local (-L)",
-            TunnelKind::Remote => "Remoto (-R)",
-            TunnelKind::Dynamic => "Dinámico SOCKS (-D)",
+            TunnelKind::Remote => tr("Remoto (-R)"),
+            TunnelKind::Dynamic => tr("Dinámico SOCKS (-D)"),
         }
     }
 }
@@ -177,13 +180,19 @@ impl Tunnel {
     /// Descripción corta, al estilo de OpenSSH.
     pub fn describe(&self) -> String {
         match self.kind {
-            TunnelKind::Local => format!(
-                "-L {}:{} hacia {}:{}",
-                self.listen_host, self.listen_port, self.target_host, self.target_port
+            TunnelKind::Local => trf!(
+                "-L {listen_host}:{listen_port} hacia {target_host}:{target_port}",
+                listen_host = self.listen_host,
+                listen_port = self.listen_port,
+                target_host = self.target_host,
+                target_port = self.target_port
             ),
-            TunnelKind::Remote => format!(
-                "-R {}:{} hacia {}:{}",
-                self.listen_host, self.listen_port, self.target_host, self.target_port
+            TunnelKind::Remote => trf!(
+                "-R {listen_host}:{listen_port} hacia {target_host}:{target_port}",
+                listen_host = self.listen_host,
+                listen_port = self.listen_port,
+                target_host = self.target_host,
+                target_port = self.target_port
             ),
             TunnelKind::Dynamic => {
                 format!("-D {}:{} (SOCKS5)", self.listen_host, self.listen_port)
@@ -193,17 +202,17 @@ impl Tunnel {
 
     pub fn validate(&self) -> Result<(), String> {
         if self.listen_host.trim().is_empty() {
-            return Err("Túnel: falta la dirección de escucha".into());
+            return Err(tr("Túnel: falta la dirección de escucha").into());
         }
         if self.listen_port == 0 {
-            return Err("Túnel: el puerto de escucha no es válido".into());
+            return Err(tr("Túnel: el puerto de escucha no es válido").into());
         }
         if self.kind != TunnelKind::Dynamic {
             if self.target_host.trim().is_empty() {
-                return Err("Túnel: falta el host de destino".into());
+                return Err(tr("Túnel: falta el host de destino").into());
             }
             if self.target_port == 0 {
-                return Err("Túnel: el puerto de destino no es válido".into());
+                return Err(tr("Túnel: el puerto de destino no es válido").into());
             }
         }
         Ok(())
@@ -382,7 +391,11 @@ impl Session {
     /// Destino legible: `usuario@host:puerto` o el dispositivo serie.
     pub fn target(&self) -> String {
         match self.protocol {
-            Protocol::Serial => format!("{} · {} baudios", self.serial.device, self.serial.baud),
+            Protocol::Serial => trf!(
+                "{device} · {baud} baudios",
+                device = self.serial.device,
+                baud = self.serial.baud
+            ),
             p if p.is_ssh() || (p == Protocol::Rdp && !self.username.is_empty()) => {
                 format!("{}@{}:{}", self.username, self.host, self.port)
             }
@@ -393,44 +406,44 @@ impl Session {
     pub fn validate(&self) -> Result<(), String> {
         if self.protocol == Protocol::Serial {
             if self.serial.device.trim().is_empty() {
-                return Err("Indica el dispositivo serie (COM3, /dev/ttyUSB0…)".into());
+                return Err(tr("Indica el dispositivo serie (COM3, /dev/ttyUSB0…)").into());
             }
             if self.serial.baud == 0 {
-                return Err("La velocidad no es válida".into());
+                return Err(tr("La velocidad no es válida").into());
             }
             if !(5..=8).contains(&self.serial.data_bits) {
-                return Err("Los bits de datos deben estar entre 5 y 8".into());
+                return Err(tr("Los bits de datos deben estar entre 5 y 8").into());
             }
             if !(1..=2).contains(&self.serial.stop_bits) {
-                return Err("Los bits de parada deben ser 1 o 2".into());
+                return Err(tr("Los bits de parada deben ser 1 o 2").into());
             }
             return Ok(());
         }
         if self.host.trim().is_empty() {
-            return Err("El host no puede estar vacío".into());
+            return Err(tr("El host no puede estar vacío").into());
         }
         if self.port == 0 {
-            return Err("El puerto no es válido".into());
+            return Err(tr("El puerto no es válido").into());
         }
         if self.protocol.is_ssh() {
             if self.username.trim().is_empty() {
-                return Err("El usuario no puede estar vacío".into());
+                return Err(tr("El usuario no puede estar vacío").into());
             }
             if self.auth == AuthMethod::Key && self.key_path.trim().is_empty() {
-                return Err("Indica la ruta de la clave privada".into());
+                return Err(tr("Indica la ruta de la clave privada").into());
             }
             for t in &self.tunnels {
                 t.validate()?;
             }
         }
         if self.jumps.contains(&self.id) {
-            return Err("Un equipo no puede saltar a través de sí mismo".into());
+            return Err(tr("Un equipo no puede saltar a través de sí mismo").into());
         }
         let mut seen = self.jumps.clone();
         seen.sort();
         seen.dedup();
         if seen.len() != self.jumps.len() {
-            return Err("Hay un salto repetido en la lista".into());
+            return Err(tr("Hay un salto repetido en la lista").into());
         }
         Ok(())
     }
@@ -587,24 +600,24 @@ impl Tree {
             path: &mut Vec<Session>,
         ) -> Result<(), String> {
             if stack.contains(&session.id) {
-                return Err(format!(
-                    "Los saltos forman un bucle (pasan dos veces por «{}»)",
-                    session.display_name()
+                return Err(trf!(
+                    "Los saltos forman un bucle (pasan dos veces por «{name}»)",
+                    name = session.display_name()
                 ));
             }
             stack.push(session.id);
             for hop_id in &session.jumps {
                 // El salto, con lo que herede de su carpeta.
                 let hop = tree.resolved_session(*hop_id).ok_or_else(|| {
-                    format!(
-                        "Un salto de «{}» ya no existe; edita la sesión",
-                        session.display_name()
+                    trf!(
+                        "Un salto de «{name}» ya no existe; edita la sesión",
+                        name = session.display_name()
                     )
                 })?;
                 if !hop.protocol.is_ssh() {
-                    return Err(format!(
-                        "El salto «{}» no es una sesión SSH",
-                        hop.display_name()
+                    return Err(trf!(
+                        "El salto «{name}» no es una sesión SSH",
+                        name = hop.display_name()
                     ));
                 }
                 if path.iter().any(|s| s.id == hop.id) {
@@ -614,8 +627,9 @@ impl Tree {
                 expand(tree, &hop, stack, path)?;
                 path.push(hop);
                 if path.len() > MAX_JUMPS {
-                    return Err(format!(
-                        "Demasiados saltos encadenados (máximo {MAX_JUMPS})"
+                    return Err(trf!(
+                        "Demasiados saltos encadenados (máximo {max})",
+                        max = MAX_JUMPS
                     ));
                 }
             }

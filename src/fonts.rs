@@ -208,10 +208,13 @@ pub fn resolve(choice: &str) -> Result<Option<LoadedFont>, String> {
         return Ok(None);
     }
     let read = |path: &Path, index: u32| -> Result<Option<LoadedFont>, String> {
-        let data =
-            std::fs::read(path).map_err(|e| format!("No se pudo leer {}: {e}", path.display()))?;
+        let data = std::fs::read(path)
+            .map_err(|e| crate::trf!("No se pudo leer {path}: {e}", path = path.display(), e))?;
         if faces(&data).is_empty() {
-            return Err(format!("{} no es un tipo de letra válido", path.display()));
+            return Err(crate::trf!(
+                "{path} no es un tipo de letra válido",
+                path = path.display()
+            ));
         }
         Ok(Some(LoadedFont {
             data: Arc::new(data),
@@ -226,8 +229,9 @@ pub fn resolve(choice: &str) -> Result<Option<LoadedFont>, String> {
     let fonts = system_fonts_blocking();
     match fonts.iter().find(|f| f.family.eq_ignore_ascii_case(choice)) {
         Some(font) => read(&font.path, font.index),
-        None => Err(format!(
-            "El tipo de letra «{choice}» no está instalado en este equipo"
+        None => Err(crate::trf!(
+            "El tipo de letra «{choice}» no está instalado en este equipo",
+            choice
         )),
     }
 }

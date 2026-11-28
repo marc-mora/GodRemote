@@ -7,6 +7,9 @@ use anyhow::{Result, anyhow, bail};
 use hmac::{Hmac, KeyInit, Mac};
 use zeroize::Zeroizing;
 
+use crate::i18n::tr;
+use crate::trf;
+
 /// Función resumen del HMAC con el que se calculan los códigos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TotpAlgorithm {
@@ -38,7 +41,13 @@ impl TotpAlgorithm {
             "SHA1" => Ok(TotpAlgorithm::Sha1),
             "SHA256" => Ok(TotpAlgorithm::Sha256),
             "SHA512" => Ok(TotpAlgorithm::Sha512),
-            _ => bail!("Algoritmo TOTP no soportado: {text} (vale SHA1, SHA256 o SHA512)"),
+            _ => bail!(
+                "{}",
+                trf!(
+                    "Algoritmo TOTP no soportado: {text} (vale SHA1, SHA256 o SHA512)",
+                    text
+                )
+            ),
         }
     }
 }
@@ -89,7 +98,13 @@ fn base32_decode(text: &str) -> Result<Vec<u8>> {
             .iter()
             .position(|b| char::from(*b) == upper)
             .ok_or_else(|| {
-                anyhow!("El secreto TOTP no es base32 válido (solo letras de la A a la Z y cifras del 2 al 7)")
+                anyhow!(
+                    "{}",
+                    tr(
+                        "El secreto TOTP no es base32 válido (solo letras de la A a la Z y \
+                         cifras del 2 al 7)"
+                    )
+                )
             })?;
         buffer = (buffer << 5) | value as u32;
         bits += 5;
@@ -159,10 +174,10 @@ impl Totp {
     pub fn parse(text: &str) -> Result<Self> {
         let text = text.trim();
         if text.is_empty() {
-            bail!("Falta el secreto TOTP");
+            bail!("{}", tr("Falta el secreto TOTP"));
         }
         if text.len() > MAX_INPUT {
-            bail!("El secreto TOTP es demasiado largo");
+            bail!("{}", tr("El secreto TOTP es demasiado largo"));
         }
         if text.len() >= 10 && text[..10].eq_ignore_ascii_case("otpauth://") {
             return Self::parse_uri(&text[10..]);
@@ -180,10 +195,16 @@ impl Totp {
         let (kind, rest) = rest.split_once('/').unwrap_or((rest, ""));
         let kind = kind.split('?').next().unwrap_or_default();
         if kind.eq_ignore_ascii_case("hotp") {
-            bail!("Los códigos HOTP (por contador) no están soportados: solo TOTP (por hora)");
+            bail!(
+                "{}",
+                tr("Los códigos HOTP (por contador) no están soportados: solo TOTP (por hora)")
+            );
         }
         if !kind.eq_ignore_ascii_case("totp") {
-            bail!("La URI no es de un código TOTP (otpauth://totp/…)");
+            bail!(
+                "{}",
+                tr("La URI no es de un código TOTP (otpauth://totp/…)")
+            );
         }
         let query = rest.split_once('?').map(|(_, q)| q).unwrap_or_default();
         let query = query.split('#').next().unwrap_or_default();
@@ -198,22 +219,24 @@ impl Totp {
                 "secret" => secret = Some(base32_decode(&value)?),
                 "algorithm" => algorithm = TotpAlgorithm::parse(&value)?,
                 "digits" => {
-                    digits = value
-                        .trim()
-                        .parse()
-                        .map_err(|_| anyhow!("Número de cifras TOTP no válido: {value}"))?
+                    digits = value.trim().parse().map_err(|_| {
+                        anyhow!(
+                            "{}",
+                            trf!("Número de cifras TOTP no válido: {value}", value)
+                        )
+                    })?
                 }
                 "period" => {
-                    period = value
-                        .trim()
-                        .parse()
-                        .map_err(|_| anyhow!("Periodo TOTP no válido: {value}"))?
+                    period = value.trim().parse().map_err(|_| {
+                        anyhow!("{}", trf!("Periodo TOTP no válido: {value}", value))
+                    })?
                 }
                 // El emisor y lo demás no hacen falta para calcular.
                 _ => {}
             }
         }
-        let secret = secret.ok_or_else(|| anyhow!("La URI otpauth:// no trae el secreto"))?;
+        let secret =
+            secret.ok_or_else(|| anyhow!("{}", tr("La URI otpauth:// no trae el secreto")))?;
         Self::new(secret, algorithm, digits, period)
     }
 
@@ -226,13 +249,25 @@ impl Totp {
     ) -> Result<Self> {
         let secret = Zeroizing::new(secret);
         if secret.is_empty() {
-            bail!("Falta el secreto TOTP");
+            bail!("{}", tr("Falta el secreto TOTP"));
         }
         if !(6..=8).contains(&digits) {
-            bail!("Los códigos TOTP deben tener de 6 a 8 cifras, no {digits}");
+            bail!(
+                "{}",
+                trf!(
+                    "Los códigos TOTP deben tener de 6 a 8 cifras, no {digits}",
+                    digits
+                )
+            );
         }
         if !(1..=MAX_PERIOD).contains(&period) {
-            bail!("El periodo TOTP debe estar entre 1 y {MAX_PERIOD} segundos");
+            bail!(
+                "{}",
+                trf!(
+                    "El periodo TOTP debe estar entre 1 y {max} segundos",
+                    max = MAX_PERIOD
+                )
+            );
         }
         Ok(Self {
             secret,
@@ -317,11 +352,11 @@ impl Totp {
 
     /// «SHA-1 · 6 cifras · 30 s», para enseñar con qué se calcula.
     pub fn describe(&self) -> String {
-        format!(
-            "{} · {} cifras · cada {} s",
-            self.algorithm.label(),
-            self.digits,
-            self.period
+        trf!(
+            "{algorithm} · {digits} cifras · cada {period} s",
+            algorithm = self.algorithm.label(),
+            digits = self.digits,
+            period = self.period
         )
     }
 }

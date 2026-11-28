@@ -49,7 +49,10 @@ pub fn detect() -> Vec<ShellProfile> {
             "Windows PowerShell",
             "powershell.exe -NoLogo",
         ));
-        found.push(ShellProfile::new("Símbolo del sistema (cmd)", "cmd.exe"));
+        found.push(ShellProfile::new(
+            crate::i18n::tr("Símbolo del sistema (cmd)"),
+            "cmd.exe",
+        ));
         if in_path("wsl.exe").is_some() {
             found.push(ShellProfile::new("WSL (Linux)", "wsl.exe"));
         }

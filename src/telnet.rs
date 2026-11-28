@@ -270,14 +270,19 @@ async fn run(
     if !to_save.is_empty() {
         emit(TermEvent::SaveSecrets(to_save));
     }
-    emit(TermEvent::Status(format!(
-        "Conectando a {host}:{port} por Telnet (sin cifrar{})…",
-        if route.is_direct() {
-            ""
-        } else {
-            " tras el último salto"
-        }
-    )));
+    emit(TermEvent::Status(if route.is_direct() {
+        crate::trf!(
+            "Conectando a {host}:{port} por Telnet (sin cifrar)…",
+            host,
+            port
+        )
+    } else {
+        crate::trf!(
+            "Conectando a {host}:{port} por Telnet (sin cifrar tras el último salto)…",
+            host,
+            port
+        )
+    }));
     let mut stream = route.connect(host, port).await?;
     emit(TermEvent::Connected(None));
 

@@ -588,8 +588,9 @@ impl XServer {
     /// `display = None` busca un número libre. Devuelve el número de pantalla
     /// (`DISPLAY=127.0.0.1:N`).
     pub async fn listen_tcp(&self, display: Option<u16>) -> Result<u16> {
+        // (Estos errores sí los ve el usuario, en la pestaña del servidor X.)
         if self.stopped() {
-            bail!("El servidor X está parado");
+            bail!("{}", crate::i18n::tr("El servidor X está parado"));
         }
         let candidates = match display {
             Some(d) => d..=d,
@@ -598,7 +599,10 @@ impl XServer {
         let mut last_error = None;
         for number in candidates {
             let Some(port) = 6000u16.checked_add(number) else {
-                bail!("Número de pantalla X demasiado alto: {number}");
+                bail!(
+                    "{}",
+                    crate::trf!("Número de pantalla X demasiado alto: {number}", number)
+                );
             };
             let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
                 Ok(l) => l,
@@ -629,8 +633,14 @@ impl XServer {
             return Ok(number);
         }
         match last_error {
-            Some(e) => Err(anyhow!("No se pudo abrir el puerto del servidor X: {e}")),
-            None => bail!("No queda ningún número de pantalla X libre"),
+            Some(e) => Err(anyhow!(
+                "{}",
+                crate::trf!("No se pudo abrir el puerto del servidor X: {e}", e)
+            )),
+            None => bail!(
+                "{}",
+                crate::i18n::tr("No queda ningún número de pantalla X libre")
+            ),
         }
     }
 

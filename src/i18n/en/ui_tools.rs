@@ -335,7 +335,7 @@ pub(super) const T: super::Table = &[
     ("conectando", "connecting"),
     ("en marcha", "running"),
     ("bien", "ok"),
-    ("código {code}", "code {code}"),
+    ("código {code}", "exit code {code}"),
     ("terminado", "finished"),
     ("error", "error"),
     ("cancelado", "cancelled"),

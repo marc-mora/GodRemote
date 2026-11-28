@@ -23,7 +23,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::i18n::tr;
 use crate::session_log::Plain;
+use crate::trf;
 
 pub const MAX_RULES: usize = 64;
 pub const MAX_NAME_CHARS: usize = 80;
@@ -142,23 +144,25 @@ impl Trigger {
     /// Comprueba que la regla se puede usar.
     pub fn validate(&self) -> Result<(), String> {
         if self.pattern.trim().is_empty() {
-            return Err("Falta el texto que dispara la regla".into());
+            return Err(tr("Falta el texto que dispara la regla").into());
         }
         if self.pattern.chars().count() > MAX_PATTERN_CHARS {
-            return Err(format!(
-                "El texto es demasiado largo (máximo {MAX_PATTERN_CHARS} caracteres)"
+            return Err(trf!(
+                "El texto es demasiado largo (máximo {max} caracteres)",
+                max = MAX_PATTERN_CHARS
             ));
         }
         let Some(pattern) = self.compiled_pattern() else {
-            return Err("El texto debe tener algo más que comodines".into());
+            return Err(tr("El texto debe tener algo más que comodines").into());
         };
         if !self.notify && !self.sends() {
-            return Err("La regla no hace nada: marca «Avisar» o «Enviar un texto»".into());
+            return Err(tr("La regla no hace nada: marca «Avisar» o «Enviar un texto»").into());
         }
         if let Some(text) = &self.send {
             if text.chars().count() > MAX_SEND_CHARS {
-                return Err(format!(
-                    "El texto que se envía es demasiado largo (máximo {MAX_SEND_CHARS} caracteres)"
+                return Err(trf!(
+                    "El texto que se envía es demasiado largo (máximo {max} caracteres)",
+                    max = MAX_SEND_CHARS
                 ));
             }
             // El eco de la respuesta volvería a disparar la regla.
@@ -167,10 +171,10 @@ impl Trigger {
                 .split(['\r', '\n'])
                 .any(|line| pattern.is_match(&Line::new(line)))
             {
-                return Err(
-                    "Lo que envía contiene el texto que la dispara: se respondería a sí misma"
-                        .into(),
-                );
+                return Err(tr(
+                    "Lo que envía contiene el texto que la dispara: se respondería a sí misma",
+                )
+                .into());
             }
         }
         Ok(())

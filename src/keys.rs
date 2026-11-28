@@ -7,6 +7,9 @@ use russh::keys::ssh_key::{
     self, Algorithm, Certificate, EcdsaCurve, HashAlg, LineEnding, PrivateKey,
 };
 
+use crate::i18n::tr;
+use crate::trf;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyInfo {
     pub path: PathBuf,
@@ -89,7 +92,7 @@ fn format_time(secs: u64) -> String {
                 .format("%Y-%m-%d %H:%M")
                 .to_string()
         })
-        .unwrap_or_else(|| "una fecha fuera de rango".into())
+        .unwrap_or_else(|| tr("una fecha fuera de rango").into())
 }
 
 impl CertInfo {
@@ -135,18 +138,26 @@ impl CertInfo {
     pub fn validity_text_at(&self, now: u64) -> String {
         match self.validity_at(now) {
             CertValidity::NotYetValid => {
-                format!("no vale hasta el {}", format_time(self.valid_after))
+                trf!(
+                    "no vale hasta el {date}",
+                    date = format_time(self.valid_after)
+                )
             }
-            CertValidity::Expired => format!("caducó el {}", format_time(self.valid_before)),
-            CertValidity::Valid if self.valid_before == u64::MAX => "no caduca".into(),
-            CertValidity::Valid => format!("válido hasta el {}", format_time(self.valid_before)),
+            CertValidity::Expired => {
+                trf!("caducó el {date}", date = format_time(self.valid_before))
+            }
+            CertValidity::Valid if self.valid_before == u64::MAX => tr("no caduca").into(),
+            CertValidity::Valid => trf!(
+                "válido hasta el {date}",
+                date = format_time(self.valid_before)
+            ),
         }
     }
 
     /// Los principales, separados por comas («cualquiera» si no los limita).
     pub fn principals_text(&self) -> String {
         if self.principals.is_empty() {
-            "cualquiera".into()
+            tr("cualquiera").into()
         } else {
             self.principals.join(", ")
         }
@@ -168,13 +179,11 @@ const MAX_CERT_NESTING: usize = 8;
 /// Lee un certificado OpenSSH de un fichero `…-cert.pub`.
 pub fn read_cert(path: &Path) -> Result<(Certificate, CertInfo)> {
     use base64::Engine;
-    let meta =
-        std::fs::metadata(path).with_context(|| format!("No se pudo leer {}", path.display()))?;
+    let meta = std::fs::metadata(path).with_context(|| could_not_read(path))?;
     if !meta.is_file() || meta.len() > 64 * 1024 {
-        bail!("{} no es un certificado OpenSSH", path.display());
+        bail!("{}", not_a_certificate(path));
     }
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("No se pudo leer {}", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| could_not_read(path))?;
     let text = text.trim();
     let blob = text
         .split_whitespace()
@@ -184,16 +193,28 @@ pub fn read_cert(path: &Path) -> Result<(Certificate, CertInfo)> {
     const MARKER: &[u8] = b"-cert-v01@";
     let nesting = blob.windows(MARKER.len()).filter(|w| *w == MARKER).count();
     if nesting == 0 || nesting > MAX_CERT_NESTING {
-        bail!("{} no es un certificado OpenSSH", path.display());
+        bail!("{}", not_a_certificate(path));
     }
     let cert = Certificate::from_openssh(text).map_err(|e| {
         anyhow::anyhow!(
-            "{} no es un certificado OpenSSH válido: {e}",
-            path.display()
+            "{}",
+            trf!(
+                "{path} no es un certificado OpenSSH válido: {e}",
+                path = path.display(),
+                e
+            )
         )
     })?;
     let info = CertInfo::from_certificate(path, &cert);
     Ok((cert, info))
+}
+
+fn could_not_read(path: &Path) -> String {
+    trf!("No se pudo leer {path}", path = path.display())
+}
+
+fn not_a_certificate(path: &Path) -> String {
+    trf!("{path} no es un certificado OpenSSH", path = path.display())
 }
 
 /// Datos del certificado que acompaña a una clave, si existe y se entiende.
@@ -218,7 +239,7 @@ impl KeyAlgorithm {
 
     pub fn label(self) -> &'static str {
         match self {
-            KeyAlgorithm::Ed25519 => "Ed25519 (recomendado)",
+            KeyAlgorithm::Ed25519 => tr("Ed25519 (recomendado)"),
             KeyAlgorithm::EcdsaP256 => "ECDSA P-256",
             KeyAlgorithm::EcdsaP384 => "ECDSA P-384",
         }
@@ -301,7 +322,7 @@ pub fn inspect(path: &Path) -> Option<KeyInfo> {
                 algorithm: public
                     .as_ref()
                     .map(|p| p.algorithm().to_string())
-                    .unwrap_or_else(|| "desconocido".into()),
+                    .unwrap_or_else(|| tr("desconocido").into()),
                 fingerprint: public
                     .as_ref()
                     .map(|p| p.fingerprint(HashAlg::Sha256).to_string())
@@ -363,15 +384,15 @@ pub fn generate(
     passphrase: Option<&str>,
 ) -> Result<KeyInfo> {
     if !valid_file_name(name) {
-        bail!("Nombre de fichero no válido");
+        bail!("{}", tr("Nombre de fichero no válido"));
     }
     let path = dir.join(name);
     if path.exists() {
-        bail!("Ya existe {}", path.display());
+        bail!("{}", trf!("Ya existe {path}", path = path.display()));
     }
     let mut rng = rand::rng();
     let mut key = PrivateKey::random(&mut rng, algorithm.to_ssh())
-        .map_err(|e| anyhow::anyhow!("no se pudo generar la clave: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("{}", trf!("no se pudo generar la clave: {e}", e)))?;
     key.set_comment(comment);
     let public = key.public_key().to_openssh()?;
     let to_write = match passphrase.filter(|p| !p.is_empty()) {
@@ -380,25 +401,31 @@ pub fn generate(
     };
     let pem = to_write.to_openssh(LineEnding::LF)?;
     crate::paths::write_private(&path, pem.as_bytes())
-        .with_context(|| format!("escribiendo {}", path.display()))?;
+        .with_context(|| trf!("escribiendo {path}", path = path.display()))?;
     let mut pub_path = path.as_os_str().to_owned();
     pub_path.push(".pub");
     std::fs::write(PathBuf::from(pub_path), format!("{public}\n"))?;
-    inspect(&path).context("la clave generada no se pudo releer")
+    inspect(&path).context(tr("la clave generada no se pudo releer"))
 }
 
 /// Copia una clave existente a la carpeta de claves de GodRemote.
 pub fn import(source: &Path, dest_dir: &Path) -> Result<KeyInfo> {
     if inspect(source).is_none() {
-        bail!("{} no parece una clave privada SSH", source.display());
+        bail!(
+            "{}",
+            trf!(
+                "{path} no parece una clave privada SSH",
+                path = source.display()
+            )
+        );
     }
     let name = source
         .file_name()
-        .context("ruta sin nombre de fichero")?
+        .context(tr("ruta sin nombre de fichero"))?
         .to_owned();
     let dest = dest_dir.join(&name);
     if dest.exists() {
-        bail!("Ya existe {}", dest.display());
+        bail!("{}", trf!("Ya existe {path}", path = dest.display()));
     }
     let data = std::fs::read(source)?;
     crate::paths::write_private(&dest, &data)?;
@@ -413,12 +440,12 @@ pub fn import(source: &Path, dest_dir: &Path) -> Result<KeyInfo> {
     if let Ok(cert) = std::fs::read(cert_path_for(source)) {
         let _ = std::fs::write(cert_path_for(&dest), cert);
     }
-    inspect(&dest).context("la clave importada no se pudo releer")
+    inspect(&dest).context(tr("la clave importada no se pudo releer"))
 }
 
 /// Borra una clave privada, su `.pub` y su certificado (`-cert.pub`).
 pub fn delete(path: &Path) -> Result<()> {
-    std::fs::remove_file(path).with_context(|| format!("borrando {}", path.display()))?;
+    std::fs::remove_file(path).with_context(|| trf!("borrando {path}", path = path.display()))?;
     let mut pub_path = path.as_os_str().to_owned();
     pub_path.push(".pub");
     let _ = std::fs::remove_file(PathBuf::from(pub_path));

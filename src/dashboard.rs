@@ -19,8 +19,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, SemaphorePermit, watch};
 use uuid::Uuid;
 
+use crate::i18n::tr;
 use crate::monitor::{Disk, Probe, Sampler, Stats, format_kb};
 use crate::ssh::{Connected, Endpoint, PromptRequest, Prompter, SshHandle, Waker};
+use crate::trf;
 
 // ----------------------------------------------------------------------
 // Preferencias
@@ -47,8 +49,8 @@ impl TrendMetric {
 
     pub fn label(self) -> &'static str {
         match self {
-            TrendMetric::Cpu => "Uso de CPU",
-            TrendMetric::Load => "Carga media",
+            TrendMetric::Cpu => tr("Uso de CPU"),
+            TrendMetric::Load => tr("Carga media"),
         }
     }
 }
@@ -219,12 +221,12 @@ impl AlertKind {
     /// Nombre corto, para las listas.
     pub fn label(self) -> &'static str {
         match self {
-            AlertKind::Unreachable => "inalcanzable",
-            AlertKind::Access => "sin acceso",
+            AlertKind::Unreachable => tr("inalcanzable"),
+            AlertKind::Access => tr("sin acceso"),
             AlertKind::Cpu => "CPU",
-            AlertKind::Load => "carga",
-            AlertKind::Memory => "memoria",
-            AlertKind::Disk => "disco",
+            AlertKind::Load => tr("carga"),
+            AlertKind::Memory => tr("memoria"),
+            AlertKind::Disk => tr("disco"),
         }
     }
 }
@@ -268,7 +270,7 @@ pub struct Alerts {
 }
 
 fn decimal(value: f32) -> String {
-    format!("{value:.2}").replace('.', ",")
+    crate::i18n::decimal(f64::from(value), 2)
 }
 
 impl Alerts {
@@ -369,8 +371,8 @@ impl Alerts {
         let needed = limits.sustained.max(1);
         let streak = |raised: bool| match (raised, needed) {
             (false, _) => String::new(),
-            (true, 1) => " (umbral superado)".to_string(),
-            (true, n) => format!(" ({n} muestras seguidas por encima del umbral)"),
+            (true, 1) => tr(" (umbral superado)").to_string(),
+            (true, n) => trf!(" ({n} muestras seguidas por encima del umbral)", n),
         };
         if limits.cpu > 0.0
             && let Some(cpu) = stats.cpu
@@ -379,7 +381,11 @@ impl Alerts {
             change(
                 AlertKind::Cpu,
                 raised,
-                format!("CPU al {cpu:.0} %{}", streak(raised)),
+                trf!(
+                    "CPU al {percent} %{streak}",
+                    percent = format!("{cpu:.0}"),
+                    streak = streak(raised)
+                ),
             );
         }
         if limits.load > 0.0
@@ -389,11 +395,11 @@ impl Alerts {
             change(
                 AlertKind::Load,
                 raised,
-                format!(
-                    "carga {} con {} núcleo(s){}",
-                    decimal(stats.load.unwrap_or_default()[0]),
-                    stats.cores.unwrap_or_default(),
-                    streak(raised)
+                trf!(
+                    "carga {load} con {cores} núcleo(s){streak}",
+                    load = decimal(stats.load.unwrap_or_default()[0]),
+                    cores = stats.cores.unwrap_or_default(),
+                    streak = streak(raised)
                 ),
             );
         }
@@ -405,10 +411,11 @@ impl Alerts {
             change(
                 AlertKind::Memory,
                 raised,
-                format!(
-                    "memoria al {percent:.0} % ({} de {})",
-                    format_kb(used),
-                    format_kb(total)
+                trf!(
+                    "memoria al {percent} % ({used} de {total})",
+                    percent = format!("{percent:.0}"),
+                    used = format_kb(used),
+                    total = format_kb(total)
                 ),
             );
         }
@@ -419,11 +426,11 @@ impl Alerts {
             change(
                 AlertKind::Disk,
                 raised,
-                format!(
-                    "disco {} al {:.0} % (quedan {})",
-                    brief(&disk.mount, 60),
-                    disk.used_percent(),
-                    format_kb(disk.available)
+                trf!(
+                    "disco {mount} al {percent} % (quedan {free})",
+                    mount = brief(&disk.mount, 60),
+                    percent = format!("{:.0}", disk.used_percent()),
+                    free = format_kb(disk.available)
                 ),
             );
         }
@@ -451,16 +458,24 @@ impl Alerts {
         };
         match reach {
             Reach::Online => {
-                set(AlertKind::Unreachable, false, "vuelve a responder".into());
-                set(AlertKind::Access, false, "se ha podido entrar".into());
+                set(
+                    AlertKind::Unreachable,
+                    false,
+                    tr("vuelve a responder").into(),
+                );
+                set(AlertKind::Access, false, tr("se ha podido entrar").into());
             }
             Reach::Unreachable(why) => {
-                set(AlertKind::Unreachable, true, format!("no responde: {why}"));
+                set(
+                    AlertKind::Unreachable,
+                    true,
+                    trf!("no responde: {why}", why),
+                );
                 // De lo que pasaba antes ya no se sabe nada.
                 self.active[AlertKind::Access.index()] = false;
             }
             Reach::NoAccess(why) => {
-                set(AlertKind::Access, true, format!("no se vigila: {why}"));
+                set(AlertKind::Access, true, trf!("no se vigila: {why}", why));
                 self.active[AlertKind::Unreachable.index()] = false;
             }
         }
@@ -684,13 +699,13 @@ impl HostRow {
     /// Estado en pocas palabras.
     pub fn state_label(&self) -> &'static str {
         match &self.link {
-            Link::Waiting => "en cola",
-            Link::Connecting(_) => "conectando",
-            Link::Online if self.probe_error.is_some() => "sin datos",
-            Link::Online => "en línea",
-            Link::Down(_) => "sin conexión",
-            Link::NeedsCredential => "falta credencial",
-            Link::Rejected(_) => "acceso rechazado",
+            Link::Waiting => tr("en cola"),
+            Link::Connecting(_) => tr("conectando"),
+            Link::Online if self.probe_error.is_some() => tr("sin datos"),
+            Link::Online => tr("en línea"),
+            Link::Down(_) => tr("sin conexión"),
+            Link::NeedsCredential => tr("falta credencial"),
+            Link::Rejected(_) => tr("acceso rechazado"),
         }
     }
 
@@ -732,8 +747,11 @@ impl HostRow {
         needle.is_empty()
             || self.name.to_lowercase().contains(needle)
             || self.target.to_lowercase().contains(needle)
-            || self.state_label().contains(needle)
-            || self.alerts.active().any(|k| k.label() == needle)
+            || self.state_label().to_lowercase().contains(needle)
+            || self
+                .alerts
+                .active()
+                .any(|k| k.label().to_lowercase() == needle)
     }
 }
 
@@ -834,9 +852,9 @@ impl State {
             // Una conexión que se cae no es aún un equipo inalcanzable: lo
             // es cuando falla el intento de volver a conectar.
             Link::Down(error) if failures > 0 => Some(Reach::Unreachable(error)),
-            Link::NeedsCredential => Some(Reach::NoAccess(
+            Link::NeedsCredential => Some(Reach::NoAccess(tr(
                 "falta una contraseña o passphrase que no está en el baúl",
-            )),
+            ))),
             Link::Rejected(error) => Some(Reach::NoAccess(error)),
             _ => None,
         };
@@ -964,15 +982,15 @@ pub fn summarize(news: &[AlertEvent]) -> Option<(String, bool)> {
     let events: Vec<&AlertEvent> = if bad { raised } else { news.iter().collect() };
     match events[..] {
         [] => None,
-        [one] => Some((
-            format!(
-                "{}: {} — {}",
-                if bad { "Alerta" } else { "Resuelto" },
-                one.name,
-                one.detail
-            ),
-            bad,
-        )),
+        [one] => {
+            let (name, detail) = (&one.name, &one.detail);
+            let text = if bad {
+                trf!("Alerta: {name} — {detail}", name, detail)
+            } else {
+                trf!("Resuelto: {name} — {detail}", name, detail)
+            };
+            Some((text, bad))
+        }
         _ => {
             let mut list: Vec<String> = events
                 .iter()
@@ -980,21 +998,15 @@ pub fn summarize(news: &[AlertEvent]) -> Option<(String, bool)> {
                 .map(|e| format!("{} ({})", e.name, e.kind.label()))
                 .collect();
             if events.len() > list.len() {
-                list.push(format!("y {} más", events.len() - list.len()));
+                list.push(trf!("y {n} más", n = events.len() - list.len()));
             }
-            Some((
-                format!(
-                    "{} {}: {}",
-                    events.len(),
-                    if bad {
-                        "alertas nuevas"
-                    } else {
-                        "alertas resueltas"
-                    },
-                    list.join(", ")
-                ),
-                bad,
-            ))
+            let (n, list) = (events.len(), list.join(", "));
+            let text = if bad {
+                trf!("{n} alertas nuevas: {list}", n, list)
+            } else {
+                trf!("{n} alertas resueltas: {list}", n, list)
+            };
+            Some((text, bad))
         }
     }
 }
@@ -1415,7 +1427,7 @@ async fn host_loop(
         let link = if declined.secret {
             Link::NeedsCredential
         } else if declined.host_key {
-            Link::Rejected("hay que confirmar la clave del servidor".into())
+            Link::Rejected(tr("hay que confirmar la clave del servidor").into())
         } else if !(shared.options.retryable)(&error) {
             Link::Rejected(error)
         } else {
@@ -1502,7 +1514,7 @@ async fn connect(
                     if interactive {
                         // Quien espera al usuario no ocupa turno de conexión.
                         gate.take();
-                        shared.progress(index, "Esperando tu respuesta…".into(), quiet);
+                        shared.progress(index, tr("Esperando tu respuesta…").into(), quiet);
                     }
                     match request {
                         PromptRequest::HostKey { host, port, algorithm, fingerprint, reply } => {
@@ -1526,7 +1538,8 @@ async fn connect(
                 }
             }
             _ = tokio::time::sleep_until(deadline) => {
-                return (Err(anyhow!("el equipo no terminó de conectar a tiempo")), declined);
+                let error = anyhow!("{}", tr("el equipo no terminó de conectar a tiempo"));
+                return (Err(error), declined);
             }
         }
     }
@@ -1561,7 +1574,7 @@ async fn session(
         .acquire()
         .await
         .expect("el semáforo no se cierra");
-    shared.progress(index, "Conectando…".into(), quiet);
+    shared.progress(index, tr("Conectando…").into(), quiet);
     let endpoint = slot.endpoint().clone();
     let (result, declined) =
         connect(index, shared, &endpoint, prompter, interactive, quiet, gate).await;
@@ -1608,7 +1621,7 @@ async fn session(
                     }
                     Ok(Err(e)) => Some(format!("{e:#}")),
                     // Ni siquiera contesta: la conexión no está para más.
-                    Err(_) => return lost("el servidor dejó de contestar"),
+                    Err(_) => return lost(tr("el servidor dejó de contestar")),
                 }
             }
             sample = next_sample(&mut sampler), if sampler.is_some() => match sample {
@@ -1643,7 +1656,7 @@ async fn session(
                     .await
                     .is_ok_and(|sent| sent.is_ok());
                 if !answered || handle.is_closed() {
-                    return lost("se perdió la conexión con el servidor");
+                    return lost(tr("se perdió la conexión con el servidor"));
                 }
                 let latency = began.elapsed();
                 *healthy = true;
@@ -1652,7 +1665,7 @@ async fn session(
             }
             changed = interval.changed() => {
                 if changed.is_err() {
-                    return lost("el panel se cerró");
+                    return lost(tr("el panel se cerró"));
                 }
                 // Otro intervalo: se relanza la consulta por la misma conexión.
                 every = Duration::from_secs(u64::from(*interval.borrow_and_update()));
@@ -1670,7 +1683,7 @@ async fn session(
             // se insiste por la misma conexión, cada vez más de tarde en
             // tarde.
             if handle.is_closed() {
-                return lost("se perdió la conexión con el servidor");
+                return lost(tr("se perdió la conexión con el servidor"));
             }
             let error = brief(&error, MAX_ERROR);
             shared.update(|state| state.hosts[index].probe_error = Some(error));

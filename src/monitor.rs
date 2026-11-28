@@ -13,6 +13,7 @@ use anyhow::{Context, Result, bail};
 use russh::ChannelMsg;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::i18n::tr;
 use crate::ssh::{SshHandle, Waker};
 
 /// Datos que se pueden mostrar en la barra.
@@ -88,22 +89,22 @@ impl BarItem {
     /// Nombre visible en la ventana de ajustes.
     pub fn label(self) -> &'static str {
         match self {
-            BarItem::Name => "Nombre de la sesión",
-            BarItem::Host => "Nombre del servidor (hostname)",
-            BarItem::Target => "Usuario y dirección de conexión",
-            BarItem::Ip => "Direcciones IP del servidor",
-            BarItem::Os => "Sistema operativo",
-            BarItem::Kernel => "Kernel y arquitectura",
-            BarItem::Uptime => "Tiempo encendido",
-            BarItem::Load => "Carga media (1, 5 y 15 min)",
-            BarItem::Cpu => "Uso de CPU",
-            BarItem::Memory => "Memoria",
-            BarItem::Swap => "Intercambio (swap)",
-            BarItem::Disk => "Espacio libre en disco",
-            BarItem::Network => "Tráfico de red",
-            BarItem::Users => "Usuarios conectados",
-            BarItem::Processes => "Procesos",
-            BarItem::Time => "Fecha y hora del servidor",
+            BarItem::Name => tr("Nombre de la sesión"),
+            BarItem::Host => tr("Nombre del servidor (hostname)"),
+            BarItem::Target => tr("Usuario y dirección de conexión"),
+            BarItem::Ip => tr("Direcciones IP del servidor"),
+            BarItem::Os => tr("Sistema operativo"),
+            BarItem::Kernel => tr("Kernel y arquitectura"),
+            BarItem::Uptime => tr("Tiempo encendido"),
+            BarItem::Load => tr("Carga media (1, 5 y 15 min)"),
+            BarItem::Cpu => tr("Uso de CPU"),
+            BarItem::Memory => tr("Memoria"),
+            BarItem::Swap => tr("Intercambio (swap)"),
+            BarItem::Disk => tr("Espacio libre en disco"),
+            BarItem::Network => tr("Tráfico de red"),
+            BarItem::Users => tr("Usuarios conectados"),
+            BarItem::Processes => tr("Procesos"),
+            BarItem::Time => tr("Fecha y hora del servidor"),
         }
     }
 }
@@ -679,14 +680,14 @@ impl Sampler {
         let channel = handle
             .channel_open_session()
             .await
-            .context("El servidor no dejó abrir otro canal")?;
+            .context(tr("El servidor no dejó abrir otro canal"))?;
         // El canal no necesita la referencia a la conexión: si el terminal se
         // cierra, esta consulta no debe mantenerla viva.
         drop(handle);
         channel
             .exec(true, command)
             .await
-            .context("No se pudo lanzar la consulta")?;
+            .context(tr("No se pudo lanzar la consulta"))?;
         Ok(Self {
             channel,
             collector: Collector::default(),
@@ -709,19 +710,24 @@ impl Sampler {
             }
             if self.pending.len() > MAX_PENDING {
                 let _ = self.channel.close().await;
-                bail!("El servidor respondió algo inesperado");
+                bail!("{}", tr("El servidor respondió algo inesperado"));
             }
             match self.channel.wait().await {
                 Some(ChannelMsg::Data { data }) => self.pending.extend_from_slice(&data),
-                Some(ChannelMsg::Failure) => bail!("El servidor no permite ejecutar órdenes"),
+                Some(ChannelMsg::Failure) => {
+                    bail!("{}", tr("El servidor no permite ejecutar órdenes"))
+                }
                 Some(ChannelMsg::Close) | None => break,
                 _ => {}
             }
         }
         if self.samples == 0 {
-            bail!("El servidor no devolvió datos (hace falta una shell POSIX)");
+            bail!(
+                "{}",
+                tr("El servidor no devolvió datos (hace falta una shell POSIX)")
+            );
         }
-        bail!("La consulta se interrumpió")
+        bail!("{}", tr("La consulta se interrumpió"))
     }
 
     /// Cierra el canal: la orden deja de ejecutarse en el servidor.
@@ -794,7 +800,7 @@ pub fn format_kb(kb: u64) -> String {
     if value >= 100.0 || unit == "kB" {
         format!("{value:.0} {unit}")
     } else {
-        format!("{value:.1} {unit}").replace('.', ",")
+        format!("{} {unit}", crate::i18n::decimal(value, 1))
     }
 }
 
@@ -812,7 +818,7 @@ pub fn format_rate(bytes_per_sec: f64) -> String {
     if value >= 100.0 || unit == "B/s" {
         format!("{value:.0} {unit}")
     } else {
-        format!("{value:.1} {unit}").replace('.', ",")
+        format!("{} {unit}", crate::i18n::decimal(value, 1))
     }
 }
 

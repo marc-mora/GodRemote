@@ -30,21 +30,25 @@ pub enum HlColor {
 }
 
 impl HlColor {
-    /// Los colores que siguen al tema, con su nombre.
+    /// Los colores que siguen al tema, con su nombre (en español: quien lo
+    /// pinte lo traduce con `tr`, o usa [`HlColor::label`]).
     pub const THEMED: [(HlColor, &'static str); 6] = [
-        (HlColor::Red, "Rojo"),
-        (HlColor::Yellow, "Amarillo"),
-        (HlColor::Green, "Verde"),
-        (HlColor::Blue, "Azul"),
-        (HlColor::Magenta, "Magenta"),
-        (HlColor::Cyan, "Cian"),
+        (HlColor::Red, crate::mark!("Rojo")),
+        (HlColor::Yellow, crate::mark!("Amarillo")),
+        (HlColor::Green, crate::mark!("Verde")),
+        (HlColor::Blue, crate::mark!("Azul")),
+        (HlColor::Magenta, crate::mark!("Magenta")),
+        (HlColor::Cyan, crate::mark!("Cian")),
     ];
 
+    /// Nombre visible, en el idioma de la interfaz.
     pub fn label(self) -> &'static str {
         Self::THEMED
             .iter()
             .find(|(color, _)| *color == self)
-            .map_or("Propio", |(_, label)| label)
+            .map_or(crate::i18n::tr("Propio"), |(_, label)| {
+                crate::i18n::tr(label)
+            })
     }
 
     /// Color con el que se pinta, según la paleta del tema.
@@ -96,7 +100,7 @@ impl<'de> Deserialize<'de> for HlColor {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
         HlColor::parse(&text)
-            .ok_or_else(|| serde::de::Error::custom(format!("color desconocido: {text}")))
+            .ok_or_else(|| serde::de::Error::custom(crate::trf!("color desconocido: {text}", text)))
     }
 }
 

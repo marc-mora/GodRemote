@@ -17,6 +17,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::i18n::tr;
+use crate::trf;
+
 /// Extensión de las grabaciones.
 pub const EXTENSION: &str = "cast";
 
@@ -87,10 +90,10 @@ impl Recorder {
             return;
         }
         if self.written + line.len() as u64 > MAX_RECORDING_BYTES {
-            self.error = Some(format!(
-                "La grabación {} ha llegado al tamaño máximo ({} MB) y se ha detenido",
-                self.path.display(),
-                MAX_RECORDING_BYTES / (1024 * 1024)
+            self.error = Some(trf!(
+                "La grabación {path} ha llegado al tamaño máximo ({max} MB) y se ha detenido",
+                path = self.path.display(),
+                max = MAX_RECORDING_BYTES / (1024 * 1024)
             ));
             return;
         }
@@ -98,9 +101,10 @@ impl Recorder {
         match result {
             Ok(()) => self.written += line.len() as u64 + 1,
             Err(e) => {
-                self.error = Some(format!(
-                    "No se pudo escribir en {}: {e}",
-                    self.path.display()
+                self.error = Some(trf!(
+                    "No se pudo escribir en {path}: {e}",
+                    path = self.path.display(),
+                    e
                 ));
             }
         }
@@ -245,23 +249,25 @@ fn read_bounded_line(
 impl Cast {
     /// Lee una grabación de un fichero.
     pub fn load(path: &Path) -> Result<Self> {
-        let meta = std::fs::metadata(path)
-            .with_context(|| format!("No se pudo abrir {}", path.display()))?;
+        let could_not_open = || trf!("No se pudo abrir {path}", path = path.display());
+        let meta = std::fs::metadata(path).with_context(could_not_open)?;
         if !meta.is_file() {
-            bail!("{} no es un fichero", path.display());
+            bail!("{}", trf!("{path} no es un fichero", path = path.display()));
         }
         if meta.len() > MAX_FILE_BYTES {
             bail!(
-                "La grabación ocupa {} MB; se abren como mucho {} MB",
-                meta.len() / (1024 * 1024),
-                MAX_FILE_BYTES / (1024 * 1024)
+                "{}",
+                trf!(
+                    "La grabación ocupa {size} MB; se abren como mucho {max} MB",
+                    size = meta.len() / (1024 * 1024),
+                    max = MAX_FILE_BYTES / (1024 * 1024)
+                )
             );
         }
-        let file = std::fs::File::open(path)
-            .with_context(|| format!("No se pudo abrir {}", path.display()))?;
+        let file = std::fs::File::open(path).with_context(could_not_open)?;
         // Aunque el fichero crezca mientras se lee, no se pasa del límite.
         let reader = std::io::BufReader::new(file.take(MAX_FILE_BYTES));
-        Self::parse(reader).with_context(|| format!("No se pudo leer {}", path.display()))
+        Self::parse(reader).with_context(|| trf!("No se pudo leer {path}", path = path.display()))
     }
 
     /// Lee una grabación en formato asciicast 2 o 3.
@@ -271,9 +277,12 @@ impl Cast {
         // comentario.
         let header = loop {
             match read_bounded_line(&mut reader, &mut line, MAX_LINE_BYTES)? {
-                None => bail!("El fichero está vacío"),
+                None => bail!("{}", tr("El fichero está vacío")),
                 Some(false) => {
-                    bail!("No es una grabación asciicast: la cabecera es demasiado larga")
+                    bail!(
+                        "{}",
+                        tr("No es una grabación asciicast: la cabecera es demasiado larga")
+                    )
                 }
                 Some(true) => {}
             }
@@ -282,19 +291,29 @@ impl Cast {
             if text.is_empty() || text.starts_with('#') {
                 continue;
             }
-            let value: serde_json::Value = serde_json::from_str(text)
-                .map_err(|_| anyhow!("No es una grabación asciicast: falta la cabecera"))?;
+            let value: serde_json::Value = serde_json::from_str(text).map_err(|_| {
+                anyhow!("{}", tr("No es una grabación asciicast: falta la cabecera"))
+            })?;
             if !value.is_object() {
-                bail!("No es una grabación asciicast: falta la cabecera");
+                bail!("{}", tr("No es una grabación asciicast: falta la cabecera"));
             }
             break value;
         };
         let version = match header.get("version").and_then(|v| v.as_u64()) {
             Some(2) => 2,
             Some(3) => 3,
-            Some(1) => bail!("Es una grabación asciicast de la versión 1, que no se admite"),
-            Some(other) => bail!("Versión de asciicast desconocida: {other}"),
-            None => bail!("No es una grabación asciicast: la cabecera no dice su versión"),
+            Some(1) => bail!(
+                "{}",
+                tr("Es una grabación asciicast de la versión 1, que no se admite")
+            ),
+            Some(other) => bail!(
+                "{}",
+                trf!("Versión de asciicast desconocida: {other}", other)
+            ),
+            None => bail!(
+                "{}",
+                tr("No es una grabación asciicast: la cabecera no dice su versión")
+            ),
         };
         let number = |value: Option<&serde_json::Value>| value.and_then(|v| v.as_u64());
         let (cols, rows) = if version == 2 {
@@ -423,7 +442,13 @@ impl Cast {
                 continue;
             }
             if cast.events.len() >= MAX_EVENTS {
-                bail!("La grabación tiene demasiados eventos (más de {MAX_EVENTS})");
+                bail!(
+                    "{}",
+                    trf!(
+                        "La grabación tiene demasiados eventos (más de {max})",
+                        max = MAX_EVENTS
+                    )
+                );
             }
             cast.events.push(Event { time: clock, kind });
         }

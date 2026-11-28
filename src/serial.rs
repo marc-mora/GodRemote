@@ -49,7 +49,12 @@ fn open(options: &SerialOptions) -> Result<Box<dyn serialport::SerialPort>> {
         .flow_control(flow)
         .timeout(Duration::from_millis(100))
         .open()
-        .with_context(|| format!("No se pudo abrir el puerto {}", options.device.trim()))
+        .with_context(|| {
+            crate::trf!(
+                "No se pudo abrir el puerto {device}",
+                device = options.device.trim()
+            )
+        })
 }
 
 /// Abre el puerto serie y lo conecta a un terminal.
@@ -57,7 +62,7 @@ pub fn spawn(options: &SerialOptions, waker: Waker) -> Result<TermBackend> {
     let mut reader = open(options)?;
     let mut writer = reader
         .try_clone()
-        .context("No se pudo duplicar el puerto serie")?;
+        .context(crate::i18n::tr("No se pudo duplicar el puerto serie"))?;
 
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<TermCmd>();
     let (ev_tx, ev_rx) = std::sync::mpsc::channel();
@@ -85,7 +90,7 @@ pub fn spawn(options: &SerialOptions, waker: Waker) -> Result<TermBackend> {
                         e.kind(),
                         std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted
                     ) => {}
-                Err(e) => break Some(format!("Error en el puerto serie: {e}")),
+                Err(e) => break Some(crate::trf!("Error en el puerto serie: {e}", e)),
             }
         };
         let _ = ev_tx.send(TermEvent::Closed(error));

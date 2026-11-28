@@ -12,6 +12,9 @@ use egui::{Event, Key, Modifiers};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
+use crate::i18n::tr;
+use crate::{mark, trf};
+
 /// Las teclas modificadoras llegan también como pulsaciones sueltas (Ctrl
 /// izquierdo, Alt derecho…); por sí solas no son la tecla de un atajo.
 pub fn is_modifier_key(key: Key) -> bool {
@@ -49,42 +52,43 @@ const fn ctrl(key: Key, shift: bool) -> Shortcut {
 }
 
 /// Atajos de la aplicación. Todos llevan Mayús o una tecla que la shell no
-/// usa con Ctrl, para no quitarle ninguna combinación al terminal.
+/// usa con Ctrl, para no quitarle ninguna combinación al terminal. (El
+/// texto dice para qué sirve cada uno; se traduce al enseñarlo.)
 pub const APP_SHORTCUTS: [(Shortcut, AppShortcut, &str); 7] = [
     (
         ctrl(Key::P, true),
         AppShortcut::Palette,
-        "abrir la paleta de órdenes",
+        mark!("abrir la paleta de órdenes"),
     ),
     (
         ctrl(Key::Tab, false),
         AppShortcut::NextTab,
-        "pasar a la pestaña siguiente",
+        mark!("pasar a la pestaña siguiente"),
     ),
     (
         ctrl(Key::Tab, true),
         AppShortcut::PreviousTab,
-        "pasar a la pestaña anterior",
+        mark!("pasar a la pestaña anterior"),
     ),
     (
         ctrl(Key::PageDown, false),
         AppShortcut::NextTab,
-        "pasar a la pestaña siguiente",
+        mark!("pasar a la pestaña siguiente"),
     ),
     (
         ctrl(Key::PageUp, false),
         AppShortcut::PreviousTab,
-        "pasar a la pestaña anterior",
+        mark!("pasar a la pestaña anterior"),
     ),
     (
         ctrl(Key::T, true),
         AppShortcut::NewTerminal,
-        "abrir un terminal local",
+        mark!("abrir un terminal local"),
     ),
     (
         ctrl(Key::W, true),
         AppShortcut::CloseTab,
-        "cerrar la pestaña",
+        mark!("cerrar la pestaña"),
     ),
 ];
 
@@ -129,24 +133,34 @@ impl Shortcut {
     /// Comprueba que el atajo se puede usar sin estropear el terminal.
     pub fn validate(&self) -> Result<(), String> {
         if is_modifier_key(self.key) {
-            return Err("Falta la tecla: Ctrl, Alt y Mayús solos no son un atajo".into());
+            return Err(tr("Falta la tecla: Ctrl, Alt y Mayús solos no son un atajo").into());
         }
         if !(self.ctrl || self.alt || self.cmd || self.is_function_key()) {
-            return Err(
+            return Err(tr(
                 "Usa Ctrl, Alt o una tecla de función (F1–F12): una tecla sola ya no se podría \
-                 escribir en el terminal"
-                    .into(),
-            );
+                 escribir en el terminal",
+            )
+            .into());
         }
         let plain_ctrl = (self.ctrl || self.cmd) && !self.alt && !self.shift;
         if plain_ctrl && matches!(self.key, Key::C | Key::V | Key::X) {
-            return Err(format!("{self} está reservado para copiar, pegar y cortar"));
+            return Err(trf!(
+                "{shortcut} está reservado para copiar, pegar y cortar",
+                shortcut = self
+            ));
         }
         if let Some((_, _, purpose)) = APP_SHORTCUTS.iter().find(|(s, _, _)| s == self) {
-            return Err(format!("{self} está reservado para {purpose}"));
+            return Err(trf!(
+                "{shortcut} está reservado para {purpose}",
+                shortcut = self,
+                purpose = tr(purpose)
+            ));
         }
         if *self == ctrl(Key::F, true) {
-            return Err(format!("{self} está reservado para buscar en el terminal"));
+            return Err(trf!(
+                "{shortcut} está reservado para buscar en el terminal",
+                shortcut = self
+            ));
         }
         Ok(())
     }
@@ -233,10 +247,10 @@ impl Shortcut {
     }
 }
 
-/// Forma visible: `Ctrl+Alt+Mayús+K`.
+/// Forma visible: `Ctrl+Alt+Mayús+K` (`Shift` en inglés).
 impl std::fmt::Display for Shortcut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.format("Mayús"))
+        f.write_str(&self.format(tr("Mayús")))
     }
 }
 

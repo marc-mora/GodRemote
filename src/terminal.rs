@@ -11,9 +11,11 @@ use std::sync::Arc;
 
 use crate::backdrop::Backdrop;
 use crate::highlight::{Compiled, HlColor};
+use crate::i18n::tr;
 use crate::shell_marks::{Activity, Finished, Mark};
 use crate::ssh::{SshHandle, Waker};
 use crate::theme::TermPalette;
+use crate::trf;
 
 pub enum TermCmd {
     Input(Vec<u8>),
@@ -1003,7 +1005,7 @@ impl TerminalView {
     fn open_link(&mut self, url: &str) {
         if let Err(e) = crate::paths::open_url(url) {
             self.notices
-                .push(format!("No se pudo abrir el enlace: {e}"));
+                .push(trf!("No se pudo abrir el enlace: {e}", e));
         }
     }
 
@@ -1075,7 +1077,7 @@ impl TerminalView {
                 TermEvent::SaveSecrets(s) => self.secrets_to_save.extend(s),
                 TermEvent::Tunnel { index, status } => {
                     if let crate::tunnels::TunnelStatus::Failed(e) = &status {
-                        self.note(31, &format!("Túnel {}: {e}", index + 1));
+                        self.note(31, &trf!("Túnel {n}: {e}", n = index + 1, e));
                     }
                     if self.tunnels.len() <= index {
                         self.tunnels.resize(index + 1, None);
@@ -1084,8 +1086,8 @@ impl TerminalView {
                 }
                 TermEvent::Closed(err) => {
                     match &err {
-                        Some(e) => self.note(31, &format!("Error: {e}")),
-                        None => self.note(33, "[Sesión finalizada]"),
+                        Some(e) => self.note(31, &trf!("Error: {e}", e)),
+                        None => self.note(33, tr("[Sesión finalizada]")),
                     }
                     if let Some(log) = &mut self.log {
                         match &err {
@@ -1495,16 +1497,16 @@ impl TerminalView {
                     ui.set_width(width);
                     ui.colored_label(
                         crate::theme::warn_color(),
-                        format!(
-                            "⚠ Vas a pegar {} líneas ({} caracteres)",
-                            lines.len(),
-                            text.chars().count()
+                        trf!(
+                            "⚠ Vas a pegar {lines} líneas ({chars} caracteres)",
+                            lines = lines.len(),
+                            chars = text.chars().count()
                         ),
                     );
-                    ui.weak(
+                    ui.weak(tr(
                         "En una shell, cada línea se ejecuta según llega. Revisa lo que hay \
                          en el portapapeles antes de enviarlo.",
-                    );
+                    ));
                     egui::Frame::NONE
                         .fill(ui.visuals().extreme_bg_color)
                         .inner_margin(6.0)
@@ -1522,18 +1524,21 @@ impl TerminalView {
                                         );
                                     }
                                     if lines.len() > SHOWN {
-                                        ui.weak(format!("… y {} líneas más", lines.len() - SHOWN));
+                                        ui.weak(trf!(
+                                            "… y {n} líneas más",
+                                            n = lines.len() - SHOWN
+                                        ));
                                     }
                                 });
                         });
                     ui.horizontal(|ui| {
-                        if ui.button("Pegar").clicked() {
+                        if ui.button(tr("Pegar")).clicked() {
                             decision = Some(true);
                         }
-                        if ui.button("Cancelar").clicked() {
+                        if ui.button(tr("Cancelar")).clicked() {
                             decision = Some(false);
                         }
-                        ui.weak("Intro pega · Esc cancela");
+                        ui.weak(tr("Intro pega · Esc cancela"));
                     });
                 });
             });
@@ -1799,7 +1804,7 @@ impl TerminalView {
             }
             response
                 .clone()
-                .on_hover_text_at_pointer(format!("{url}\nCtrl+clic para abrirlo"));
+                .on_hover_text_at_pointer(trf!("{url}\nCtrl+clic para abrirlo", url));
         }
 
         let has_focus = response.has_focus();
@@ -1926,18 +1931,22 @@ impl TerminalView {
         menu_response.map(|r| {
             r.context_menu(|ui| {
                 if let Some(url) = &menu_link {
-                    if ui.button("🔗 Abrir enlace").on_hover_text(url).clicked() {
+                    if ui
+                        .button(tr("🔗 Abrir enlace"))
+                        .on_hover_text(url)
+                        .clicked()
+                    {
                         open_link = Some(url.clone());
                         ui.close();
                     }
-                    if ui.button("Copiar enlace").clicked() {
+                    if ui.button(tr("Copiar enlace")).clicked() {
                         ui.ctx().copy_text(url.clone());
                         ui.close();
                     }
                     ui.separator();
                 }
                 if ui
-                    .add_enabled(selected.is_some(), egui::Button::new("Copiar"))
+                    .add_enabled(selected.is_some(), egui::Button::new(tr("Copiar")))
                     .clicked()
                 {
                     if let Some(text) = &selected {
@@ -1945,15 +1954,15 @@ impl TerminalView {
                     }
                     ui.close();
                 }
-                if ui.button("Pegar").clicked() {
+                if ui.button(tr("Pegar")).clicked() {
                     paste_request = true;
                     ui.close();
                 }
-                if ui.button("Copiar toda la pantalla").clicked() {
+                if ui.button(tr("Copiar toda la pantalla")).clicked() {
                     ui.ctx().copy_text(self.parser.screen().contents());
                     ui.close();
                 }
-                if ui.button("Limpiar historial").clicked() {
+                if ui.button(tr("Limpiar historial")).clicked() {
                     self.parser.screen_mut().clear_scrollback();
                     self.generation += 1;
                     ui.close();
@@ -2165,7 +2174,7 @@ impl TerminalView {
             painter.text(
                 rect.right_top() + Vec2::new(-8.0, 4.0),
                 Align2::RIGHT_TOP,
-                format!("⬆ historial ({offset} líneas)"),
+                trf!("⬆ historial ({offset} líneas)", offset),
                 FontId::proportional(12.0),
                 crate::theme::warn_color(),
             );
@@ -2193,7 +2202,7 @@ impl TerminalView {
                     ui.label("🔍");
                     let field = ui.add(
                         egui::TextEdit::singleline(&mut search.query)
-                            .hint_text("Buscar en el terminal")
+                            .hint_text(tr("Buscar en el terminal"))
                             .desired_width(width - 190.0),
                     );
                     if search.focus {
@@ -2214,26 +2223,30 @@ impl TerminalView {
                     let count = if search.query.is_empty() {
                         String::new()
                     } else if of == 0 {
-                        "sin resultados".to_string()
+                        tr("sin resultados").to_string()
                     } else {
-                        format!("{at} de {of}")
+                        trf!("{at} de {of}", at, of)
                     };
                     ui.weak(count);
                     if ui
                         .small_button("⬆")
-                        .on_hover_text("Anterior (Intro)")
+                        .on_hover_text(tr("Anterior (Intro)"))
                         .clicked()
                     {
                         step = Some(true);
                     }
                     if ui
                         .small_button("⬇")
-                        .on_hover_text("Siguiente (Mayús+Intro)")
+                        .on_hover_text(tr("Siguiente (Mayús+Intro)"))
                         .clicked()
                     {
                         step = Some(false);
                     }
-                    if ui.small_button("×").on_hover_text("Cerrar (Esc)").clicked() {
+                    if ui
+                        .small_button("×")
+                        .on_hover_text(tr("Cerrar (Esc)"))
+                        .clicked()
+                    {
                         close = true;
                     }
                 });

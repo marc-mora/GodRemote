@@ -148,7 +148,7 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     if !crate::highlight::is_safe_url(url) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "solo se abren direcciones http, https o ftp",
+            crate::i18n::tr("solo se abren direcciones http, https o ftp"),
         ));
     }
     let mut command = if cfg!(windows) {

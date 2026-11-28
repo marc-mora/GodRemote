@@ -280,7 +280,7 @@ pub(super) const T: super::Table = &[
     ("Fuentes", "Fonts"),
     (
         "No se pudieron guardar las preferencias: {error}",
-        "Could not save the preferences: {error}",
+        "Could not save the settings: {error}",
     ),
     ("Importar tema", "Import theme"),
     ("Tema de GodRemote (JSON)", "GodRemote theme (JSON)"),

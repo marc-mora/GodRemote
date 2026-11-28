@@ -12,7 +12,9 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use uuid::Uuid;
 
+use crate::i18n::tr;
 use crate::model::{AuthMethod, Folder, FolderDefaults, Node, Protocol, Session};
+use crate::trf;
 
 /// De dónde se importa.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,17 +30,18 @@ impl Source {
     pub fn label(self) -> &'static str {
         match self {
             Source::OpenSsh => "OpenSSH (~/.ssh/config)",
-            Source::Putty => "PuTTY (fichero .reg)",
-            Source::MobaXterm => "MobaXterm (.mxtsessions o MobaXterm.ini)",
+            Source::Putty => tr("PuTTY (fichero .reg)"),
+            Source::MobaXterm => tr("MobaXterm (.mxtsessions o MobaXterm.ini)"),
         }
     }
 
-    /// Nombre de la carpeta donde quedan los equipos importados.
+    /// Nombre de la carpeta donde quedan los equipos importados (en el
+    /// idioma de la interfaz en el momento de crearla).
     pub fn folder_name(self) -> &'static str {
         match self {
-            Source::OpenSsh => "Importado de OpenSSH",
-            Source::Putty => "Importado de PuTTY",
-            Source::MobaXterm => "Importado de MobaXterm",
+            Source::OpenSsh => tr("Importado de OpenSSH"),
+            Source::Putty => tr("Importado de PuTTY"),
+            Source::MobaXterm => tr("Importado de MobaXterm"),
         }
     }
 
@@ -89,17 +92,22 @@ impl Imported {
 /// Lee un fichero de texto en UTF-8, UTF-16 (como exporta el registro de
 /// Windows) o, si no, tomando cada byte como un carácter.
 fn read_text(path: &Path) -> Result<String> {
-    let meta =
-        std::fs::metadata(path).with_context(|| format!("No se pudo leer {}", path.display()))?;
+    let meta = std::fs::metadata(path).with_context(|| could_not_read(path))?;
     if !meta.is_file() {
-        bail!("{} no es un fichero", path.display());
+        bail!("{}", trf!("{path} no es un fichero", path = path.display()));
     }
     if meta.len() > 32 * 1024 * 1024 {
-        bail!("{} es demasiado grande", path.display());
+        bail!(
+            "{}",
+            trf!("{path} es demasiado grande", path = path.display())
+        );
     }
-    let bytes =
-        std::fs::read(path).with_context(|| format!("No se pudo leer {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| could_not_read(path))?;
     Ok(decode_text(&bytes))
+}
+
+fn could_not_read(path: &Path) -> String {
+    trf!("No se pudo leer {path}", path = path.display())
 }
 
 fn decode_text(bytes: &[u8]) -> String {
@@ -138,9 +146,12 @@ pub fn import_file(source: Source, path: &Path) -> Result<Imported> {
     };
     if imported.count() == 0 {
         bail!(
-            "No se ha encontrado ningún equipo en {} (¿es un fichero de {}?)",
-            path.display(),
-            source.label()
+            "{}",
+            trf!(
+                "No se ha encontrado ningún equipo en {path} (¿es un fichero de {source}?)",
+                path = path.display(),
+                source = source.label()
+            )
         );
     }
     Ok(imported)
@@ -267,10 +278,11 @@ pub fn openssh(text: &str, default_key: Option<&str>) -> Imported {
                 blocks.extend(current.take());
                 skipping = true;
                 out.warnings
-                    .push("Los bloques «Match» no se importan".to_string());
+                    .push(tr("Los bloques «Match» no se importan").to_string());
             }
-            "include" => out.warnings.push(format!(
-                "No se han seguido los ficheros incluidos con «Include {value}»"
+            "include" => out.warnings.push(trf!(
+                "No se han seguido los ficheros incluidos con «Include {value}»",
+                value
             )),
             _ if skipping => {}
             _ => match &mut current {
@@ -365,9 +377,9 @@ pub fn openssh(text: &str, default_key: Option<&str>) -> Imported {
     }
     for session in &sessions {
         if session.username.is_empty() {
-            out.warnings.push(format!(
-                "«{}» no indica usuario: complétalo antes de conectar",
-                session.name
+            out.warnings.push(trf!(
+                "«{name}» no indica usuario: complétalo antes de conectar",
+                name = session.name
             ));
         }
     }
@@ -510,8 +522,10 @@ pub fn putty(text: &str) -> Imported {
                 ..Default::default()
             },
             other => {
-                out.warnings.push(format!(
-                    "«{name}» usa el protocolo «{other}», que GodRemote no tiene"
+                out.warnings.push(trf!(
+                    "«{name}» usa el protocolo «{other}», que GodRemote no tiene",
+                    name,
+                    other
                 ));
                 continue;
             }
@@ -522,9 +536,10 @@ pub fn putty(text: &str) -> Imported {
             session.port = port;
         }
         if number("ProxyMethod").unwrap_or(0) != 0 && !text("ProxyHost").is_empty() {
-            out.warnings.push(format!(
-                "«{name}» pasa por el proxy {}: configúralo como salto si es SSH",
-                text("ProxyHost")
+            out.warnings.push(trf!(
+                "«{name}» pasa por el proxy {proxy}: configúralo como salto si es SSH",
+                name,
+                proxy = text("ProxyHost")
             ));
         }
         out.nodes.push(Node::Session(session));
@@ -639,9 +654,10 @@ pub fn mobaxterm(text: &str) -> Imported {
                 let mut session = ssh_session(&name, &host, port(22), field(3), key);
                 // Pasarela SSH (campos 8, 9 y 10): se anota para revisarla.
                 if !field(8).is_empty() {
-                    out.warnings.push(format!(
-                        "«{name}» pasa por la pasarela SSH {}: añádela como salto",
-                        field(8)
+                    out.warnings.push(trf!(
+                        "«{name}» pasa por la pasarela SSH {gateway}: añádela como salto",
+                        name,
+                        gateway = field(8)
                     ));
                 }
                 session.x11_forwarding = false;
@@ -657,20 +673,27 @@ pub fn mobaxterm(text: &str) -> Imported {
             }
             kind => {
                 let what = match kind {
-                    "2" => "Rsh",
-                    "3" => "XDMCP",
-                    "6" => "FTP",
-                    "8" => "puerto serie",
-                    "9" => "explorador de archivos",
-                    "10" => "shell local",
-                    "11" => "navegador",
-                    "12" => "Mosh",
-                    "13" => "AWS S3",
-                    "14" => "WSL",
-                    _ => "un tipo desconocido",
+                    "2" => Some("Rsh"),
+                    "3" => Some("XDMCP"),
+                    "6" => Some("FTP"),
+                    "8" => Some(tr("puerto serie")),
+                    "9" => Some(tr("explorador de archivos")),
+                    "10" => Some(tr("shell local")),
+                    "11" => Some(tr("navegador")),
+                    "12" => Some("Mosh"),
+                    "13" => Some("AWS S3"),
+                    "14" => Some("WSL"),
+                    _ => None,
                 };
-                out.warnings
-                    .push(format!("«{name}» es de tipo {what}: no se ha importado"));
+                out.warnings.push(match what {
+                    Some(what) => {
+                        trf!("«{name}» es de tipo {what}: no se ha importado", name, what)
+                    }
+                    None => trf!(
+                        "«{name}» es de un tipo desconocido: no se ha importado",
+                        name
+                    ),
+                });
                 None
             }
         };
@@ -686,7 +709,10 @@ pub fn mobaxterm(text: &str) -> Imported {
 /// equipo (solo en Windows) y las importa.
 pub fn putty_from_registry() -> Result<Imported> {
     if !cfg!(windows) {
-        bail!("Las sesiones de PuTTY solo se pueden leer directamente en Windows");
+        bail!(
+            "{}",
+            tr("Las sesiones de PuTTY solo se pueden leer directamente en Windows")
+        );
     }
     let file = std::env::temp_dir().join(format!("godremote-putty-{}.reg", Uuid::new_v4()));
     let status = std::process::Command::new("reg")
@@ -696,9 +722,12 @@ pub fn putty_from_registry() -> Result<Imported> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .context("No se pudo ejecutar «reg export»")?;
+        .context(tr("No se pudo ejecutar «reg export»"))?;
     if !status.success() {
-        bail!("No hay sesiones de PuTTY guardadas en este equipo");
+        bail!(
+            "{}",
+            tr("No hay sesiones de PuTTY guardadas en este equipo")
+        );
     }
     let result = import_file(Source::Putty, &file);
     let _ = std::fs::remove_file(&file);

@@ -68,9 +68,13 @@ pub fn local_display() -> Result<LocalDisplay> {
     let value = match std::env::var("DISPLAY") {
         Ok(v) if !v.trim().is_empty() => v,
         _ if cfg!(windows) => "127.0.0.1:0".to_string(),
-        _ => bail!("no hay servidor X local (variable DISPLAY sin definir)"),
+        _ => bail!(
+            "{}",
+            crate::i18n::tr("no hay servidor X local (variable DISPLAY sin definir)")
+        ),
     };
-    parse_display(&value).ok_or_else(|| anyhow!("DISPLAY no válido: {value}"))
+    parse_display(&value)
+        .ok_or_else(|| anyhow!("{}", crate::trf!("DISPLAY no válido: {value}", value)))
 }
 
 fn xauthority_path() -> PathBuf {

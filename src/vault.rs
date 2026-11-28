@@ -16,6 +16,9 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::i18n::tr;
+use crate::trf;
+
 const AAD: &[u8] = b"godremote-vault-v1";
 const KDF_M_COST: u32 = 64 * 1024; // 64 MiB
 const KDF_T_COST: u32 = 3;
@@ -51,12 +54,12 @@ impl Drop for Vault {
 
 fn derive_key(master: &str, salt: &[u8], params: (u32, u32, u32)) -> Result<Zeroizing<[u8; 32]>> {
     let params = Params::new(params.0, params.1, params.2, Some(32))
-        .map_err(|e| anyhow!("parámetros KDF no válidos: {e}"))?;
+        .map_err(|e| anyhow!("{}", trf!("parámetros KDF no válidos: {e}", e)))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = Zeroizing::new([0u8; 32]);
     argon
         .hash_password_into(master.as_bytes(), salt, key.as_mut())
-        .map_err(|e| anyhow!("no se pudo derivar la clave: {e}"))?;
+        .map_err(|e| anyhow!("{}", trf!("no se pudo derivar la clave: {e}", e)))?;
     Ok(key)
 }
 
@@ -68,10 +71,13 @@ impl Vault {
     /// Crea un baúl nuevo (vacío) protegido por `master`.
     pub fn create(path: &Path, master: &str) -> Result<Self> {
         if master.is_empty() {
-            bail!("La contraseña maestra no puede estar vacía");
+            bail!("{}", tr("La contraseña maestra no puede estar vacía"));
         }
         if path.exists() {
-            bail!("Ya existe un baúl en {}", path.display());
+            bail!(
+                "{}",
+                trf!("Ya existe un baúl en {path}", path = path.display())
+            );
         }
         let mut salt = [0u8; 16];
         rand::fill(&mut salt);
@@ -89,24 +95,31 @@ impl Vault {
 
     /// Abre un baúl existente. Falla si la contraseña maestra es incorrecta.
     pub fn unlock(path: &Path, master: &str) -> Result<Self> {
-        let raw = std::fs::read(path).with_context(|| format!("leyendo {}", path.display()))?;
-        let file: VaultFile = serde_json::from_slice(&raw).context("baúl dañado")?;
+        let raw =
+            std::fs::read(path).with_context(|| trf!("leyendo {path}", path = path.display()))?;
+        let file: VaultFile = serde_json::from_slice(&raw).context(tr("baúl dañado"))?;
         if file.version != 1 {
-            bail!("Versión de baúl no soportada: {}", file.version);
+            bail!(
+                "{}",
+                trf!(
+                    "Versión de baúl no soportada: {version}",
+                    version = file.version
+                )
+            );
         }
         let salt: [u8; 16] = B64
             .decode(&file.salt)?
             .try_into()
-            .map_err(|_| anyhow!("baúl dañado (salt)"))?;
+            .map_err(|_| anyhow!("{}", tr("baúl dañado (salt)")))?;
         let nonce: [u8; 24] = B64
             .decode(&file.nonce)?
             .try_into()
-            .map_err(|_| anyhow!("baúl dañado (nonce)"))?;
+            .map_err(|_| anyhow!("{}", tr("baúl dañado (nonce)")))?;
         let ciphertext = B64.decode(&file.ciphertext)?;
         let params = (file.m_cost, file.t_cost, file.p_cost);
         let key = derive_key(master, &salt, params)?;
         let cipher = XChaCha20Poly1305::new_from_slice(key.as_ref())
-            .map_err(|_| anyhow!("clave no válida"))?;
+            .map_err(|_| anyhow!("{}", tr("clave no válida")))?;
         let plain = Zeroizing::new(
             cipher
                 .decrypt(
@@ -116,10 +129,10 @@ impl Vault {
                         aad: AAD,
                     },
                 )
-                .map_err(|_| anyhow!("Contraseña maestra incorrecta"))?,
+                .map_err(|_| anyhow!("{}", tr("Contraseña maestra incorrecta")))?,
         );
         let secrets: BTreeMap<String, String> =
-            serde_json::from_slice(&plain).context("baúl dañado (contenido)")?;
+            serde_json::from_slice(&plain).context(tr("baúl dañado (contenido)"))?;
         Ok(Self {
             path: path.to_path_buf(),
             key,
@@ -134,7 +147,7 @@ impl Vault {
         let mut nonce = [0u8; 24];
         rand::fill(&mut nonce);
         let cipher = XChaCha20Poly1305::new_from_slice(self.key.as_ref())
-            .map_err(|_| anyhow!("clave no válida"))?;
+            .map_err(|_| anyhow!("{}", tr("clave no válida")))?;
         let ciphertext = cipher
             .encrypt(
                 &XNonce::from(nonce),
@@ -143,7 +156,7 @@ impl Vault {
                     aad: AAD,
                 },
             )
-            .map_err(|_| anyhow!("fallo al cifrar el baúl"))?;
+            .map_err(|_| anyhow!("{}", tr("fallo al cifrar el baúl")))?;
         let file = VaultFile {
             version: 1,
             m_cost: self.params.0,
@@ -218,7 +231,7 @@ impl Vault {
     /// Cambia la contraseña maestra (re-cifra con sal nueva).
     pub fn change_master(&mut self, new_master: &str) -> Result<()> {
         if new_master.is_empty() {
-            bail!("La contraseña maestra no puede estar vacía");
+            bail!("{}", tr("La contraseña maestra no puede estar vacía"));
         }
         let mut salt = [0u8; 16];
         rand::fill(&mut salt);

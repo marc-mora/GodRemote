@@ -9,6 +9,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::trf;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustStatus {
     /// La huella coincide con la recordada.
@@ -26,9 +28,9 @@ fn key(host: &str, port: u16) -> String {
 fn load(path: &Path) -> Result<BTreeMap<String, String>> {
     match std::fs::read(path) {
         Ok(data) => serde_json::from_slice(&data)
-            .with_context(|| format!("fichero de confianza dañado: {}", path.display())),
+            .with_context(|| trf!("fichero de confianza dañado: {path}", path = path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
-        Err(e) => Err(e).with_context(|| format!("leyendo {}", path.display())),
+        Err(e) => Err(e).with_context(|| trf!("leyendo {path}", path = path.display())),
     }
 }
 

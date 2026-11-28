@@ -9,7 +9,9 @@ use russh::{ChannelMsg, Disconnect};
 use tokio::sync::{Semaphore, watch};
 use uuid::Uuid;
 
+use crate::i18n::tr;
 use crate::ssh::{Endpoint, Prompter};
+use crate::trf;
 
 /// Salida que se guarda de cada equipo; lo que pase de aquí se descarta.
 pub const MAX_OUTPUT: usize = 512 * 1024;
@@ -158,11 +160,11 @@ impl FleetRun {
         let mut out = String::new();
         for host in &self.hosts {
             let state = match &host.state {
-                HostState::Done(Some(code)) => format!("código {code}"),
-                HostState::Done(None) => "terminado".to_string(),
-                HostState::Failed(error) => format!("error: {error}"),
-                HostState::Cancelled => "cancelado".to_string(),
-                _ => "sin terminar".to_string(),
+                HostState::Done(Some(code)) => trf!("código {code}", code),
+                HostState::Done(None) => tr("terminado").to_string(),
+                HostState::Failed(error) => trf!("error: {error}", error),
+                HostState::Cancelled => tr("cancelado").to_string(),
+                _ => tr("sin terminar").to_string(),
             };
             out.push_str(&format!("===== {} ({state}) =====\n", host.name));
             out.push_str(&host.output);
@@ -170,7 +172,8 @@ impl FleetRun {
                 out.push('\n');
             }
             if host.truncated {
-                out.push_str("[salida recortada]\n");
+                out.push_str(tr("[salida recortada]"));
+                out.push('\n');
             }
             out.push('\n');
         }
@@ -239,9 +242,9 @@ pub fn run(
                     {
                         Ok(Ok(code)) => HostState::Done(code),
                         Ok(Err(e)) => HostState::Failed(format!("{e:#}")),
-                        Err(_) => HostState::Failed(format!(
-                            "no terminó en {} s",
-                            timeout.as_secs().max(1)
+                        Err(_) => HostState::Failed(trf!(
+                            "no terminó en {secs} s",
+                            secs = timeout.as_secs().max(1)
                         )),
                     }
                 };
@@ -271,7 +274,7 @@ async fn run_host(
 ) -> Result<Option<u32>> {
     emit(Event::State(
         index,
-        HostState::Connecting("Conectando…".into()),
+        HostState::Connecting(tr("Conectando…").into()),
     ));
     let status = {
         let emit = emit.clone();
@@ -292,7 +295,7 @@ async fn run_host(
             match channel.wait().await {
                 Some(ChannelMsg::Success) => accepted = true,
                 Some(ChannelMsg::Failure) if !accepted => {
-                    bail!("el servidor no aceptó ejecutar la orden")
+                    bail!("{}", tr("el servidor no aceptó ejecutar la orden"))
                 }
                 Some(ChannelMsg::Data { data }) => emit(Event::Output(index, data.to_vec())),
                 Some(ChannelMsg::ExtendedData { data, .. }) => {

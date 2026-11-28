@@ -15,7 +15,9 @@ use base64::engine::general_purpose::STANDARD as B64;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Vec2};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::tr;
 use crate::theme::Rgb;
+use crate::trf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BackdropKind {
@@ -40,10 +42,10 @@ impl BackdropKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            BackdropKind::None => "Ninguno",
-            BackdropKind::Text => "Texto",
-            BackdropKind::Ascii => "Arte ASCII",
-            BackdropKind::Image => "Imagen",
+            BackdropKind::None => tr("Ninguno"),
+            BackdropKind::Text => tr("Texto"),
+            BackdropKind::Ascii => tr("Arte ASCII"),
+            BackdropKind::Image => tr("Imagen"),
         }
     }
 }
@@ -87,15 +89,15 @@ impl Anchor {
 
     pub fn label(self) -> &'static str {
         match self {
-            Anchor::Center => "Centro",
-            Anchor::Top => "Arriba",
-            Anchor::Bottom => "Abajo",
-            Anchor::Left => "Izquierda",
-            Anchor::Right => "Derecha",
-            Anchor::TopLeft => "Arriba a la izquierda",
-            Anchor::TopRight => "Arriba a la derecha",
-            Anchor::BottomLeft => "Abajo a la izquierda",
-            Anchor::BottomRight => "Abajo a la derecha",
+            Anchor::Center => tr("Centro"),
+            Anchor::Top => tr("Arriba"),
+            Anchor::Bottom => tr("Abajo"),
+            Anchor::Left => tr("Izquierda"),
+            Anchor::Right => tr("Derecha"),
+            Anchor::TopLeft => tr("Arriba a la izquierda"),
+            Anchor::TopRight => tr("Arriba a la derecha"),
+            Anchor::BottomLeft => tr("Abajo a la izquierda"),
+            Anchor::BottomRight => tr("Abajo a la derecha"),
         }
     }
 
@@ -146,11 +148,11 @@ impl Fit {
 
     pub fn label(self) -> &'static str {
         match self {
-            Fit::Original => "Tamaño original",
-            Fit::Contain => "Ajustar (sin recortar)",
-            Fit::Cover => "Rellenar (recortando)",
-            Fit::Stretch => "Estirar",
-            Fit::Tile => "Mosaico (repetir)",
+            Fit::Original => tr("Tamaño original"),
+            Fit::Contain => tr("Ajustar (sin recortar)"),
+            Fit::Cover => tr("Rellenar (recortando)"),
+            Fit::Stretch => tr("Estirar"),
+            Fit::Tile => tr("Mosaico (repetir)"),
         }
     }
 }
@@ -234,7 +236,7 @@ pub struct Picture {
 fn decode_image(bytes: &[u8]) -> Result<image::DynamicImage> {
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
-        .context("No se pudo leer la imagen")?;
+        .context(tr("No se pudo leer la imagen"))?;
     // Una imagen ajena (un tema importado) no debe poder agotar la memoria.
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(16_384);
@@ -242,8 +244,22 @@ fn decode_image(bytes: &[u8]) -> Result<image::DynamicImage> {
     limits.max_alloc = Some(512 * 1024 * 1024);
     reader.limits(limits);
     reader.decode().map_err(|e| {
-        anyhow!("La imagen no se pudo interpretar (se admiten PNG, JPEG, GIF, BMP y WebP): {e}")
+        anyhow!(
+            "{}",
+            trf!(
+                "La imagen no se pudo interpretar (se admiten PNG, JPEG, GIF, BMP y WebP): {e}",
+                e
+            )
+        )
     })
+}
+
+fn could_not_read(path: &Path) -> String {
+    trf!("No se pudo leer {path}", path = path.display())
+}
+
+fn not_a_file(path: &Path) -> String {
+    trf!("{path} no es un fichero", path = path.display())
 }
 
 fn fit_within(img: image::DynamicImage, side: u32) -> (image::DynamicImage, bool) {
@@ -260,20 +276,21 @@ fn fit_within(img: image::DynamicImage, side: u32) -> (image::DynamicImage, bool
 /// Lee un fichero de imagen y lo devuelve en base64, listo para guardarlo en
 /// un tema. Las imágenes muy grandes se reducen para no engordar el fichero.
 pub fn encode_image_file(path: &Path) -> Result<String> {
-    let meta =
-        std::fs::metadata(path).with_context(|| format!("No se pudo leer {}", path.display()))?;
+    let meta = std::fs::metadata(path).with_context(|| could_not_read(path))?;
     if !meta.is_file() {
-        bail!("{} no es un fichero", path.display());
+        bail!("{}", not_a_file(path));
     }
     if meta.len() > MAX_IMAGE_FILE {
         bail!(
-            "{} es demasiado grande (máximo {} MB)",
-            path.display(),
-            MAX_IMAGE_FILE / (1024 * 1024)
+            "{}",
+            trf!(
+                "{path} es demasiado grande (máximo {max} MB)",
+                path = path.display(),
+                max = MAX_IMAGE_FILE / (1024 * 1024)
+            )
         );
     }
-    let original =
-        std::fs::read(path).with_context(|| format!("No se pudo leer {}", path.display()))?;
+    let original = std::fs::read(path).with_context(|| could_not_read(path))?;
     let (img, resized) = fit_within(decode_image(&original)?, MAX_STORED_SIDE);
     let bytes = if resized || original.len() > 1_500_000 {
         let mut out = std::io::Cursor::new(Vec::new());
@@ -285,33 +302,37 @@ pub fn encode_image_file(path: &Path) -> Result<String> {
                 image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85),
             )
         }
-        .context("No se pudo preparar la imagen")?;
+        .context(tr("No se pudo preparar la imagen"))?;
         out.into_inner()
     } else {
         original
     };
     let encoded = B64.encode(bytes);
     if encoded.len() > MAX_IMAGE_BASE64 {
-        bail!("La imagen sigue siendo demasiado grande después de reducirla");
+        bail!(
+            "{}",
+            tr("La imagen sigue siendo demasiado grande después de reducirla")
+        );
     }
     Ok(encoded)
 }
 
 /// Lee un fichero de texto (arte ASCII) para usarlo de fondo.
 pub fn read_text_file(path: &Path) -> Result<String> {
-    let meta =
-        std::fs::metadata(path).with_context(|| format!("No se pudo leer {}", path.display()))?;
+    let meta = std::fs::metadata(path).with_context(|| could_not_read(path))?;
     if !meta.is_file() {
-        bail!("{} no es un fichero", path.display());
+        bail!("{}", not_a_file(path));
     }
     if meta.len() > 4 * MAX_TEXT_CHARS as u64 {
         bail!(
-            "{} es demasiado grande para un fondo de texto",
-            path.display()
+            "{}",
+            trf!(
+                "{path} es demasiado grande para un fondo de texto",
+                path = path.display()
+            )
         );
     }
-    let bytes =
-        std::fs::read(path).with_context(|| format!("No se pudo leer {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| could_not_read(path))?;
     let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
     Ok(clean_text(&text))
 }
@@ -385,7 +406,7 @@ impl Backdrop {
             .decode(compact.trim_end_matches('='))
             .or_else(|_| B64.decode(&compact))
             .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&compact))
-            .map_err(|_| anyhow!("La imagen del fondo no está en base64"))?;
+            .map_err(|_| anyhow!("{}", tr("La imagen del fondo no está en base64")))?;
         let (img, _) = fit_within(decode_image(&bytes)?, MAX_TEXTURE_SIDE);
         let rgba = img.to_rgba8();
         Ok(Picture {

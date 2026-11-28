@@ -13,8 +13,10 @@ use tokio::sync::mpsc;
 use crate::desktop::{
     DesktopBackend, DesktopEvent, DesktopInput, Framebuffer, MouseButton, SharedFrame, char_keysym,
 };
+use crate::i18n::tr;
 use crate::model::Session;
 use crate::ssh::{Endpoint, Prompter, Route};
+use crate::trf;
 
 pub const ENC_RAW: i32 = 0;
 pub const ENC_COPYRECT: i32 = 1;
@@ -117,7 +119,7 @@ pub async fn decode_hextile<R: AsyncRead + Unpin>(
                     let (sx, sy) = ((xy >> 4) as usize, (xy & 15) as usize);
                     let (sw, sh) = ((wh >> 4) as usize + 1, (wh & 15) as usize + 1);
                     if sx + sw > tw || sy + sh > th {
-                        bail!("subrectángulo Hextile fuera de la tesela");
+                        bail!("{}", tr("subrectángulo Hextile fuera de la tesela"));
                     }
                     fill(&mut out, tx + sx, ty + sy, sw, sh, color);
                 }
@@ -131,7 +133,7 @@ pub async fn decode_hextile<R: AsyncRead + Unpin>(
 pub fn decode_zrle(data: &[u8], w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = vec![255u8; w * h * 4];
     let mut pos = 0usize;
-    let truncated = || anyhow!("datos ZRLE truncados");
+    let truncated = || anyhow!("{}", tr("datos ZRLE truncados"));
     let mut take = |n: usize| -> Result<&[u8]> {
         let slice = data.get(pos..pos + n).ok_or_else(truncated)?;
         pos += n;
@@ -175,9 +177,9 @@ pub fn decode_zrle(data: &[u8], w: usize, h: usize) -> Result<Vec<u8>> {
                             let bit = col * bits;
                             let shift = 8 - bits - (bit % 8);
                             let idx = ((packed[bit / 8] >> shift) & ((1 << bits) - 1)) as usize;
-                            let c = palette
-                                .get(idx * 3..idx * 3 + 3)
-                                .ok_or_else(|| anyhow!("índice de paleta ZRLE no válido"))?;
+                            let c = palette.get(idx * 3..idx * 3 + 3).ok_or_else(|| {
+                                anyhow!("{}", tr("índice de paleta ZRLE no válido"))
+                            })?;
                             put(&mut out, row * tw + col, c);
                         }
                     }
@@ -198,7 +200,9 @@ pub fn decode_zrle(data: &[u8], w: usize, h: usize) -> Result<Vec<u8>> {
                             let n = (idx & 127) as usize;
                             let c = palette
                                 .get(n * 3..n * 3 + 3)
-                                .ok_or_else(|| anyhow!("índice de paleta ZRLE no válido"))?
+                                .ok_or_else(|| {
+                                    anyhow!("{}", tr("índice de paleta ZRLE no válido"))
+                                })?
                                 .to_vec();
                             (c, (idx & 128 == 0).then_some(1usize))
                         };
@@ -216,7 +220,7 @@ pub fn decode_zrle(data: &[u8], w: usize, h: usize) -> Result<Vec<u8>> {
                             }
                         };
                         if i + run > total {
-                            bail!("tramo ZRLE más largo que la tesela");
+                            bail!("{}", tr("tramo ZRLE más largo que la tesela"));
                         }
                         for k in i..i + run {
                             put(&mut out, k, &color);
@@ -224,7 +228,7 @@ pub fn decode_zrle(data: &[u8], w: usize, h: usize) -> Result<Vec<u8>> {
                         i += run;
                     }
                 }
-                _ => bail!("subcodificación ZRLE no válida: {sub}"),
+                _ => bail!("{}", trf!("subcodificación ZRLE no válida: {sub}", sub)),
             }
         }
     }
@@ -238,14 +242,14 @@ fn inflate(zlib: &mut flate2::Decompress, input: &[u8], limit: usize) -> Result<
     while consumed < input.len() {
         if out.len() == out.capacity() {
             if out.len() >= limit {
-                bail!("datos ZRLE demasiado grandes");
+                bail!("{}", tr("datos ZRLE demasiado grandes"));
             }
             out.reserve((limit - out.len()).min(1 << 20));
         }
         let before_in = zlib.total_in();
         let before_out = zlib.total_out();
         zlib.decompress_vec(&input[consumed..], &mut out, flate2::FlushDecompress::Sync)
-            .map_err(|e| anyhow!("flujo ZRLE dañado: {e}"))?;
+            .map_err(|e| anyhow!("{}", trf!("flujo ZRLE dañado: {e}", e)))?;
         consumed += (zlib.total_in() - before_in) as usize;
         if zlib.total_in() == before_in && zlib.total_out() == before_out {
             break;
@@ -362,15 +366,19 @@ async fn connect_and_run(
     if !to_save.is_empty() {
         emit(DesktopEvent::SaveSecrets(to_save));
     }
-    emit(DesktopEvent::Status(format!(
-        "Conectando a {host}:{} por VNC (sin cifrar{})…",
-        session.port,
-        if route.is_direct() {
-            ""
-        } else {
-            " tras el último salto"
-        }
-    )));
+    emit(DesktopEvent::Status(if route.is_direct() {
+        trf!(
+            "Conectando a {host}:{port} por VNC (sin cifrar)…",
+            host,
+            port = session.port
+        )
+    } else {
+        trf!(
+            "Conectando a {host}:{port} por VNC (sin cifrar tras el último salto)…",
+            host,
+            port = session.port
+        )
+    }));
     let stream = route.connect(host, session.port).await?;
     let (rd, wr) = tokio::io::split(stream);
     run(
@@ -419,18 +427,18 @@ where
     let mut banner = [0u8; 12];
     tokio::time::timeout(Duration::from_secs(15), rd.read_exact(&mut banner))
         .await
-        .map_err(|_| anyhow!("El servidor no respondió como un servidor VNC"))??;
+        .map_err(|_| anyhow!("{}", tr("El servidor no respondió como un servidor VNC")))??;
     if &banner[..4] != b"RFB " || banner[11] != b'\n' {
-        bail!("El servidor no habla el protocolo VNC (RFB)");
+        bail!("{}", tr("El servidor no habla el protocolo VNC (RFB)"));
     }
     let minor: u32 = std::str::from_utf8(&banner[8..11])
         .ok()
         .and_then(|s| s.parse().ok())
-        .context("Versión RFB no válida")?;
+        .context(tr("Versión RFB no válida"))?;
     let major: u32 = std::str::from_utf8(&banner[4..7])
         .ok()
         .and_then(|s| s.parse().ok())
-        .context("Versión RFB no válida")?;
+        .context(tr("Versión RFB no válida"))?;
     let version = match (major, minor) {
         (3, 0..=6) => 3,
         (3, 7) => 7,
@@ -443,8 +451,11 @@ where
     let security = if version == 3 {
         match rd.read_u32().await? {
             0 => bail!(
-                "El servidor rechazó la conexión: {}",
-                read_reason(&mut rd).await
+                "{}",
+                trf!(
+                    "El servidor rechazó la conexión: {reason}",
+                    reason = read_reason(&mut rd).await
+                )
             ),
             t => t as u8,
         }
@@ -452,8 +463,11 @@ where
         let count = rd.read_u8().await?;
         if count == 0 {
             bail!(
-                "El servidor rechazó la conexión: {}",
-                read_reason(&mut rd).await
+                "{}",
+                trf!(
+                    "El servidor rechazó la conexión: {reason}",
+                    reason = read_reason(&mut rd).await
+                )
             );
         }
         let mut types = vec![0u8; count as usize];
@@ -463,7 +477,13 @@ where
         } else if types.contains(&2) {
             2
         } else {
-            bail!("El servidor exige un tipo de seguridad no soportado ({types:?})");
+            bail!(
+                "{}",
+                trf!(
+                    "El servidor exige un tipo de seguridad no soportado ({types})",
+                    types = format!("{types:?}")
+                )
+            );
         };
         wr.write_all(&[chosen]).await?;
         chosen
@@ -477,10 +497,14 @@ where
             let (password, save) = match password {
                 Some(p) => (p, false),
                 None => {
-                    let msg = format!("Contraseña VNC de {}:{}", session.host.trim(), session.port);
+                    let msg = trf!(
+                        "Contraseña VNC de {host}:{port}",
+                        host = session.host.trim(),
+                        port = session.port
+                    );
                     match prompter.secret("VNC", &msg, false, true).await {
                         Some(a) => (a.value, a.save),
-                        None => bail!("Autenticación cancelada"),
+                        None => bail!("{}", tr("Autenticación cancelada")),
                     }
                 }
             };
@@ -490,7 +514,10 @@ where
                 to_save = Some((session.password_key(), password));
             }
         }
-        other => bail!("Tipo de seguridad VNC no soportado: {other}"),
+        other => bail!(
+            "{}",
+            trf!("Tipo de seguridad VNC no soportado: {other}", other)
+        ),
     }
     // Con «None» el resultado solo se envía a partir de RFB 3.8.
     if security == 2 || version == 8 {
@@ -502,7 +529,13 @@ where
                 } else {
                     String::new()
                 };
-                bail!("Autenticación VNC fallida: contraseña incorrecta {reason}");
+                bail!(
+                    "{}",
+                    trf!(
+                        "Autenticación VNC fallida: contraseña incorrecta {reason}",
+                        reason
+                    )
+                );
             }
         }
     }
@@ -515,12 +548,19 @@ where
     rd.read_exact(&mut pixel_format).await?;
     let name_len = rd.read_u32().await? as usize;
     if name_len > MAX_TEXT {
-        bail!("Nombre de escritorio demasiado largo");
+        bail!("{}", tr("Nombre de escritorio demasiado largo"));
     }
     let mut name = vec![0u8; name_len];
     rd.read_exact(&mut name).await?;
     if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
-        bail!("Tamaño de escritorio no válido: {width}x{height}");
+        bail!(
+            "{}",
+            trf!(
+                "Tamaño de escritorio no válido: {width}x{height}",
+                width,
+                height
+            )
+        );
     }
     frame.lock().unwrap().resize(width, height);
 
@@ -638,14 +678,24 @@ where
                             let encoding = rd.read_i32().await?;
                             if encoding == ENC_DESKTOP_SIZE {
                                 if w == 0 || h == 0 || w > MAX_DIMENSION || h > MAX_DIMENSION {
-                                    bail!("Tamaño de escritorio no válido: {w}x{h}");
+                                    bail!(
+                                        "{}",
+                                        trf!(
+                                            "Tamaño de escritorio no válido: {width}x{height}",
+                                            width = w,
+                                            height = h
+                                        )
+                                    );
                                 }
                                 size = (w, h);
                                 frame.lock().unwrap().resize(w, h);
                                 continue;
                             }
                             if x + w > size.0 || y + h > size.1 {
-                                bail!("El servidor envió un rectángulo fuera de la pantalla");
+                                bail!(
+                                    "{}",
+                                    tr("El servidor envió un rectángulo fuera de la pantalla")
+                                );
                             }
                             let (uw, uh) = (w as usize, h as usize);
                             let counter = match encoding {
@@ -672,7 +722,7 @@ where
                                     let sx = rd.read_u16().await? as u32;
                                     let sy = rd.read_u16().await? as u32;
                                     if sx + w > size.0 || sy + h > size.1 {
-                                        bail!("CopyRect fuera de la pantalla");
+                                        bail!("{}", tr("CopyRect fuera de la pantalla"));
                                     }
                                     frame.lock().unwrap().copy_rect(sx, sy, w, h, x, y);
                                 }
@@ -683,7 +733,7 @@ where
                                 ENC_ZRLE => {
                                     let len = rd.read_u32().await? as usize;
                                     if len > MAX_ZRLE_INPUT {
-                                        bail!("Bloque ZRLE demasiado grande");
+                                        bail!("{}", tr("Bloque ZRLE demasiado grande"));
                                     }
                                     let mut packed = vec![0u8; len];
                                     rd.read_exact(&mut packed).await?;
@@ -693,7 +743,10 @@ where
                                     let data = decode_zrle(&raw, uw, uh)?;
                                     frame.lock().unwrap().blit_rgba(x, y, w, h, &data);
                                 }
-                                other => bail!("Codificación VNC no soportada: {other}"),
+                                other => bail!(
+                                    "{}",
+                                    trf!("Codificación VNC no soportada: {other}", other)
+                                ),
                             }
                         }
                         prompter.wake();
@@ -713,14 +766,14 @@ where
                         rd.read_exact(&mut pad).await?;
                         let len = rd.read_u32().await? as usize;
                         if len > MAX_TEXT {
-                            bail!("Texto de portapapeles demasiado grande");
+                            bail!("{}", tr("Texto de portapapeles demasiado grande"));
                         }
                         let mut text = vec![0u8; len];
                         rd.read_exact(&mut text).await?;
                         let text: String = text.iter().map(|&b| b as char).collect();
                         emit(DesktopEvent::ClipboardText(text));
                     }
-                    other => bail!("Mensaje VNC desconocido: {other}"),
+                    other => bail!("{}", trf!("Mensaje VNC desconocido: {other}", other)),
                 }
             }
         }

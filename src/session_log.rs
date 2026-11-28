@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::trf;
+
 /// Preferencias del registro de sesiones.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -253,7 +255,7 @@ pub(crate) fn create_session_file(
     extension: &str,
 ) -> Result<(PathBuf, std::fs::File)> {
     std::fs::create_dir_all(dir)
-        .with_context(|| format!("No se pudo crear la carpeta {}", dir.display()))?;
+        .with_context(|| trf!("No se pudo crear la carpeta {path}", path = dir.display()))?;
     let now = chrono::Local::now();
     let base = format!("{}_{}", file_stem(session), now.format("%Y%m%d-%H%M%S"));
     let mut last_error = None;
@@ -275,14 +277,19 @@ pub(crate) fn create_session_file(
             Ok(file) => return Ok((path, file)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_error = Some(e),
             Err(e) => {
-                return Err(e).with_context(|| format!("No se pudo crear {}", path.display()));
+                return Err(e)
+                    .with_context(|| trf!("No se pudo crear {path}", path = path.display()));
             }
         }
     }
     Err(anyhow::anyhow!(
-        "No se pudo crear un fichero para «{session}» en {}: {}",
-        dir.display(),
-        last_error.map(|e| e.to_string()).unwrap_or_default()
+        "{}",
+        trf!(
+            "No se pudo crear un fichero para «{session}» en {path}: {error}",
+            session,
+            path = dir.display(),
+            error = last_error.map(|e| e.to_string()).unwrap_or_default()
+        )
     ))
 }
 
@@ -322,9 +329,10 @@ impl SessionLog {
         if self.error.is_none()
             && let Err(e) = writeln!(self.file, "{line}")
         {
-            self.error = Some(format!(
-                "No se pudo escribir en {}: {e}",
-                self.path.display()
+            self.error = Some(trf!(
+                "No se pudo escribir en {path}: {e}",
+                path = self.path.display(),
+                e
             ));
         }
     }
@@ -342,9 +350,10 @@ impl SessionLog {
         if self.error.is_none()
             && let Err(e) = self.file.flush()
         {
-            self.error = Some(format!(
-                "No se pudo escribir en {}: {e}",
-                self.path.display()
+            self.error = Some(trf!(
+                "No se pudo escribir en {path}: {e}",
+                path = self.path.display(),
+                e
             ));
         }
     }
