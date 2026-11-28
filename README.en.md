@@ -1291,9 +1291,12 @@ recovered; the rest of the configuration remains intact.
   in English) are shown as they are in both languages. The screenshots in
   this document are in Spanish.
 - **Theme following the system**: checked by hand only on Linux, with the
-  GTK/GNOME desktop portal; on Windows and macOS reading the mode is
-  implemented and compiles, but has not been seen working. On Linux it is
-  queried with the desktop's own tools (`gdbus`, `dbus-send` or `busctl`,
+  GTK/GNOME desktop portal. On Windows and macOS it has been seen on the
+  automated test machines, which are in light mode: the application starts
+  there with the light theme (without detection it would stay dark). Dark
+  mode and switching while running have not been seen on those systems. On
+  Linux it is queried with the desktop's own tools (`gdbus`, `dbus-send` or
+  `busctl`,
   and `gsettings`): without any of them, or without a desktop session, it is
   not detected and the fixed theme stays. It has not been tested with KDE
   Plasma.

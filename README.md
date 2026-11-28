@@ -1285,11 +1285,14 @@ recuperar; el resto de la configuración sigue intacta.
   se enseñan tal cual en los dos idiomas. Las capturas de este documento
   están en español.
 - **Tema según el sistema**: comprobado a mano solo en Linux, con el portal
-  de escritorio de GTK/GNOME; en Windows y macOS la lectura del modo está
-  hecha y compila, pero no se ha visto funcionar. En Linux se pregunta con
-  las herramientas del propio escritorio (`gdbus`, `dbus-send` o `busctl`, y
-  `gsettings`): sin ninguna de ellas, o sin sesión de escritorio, no se
-  detecta y queda el tema fijo. Con KDE Plasma no se ha probado.
+  de escritorio de GTK/GNOME. En Windows y macOS se ha visto en las máquinas
+  de las pruebas automáticas, que están en modo claro: la aplicación arranca
+  allí con el tema claro (sin detección quedaría el oscuro). El modo oscuro
+  y el cambio en marcha no se han visto en esos sistemas. En Linux se
+  pregunta con las herramientas del propio escritorio (`gdbus`, `dbus-send`
+  o `busctl`, y `gsettings`): sin ninguna de ellas, o sin sesión de
+  escritorio, no se detecta y queda el tema fijo. Con KDE Plasma no se ha
+  probado.
 - A mano solo se ha usado en Linux (X11). En Windows y macOS se compila,
   pasa sus pruebas automáticas en cada cambio (entre ellas la del terminal
   local) y se comprueba que la aplicación abre y pinta su ventana —en
