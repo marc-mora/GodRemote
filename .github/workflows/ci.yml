@@ -38,7 +38,10 @@ jobs:
   # servidores reales (sshd, telnetd, x11vnc, FreeRDP…) y permisos de root.
   linux:
     name: Linux (con servidores reales)
-    runs-on: ubuntu-latest
+    # Versión fija: las pruebas gráficas manejan clientes de verdad (zenity,
+    # las demos de GTK y Qt…) por la posición de sus botones, y están
+    # escritas contra las versiones de esta distribución.
+    runs-on: ubuntu-24.04
     # Una prueba colgada no debe tener la cola parada durante horas.
     timeout-minutes: 60
     steps:
@@ -55,7 +58,7 @@ jobs:
             ~/.cargo/git/db
             target
             reforzado/target
-          key: linux-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'reforzado/Cargo.lock') }}
+          key: linux-24.04-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock', 'reforzado/Cargo.lock') }}
           restore-keys: linux-${{ env.RUST_VERSION }}-
       - name: Servidores y clientes de prueba
         run: |
