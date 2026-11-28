@@ -109,6 +109,20 @@ fn certificate_authentication() {
         ),
     );
 
+    // Si algo falla, lo que diga el servidor ayuda a entender por qué.
+    let server_log = log.clone();
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+        if let Ok(text) = std::fs::read_to_string(&server_log) {
+            let lines: Vec<&str> = text.lines().collect();
+            eprintln!("--- final del registro de sshd ---");
+            for line in &lines[lines.len().saturating_sub(40)..] {
+                eprintln!("{line}");
+            }
+        }
+    }));
+
     let rt = tokio::runtime::Runtime::new().unwrap();
     let session = |key: &Path| Session {
         name: "pruebas".into(),

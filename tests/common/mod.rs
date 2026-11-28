@@ -133,7 +133,8 @@ pub fn start_sshd(
         "Port {port}\nListenAddress 127.0.0.1\nHostKey {host}\nPidFile {pid}\n\
          AuthorizedKeysFile {auth}\nStrictModes no\nPermitRootLogin prohibit-password\n\
          PubkeyAuthentication yes\nPasswordAuthentication no\n\
-         KbdInteractiveAuthentication no\nUsePAM no\n{extra_config}\n",
+         KbdInteractiveAuthentication no\nUsePAM no\n\
+         MaxStartups 200:30:400\nMaxAuthTries 20\nMaxSessions 100\n{extra_config}\n",
         host = dir.join("host_key").display(),
         pid = dir.join("sshd.pid").display(),
         auth = authorized_keys.display(),

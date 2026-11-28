@@ -39,6 +39,8 @@ jobs:
   linux:
     name: Linux (con servidores reales)
     runs-on: ubuntu-latest
+    # Una prueba colgada no debe tener la cola parada durante horas.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Rust
@@ -107,6 +109,7 @@ jobs:
   escritorio:
     name: ${{ matrix.nombre }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -163,6 +166,7 @@ jobs:
       || (github.event_name == 'push' && contains(github.event.head_commit.message, '[ejecutables]'))
     needs: [linux, escritorio]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
